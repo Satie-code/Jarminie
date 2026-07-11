@@ -1,0 +1,36 @@
+# JARMINEI default configuration — checked into git, never edited by the app itself.
+# Machine-specific overrides go in config/local.yaml (gitignored) instead;
+# see docs/sprint_book/sprint_1_2.md for the override precedence.
+
+voice:
+  wake_phrases:
+    - "hey jarminei"
+  jarvis_voice_id: "jarvis_default"
+  minie_voice_id: "minie_default"
+
+resources:
+  cpu_warning_percent: 70.0
+  cpu_critical_percent: 90.0
+  ram_warning_percent: 75.0
+  ram_critical_percent: 90.0
+  battery_warning_percent: 20.0
+  battery_critical_percent: 10.0
+  disk_warning_percent: 85.0
+  disk_critical_percent: 95.0
+
+database:
+  sqlite_path: "database/jarminei.db"
+  chroma_path: "database/chroma"
+
+models:
+  ollama_model: "gemma3"
+  whisper_model: "base"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  max_bytes: 5000000
+  backup_count: 3
+
+ui:
+  status_refresh_interval_ms: 3000

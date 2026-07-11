@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Runtime data (structure kept via .gitkeep, contents ignored)
+logs/*
+!logs/.gitkeep
+*.db
+*.sqlite3
+chroma_data/
+
+# Local configuration / secrets
+.env
+config/local.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Claude Code assistant memory sync artifacts — not project source.
+# These files are mirrored here by the Claude Code memory system from
+# .claude/projects/.../memory/ and should never be committed to the product repo.
+MEMORY.md
+project_jarminei_*.md
+feedback_jarminei_*.md

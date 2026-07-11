@@ -1,82 +1,105 @@
 # Sprint 1.7 — Status Panel
 
 ## Sprint ID
+
 1.7
 
 ## Sprint Name
+
 Status Panel
 
 ## Purpose
+
 Surface Core Manager's module registry and the Health Monitor's resource readings inside the main window, giving the user (and the developer) live visibility into what JARMINEI is doing — a concrete instance of the Explainability Rule applied to system state, not just individual actions.
 
 ## Objectives
+
 - A widget showing each registered module's name and state (running / stopped / restarting).
 - A live CPU/RAM/battery/disk readout sourced from `ResourceMonitor`.
 - Updates on a timer without polling faster than useful (Part 3's performance guidance).
 
 ## Engineering Rationale
+
 This is the first sprint where the UI layer reads from more than one subsystem (`CoreManager`'s registry and `ResourceMonitor`), so it's a good first test of whether the Sprint 1.5/1.6 DI boundaries hold up in practice. It's ordered before Settings/Debug Console because it's pure read-only display — lower risk than Settings' read/write path.
 
 ## Prerequisites
+
 Sprints 1.6 and 1.4 complete.
 
 ## Dependencies
+
 1.6, 1.4
 
 ## Files to Create
+
 - `ui/status_panel.py` — `StatusPanel(QWidget)`.
 - `tests/unit/ui/test_status_panel.py`
 
 ## Files to Modify
+
 - `ui/main_window.py` — embed `StatusPanel` as (part of) the central widget.
 - `core/manager.py` — add a read-only `CoreManager.module_states() -> dict[str, str]` accessor if not already sufficient from Sprint 1.5 (confirm during implementation; only modify if the existing `ModuleRegistry` API doesn't already expose this cleanly).
 
 ## Expected Classes
+
 - `StatusPanel(QWidget)` — constructor takes `CoreManager` and `ResourceMonitor`; internal `QTimer` triggers periodic refresh.
 
 ## Expected Interfaces
+
 None new.
 
 ## Expected Functions
+
 - `StatusPanel.refresh() -> None` — pulls current module states + a fresh `ResourceMonitor.sample()`, updates labels.
 
 ## Implementation Tasks
+
 1. Implement `StatusPanel` layout: a module list + a resource readout row.
 2. Wire a `QTimer` (default interval from `AppConfig`, e.g. every 2–5 seconds — configurable, not hardcoded, per the Configuration Management rule) calling `refresh()`.
 3. Embed in `MainWindow`.
 4. Tests: `refresh()` correctly updates displayed values given mock `CoreManager`/`ResourceMonitor` data; timer interval is read from config, not a literal.
 
 ## Architecture Notes
+
 `StatusPanel` only reads — it never calls `restart_module()` or otherwise mutates state (that stays a Core Manager internal decision for now; a manual "restart" button is a plausible future sprint, not this one, to keep this sprint's scope to display only).
 
 ## Potential Risks
+
 - **Timer interval too aggressive** could itself become a resource drain, ironically undermining Resource Protection — default to a conservative interval (few seconds) and make it configurable so it can be tuned without a code change.
 
 ## Acceptance Criteria
+
 - Status Panel visibly updates module states and resource readings on the configured interval.
 - No polling faster than the configured interval (verified by counting `refresh()` calls in a timed test).
 
 ## Testing Checklist
+
 - [ ] Unit: `refresh()` updates panel state from mock data.
 - [ ] Unit: timer interval matches `AppConfig` value, not hardcoded.
 - [ ] Manual: visually confirm live updates.
 
 ## Documentation Checklist
+
 - [ ] `ui/status_panel.py` docstring.
 
 ## Definition of Done
+
 Per [docs/CODING_STANDARDS.md](../CODING_STANDARDS.md).
 
 ## Estimated Complexity
+
 Low.
 
 ## Estimated Development Time
+
 0.5 day.
 
 ## Next Sprint
+
 1.8 — Settings Window.
 
 ## Future Considerations
+
 - Manual module restart/stop controls from the panel — flagged as a future UX improvement, not part of the official v1 roadmap unless added to the spec.
 
 ---

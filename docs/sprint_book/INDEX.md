@@ -10,7 +10,16 @@ Each sprint file lives at `docs/sprint_book/sprint_<level>_<index>.md`.
 
 ## Detail Status
 
-Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified now** (all 16+ template sections). **Levels 2–6 are indexed here at roadmap granularity only** — full per-sprint detail will be written when each level becomes current, so technical design (classes/interfaces) reflects what Level 1–N actually taught us rather than upfront speculation. Expand any sprint early on request.
+Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Levels 3–6 remain at roadmap granularity only** — full per-sprint detail will be written when each level becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+
+### Level 2 breakdown changes (2026-07-16)
+
+Two deliberate deviations from the roadmap recorded below prior to this date — both explained in full in the affected sprint files, not just here:
+
+1. **2.1 and 2.2 swapped** — Microphone Manager now precedes Wake Word Detector (previously the reverse), so Wake Word Detector receives a `MicrophoneManager` via Dependency Injection instead of building its own throwaway audio stream. See [sprint_2_1.md](sprint_2_1.md)'s Engineering Rationale.
+2. **Three sprints added (2.12–2.14)**: Communication Pipeline Integration, Error Handling & Recovery Hardening, and Integration Testing & Level Freeze. Level 2's real-time, hardware-and-ML-dependent integration surface is much larger than Level 1's, so wiring, resilience hardening, and level-closing acceptance are each given their own planned sprint rather than folded into the last component sprint the way Level 1 did retroactively in `sprint_1_9.md`. See each sprint file's Engineering Rationale.
+
+Every other component identity, name, and dependency below is unchanged from the original roadmap-granularity plan.
 
 ---
 
@@ -30,21 +39,26 @@ Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully speci
 
 See the Level 1 Acceptance Pass in [sprint_1_9.md](sprint_1_9.md) and [changelog/0.1.0.md](../changelog/0.1.0.md).
 
-## LEVEL 2 — Communication → Release v0.2
+## LEVEL 2 — Communication → Release v0.2 — Sprint Book fully specified (2026-07-16)
 
-| Sprint | Name                                      | Phase | Depends On                          | Complexity  |
-| ------ | ----------------------------------------- | ----- | ----------------------------------- | ----------- |
-| 2.1    | Wake Word Detector                        | 2.1   | 1.5, 1.2                            | Medium      |
-| 2.2    | Microphone Manager                        | 2.1   | 2.1                                 | Medium      |
-| 2.3    | Speech-to-Text Engine (Whisper)           | 2.1   | 2.2                                 | Medium–High |
-| 2.4    | Text-to-Speech Engine (Coqui, dual voice) | 2.1   | 1.2                                 | Medium–High |
-| 2.5    | Voice Session Manager & Timeout           | 2.1   | 2.3, 2.4                            | Medium      |
-| 2.6    | Quiet Mode Controller                     | 2.1   | 2.1, 2.5                            | Medium      |
-| 2.7    | Conversation Session Store                | 2.2   | 2.5, database (3.1) stub            | Medium      |
-| 2.8    | Context Manager                           | 2.2   | 2.7                                 | Medium      |
-| 2.9    | Persona Base & Jarvis Persona             | 2.3   | 2.4                                 | Medium      |
-| 2.10   | Minie Persona                             | 2.3   | 2.9                                 | Low–Medium  |
-| 2.11   | Persona Switching & Explicit Selection    | 2.3   | 2.9, 2.10, authority (3.10) partial | Medium–High |
+| Sprint | Name                                       | Phase       | Depends On                | Complexity  | Detail                             |
+| ------ | ------------------------------------------ | ----------- | ------------------------- | ----------- | ---------------------------------- |
+| 2.1    | Microphone Manager                         | 2.1         | 1.5, 1.2                  | Medium      | [sprint_2_1.md](sprint_2_1.md)     |
+| 2.2    | Wake Word Detector                         | 2.1         | 2.1                       | Medium      | [sprint_2_2.md](sprint_2_2.md)     |
+| 2.3    | Speech-to-Text Engine (Whisper)            | 2.1         | 2.1                       | Medium–High | [sprint_2_3.md](sprint_2_3.md)     |
+| 2.4    | Text-to-Speech Engine (Coqui, dual voice)  | 2.1         | 1.2                       | Medium–High | [sprint_2_4.md](sprint_2_4.md)     |
+| 2.5    | Voice Session Manager & Timeout            | 2.1         | 2.3, 2.4, 2.1             | Medium      | [sprint_2_5.md](sprint_2_5.md)     |
+| 2.6    | Quiet Mode Controller                      | 2.1         | 2.2, 2.5                  | Medium      | [sprint_2_6.md](sprint_2_6.md)     |
+| 2.7    | Conversation Session Store                 | 2.2         | 2.5, database (3.1) stub  | Medium      | [sprint_2_7.md](sprint_2_7.md)     |
+| 2.8    | Context Manager                            | 2.2         | 2.7                       | Low–Medium  | [sprint_2_8.md](sprint_2_8.md)     |
+| 2.9    | Persona Base & Jarvis Persona              | 2.3         | 2.4                       | Low–Medium  | [sprint_2_9.md](sprint_2_9.md)     |
+| 2.10   | Minie Persona                              | 2.3         | 2.9                       | Low         | [sprint_2_10.md](sprint_2_10.md)   |
+| 2.11   | Persona Switching & Explicit Selection     | 2.3         | 2.9, 2.10                 | Medium–High | [sprint_2_11.md](sprint_2_11.md)   |
+| 2.12   | Communication Pipeline Integration         | integration | 2.1–2.11                  | Medium–High | [sprint_2_12.md](sprint_2_12.md)   |
+| 2.13   | Error Handling & Recovery Hardening        | reliability | 2.12                      | Medium      | [sprint_2_13.md](sprint_2_13.md)   |
+| 2.14   | Integration Testing & Level Freeze         | level gate  | 2.13                      | Medium–High | [sprint_2_14.md](sprint_2_14.md)   |
+
+Note: `2.11`'s dependency on Level 3's Authority System (originally noted here as "authority (3.10) partial") is now handled differently — see [sprint_2_11.md](sprint_2_11.md)'s Engineering Rationale: the `CRITICAL_EMERGENCY` priority slot is reserved in the `SwitchReason` enum but deliberately left unwired until Sprint 3.10 exists, rather than treating 3.10 as a partial dependency of this Level.
 
 ## LEVEL 3 — Intelligence → Release v0.3
 

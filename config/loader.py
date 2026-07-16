@@ -68,7 +68,19 @@ class YamlFileConfigSource:
                 data = yaml.safe_load(handle)
         except yaml.YAMLError as exc:
             raise ConfigError(f"Malformed YAML in {self._path}: {exc}") from exc
-        return data or {}
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            # Valid YAML syntax but the wrong shape (e.g. a list or a bare
+            # scalar as the whole file) — without this check, the error
+            # only surfaces several calls later as a confusing AttributeError
+            # or ValueError from _deep_merge()/_dict_to_config(), not here
+            # where the actual problem is.
+            raise ConfigError(
+                f"{self._path} must contain a YAML mapping at the top level, "
+                f"got {type(data).__name__}"
+            )
+        return data
 
 
 class ConfigLoader:

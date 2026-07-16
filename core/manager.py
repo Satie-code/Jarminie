@@ -70,13 +70,22 @@ class CoreManager:
         typically from check_health() reporting failure, that a module
         needs restarting — restarting is a separate decision from
         detecting the failure (Single Responsibility)."""
+        if not self._registry.has(name):
+            logger.error("restart_module called for unregistered module: %s", name)
+            return False
         logger.warning("Restarting module: %s", name)
         self._stop_module(name)
         return self._start_module(name)
 
     def check_health(self, name: str) -> bool:
         """Safely check one module's health; an exception counts as unhealthy
-        rather than propagating (Fail Gracefully Rule)."""
+        rather than propagating (Fail Gracefully Rule). An unregistered
+        name is treated the same way — a caller passing a stale/wrong name
+        must never crash Core, it should just learn the module is
+        unhealthy (in this case, nonexistent)."""
+        if not self._registry.has(name):
+            logger.error("check_health called for unregistered module: %s", name)
+            return False
         module = self._registry.get(name)
         try:
             return module.health_check()

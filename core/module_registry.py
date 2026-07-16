@@ -56,6 +56,9 @@ class ModuleRegistry:
     def get(self, name: str) -> ManagedModule:
         return self._entries[name].module
 
+    def has(self, name: str) -> bool:
+        return name in self._entries
+
     def names(self) -> list[str]:
         return list(self._entries.keys())
 

@@ -12,7 +12,10 @@ See docs/sprint_book/sprint_1_7.md.
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from core.logging_setup import get_logger
 from core.manager import CoreManager
+
+logger = get_logger(__name__)
 
 
 class StatusPanel(QWidget):
@@ -43,15 +46,27 @@ class StatusPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Pull current module states and a fresh resource sample, update labels."""
-        states = self._core_manager.module_states()
+        """Pull current module states and a fresh resource sample, update labels.
+
+        Runs on a QTimer callback with no caller to propagate an exception
+        to — a single failed sample (e.g. a transient psutil error) must
+        not break the recurring refresh or crash the app; it's logged and
+        the display simply keeps its last-known-good values until the
+        next tick (Fail Gracefully Rule).
+        """
+        try:
+            states = self._core_manager.module_states()
+            snapshot = self._core_manager.check_resources()
+        except Exception:
+            logger.exception("Status Panel refresh failed; keeping last displayed values.")
+            return
+
         if states:
             text = "\n".join(f"{name}: {state}" for name, state in states.items())
         else:
             text = "No modules registered."
         self._module_label.setText(text)
 
-        snapshot = self._core_manager.check_resources()
         battery_text = (
             f"{snapshot.battery_percent:.0f}%" if snapshot.battery_percent is not None else "n/a"
         )

@@ -218,7 +218,17 @@ class SettingsWindow(QDialog):
             logger.warning("Settings validation failed: %s", exc)
             return
 
+        try:
+            self._config_loader.save(candidate)
+        except OSError as exc:
+            # A validated config can still fail to save (permissions, full
+            # disk, missing directory) — that must show the same kind of
+            # inline error as a validation failure, not crash the dialog.
+            self._error_label.setText(f"Could not save settings: {exc}")
+            self._error_label.show()
+            logger.exception("Failed to save settings")
+            return
+
         self._error_label.hide()
-        self._config_loader.save(candidate)
         logger.info("Settings saved.")
         self.accept()

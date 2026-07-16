@@ -121,6 +121,18 @@ def test_check_health_returns_false_when_health_check_raises():
     assert manager.check_health("broken") is False
 
 
+def test_check_health_of_unregistered_module_returns_false_not_keyerror():
+    manager = _manager()
+
+    assert manager.check_health("does-not-exist") is False
+
+
+def test_restart_module_of_unregistered_module_returns_false_not_keyerror():
+    manager = _manager()
+
+    assert manager.restart_module("does-not-exist") is False
+
+
 def test_check_resources_delegates_to_resource_monitor():
     resource_monitor = MagicMock()
     manager = CoreManager(

@@ -76,6 +76,24 @@ def test_on_save_with_invalid_data_does_not_call_save(qtbot):
     assert "cpu_warning_percent" in dialog._error_label.text()
 
 
+def test_on_save_shows_error_and_does_not_crash_when_save_raises_oserror(qtbot):
+    """Regression test: a validated config can still fail to persist
+    (permissions, full disk, missing directory) — on_save() must show an
+    inline error like a validation failure, not let the OSError propagate
+    and crash the dialog."""
+    config = AppConfig()
+    loader = MagicMock()
+    loader.save.side_effect = PermissionError("Access is denied")
+    dialog = SettingsWindow(config, loader)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.on_save()  # must not raise
+
+    assert dialog._error_label.isVisible()
+    assert "Access is denied" in dialog._error_label.text()
+
+
 def test_valid_edit_persists_through_real_config_loader(qtbot, tmp_path):
     defaults_path = tmp_path / "defaults.yaml"
     defaults_path.write_text(yaml.safe_dump({"voice": {"wake_phrases": ["hey jarminei"]}}))

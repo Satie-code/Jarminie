@@ -7,6 +7,7 @@ real integration bugs slipped through.
 """
 
 import logging
+import threading
 
 import pytest
 
@@ -119,6 +120,29 @@ def test_handler_attached_on_open_and_detached_on_close(qtbot):
     console.close()
 
     assert handler not in logging.getLogger().handlers
+
+
+def test_log_from_background_thread_reaches_console_safely(qtbot):
+    """Verifies the thread-safety risk flagged in sprint_1_9.md's Potential
+    Risks is actually handled, not just designed for: a log call from a
+    non-GUI thread must reach the console via Qt's queued signal/slot
+    marshaling. qtbot.waitUntil pumps the event loop, which is required
+    for a cross-thread queued connection to actually be delivered — a
+    same-thread test (all the others in this file) can't exercise this
+    path at all."""
+    console = DebugConsole()
+    qtbot.addWidget(console)
+    logger = logging.getLogger("test.debug_console.thread")
+
+    thread = threading.Thread(target=lambda: logger.info("message from background thread"))
+    thread.start()
+    thread.join()
+
+    qtbot.waitUntil(
+        lambda: "message from background thread" in console._text_view.toPlainText(),
+        timeout=2000,
+    )
+    console.close()
 
 
 def test_reopening_does_not_duplicate_or_drop_messages(qtbot):

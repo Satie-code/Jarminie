@@ -48,6 +48,17 @@ def test_load_malformed_yaml_raises(tmp_path):
         loader.load()
 
 
+def test_load_non_mapping_yaml_raises_clear_error(tmp_path):
+    """Regression test: valid YAML syntax but the wrong shape (a list
+    instead of a mapping) previously crashed several calls downstream with
+    a confusing AttributeError/ValueError instead of a clear ConfigError."""
+    not_a_mapping = tmp_path / "list.yaml"
+    not_a_mapping.write_text(yaml.safe_dump(["voice", "resources"]))
+    loader = ConfigLoader(defaults_path=not_a_mapping, local_path=tmp_path / "missing.yaml", env={})
+    with pytest.raises(ConfigError, match="mapping"):
+        loader.load()
+
+
 def test_load_invalid_field_raises(tmp_path):
     invalid = tmp_path / "invalid.yaml"
     invalid.write_text(yaml.safe_dump({"resources": {"cpu_warning_percent": 500.0}}))

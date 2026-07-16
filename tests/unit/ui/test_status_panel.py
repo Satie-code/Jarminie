@@ -93,3 +93,32 @@ def test_timer_does_not_poll_faster_than_configured_interval(qtbot, resource_sna
 
     new_calls = manager.check_resources.call_count - calls_before
     assert 1 <= new_calls <= 10
+
+
+def test_refresh_survives_a_failed_sample_without_crashing(qtbot):
+    """Regression test: refresh() runs on a QTimer callback with no caller
+    to propagate an exception to — a failed sample must not crash
+    construction (which calls refresh() once) or any later timer tick."""
+    manager = MagicMock()
+    manager.module_states.return_value = {"voice": "running"}
+    manager.check_resources.side_effect = RuntimeError("psutil exploded")
+    manager.ui_config.return_value = UIConfig()
+
+    panel = StatusPanel(manager)  # construction itself calls refresh() once
+    qtbot.addWidget(panel)
+
+    panel.refresh()  # must not raise on a later call either
+
+
+def test_refresh_keeps_last_known_good_display_after_a_later_failure(
+    qtbot, resource_snapshot_factory
+):
+    manager = _core_manager(resource_snapshot_factory, module_states={"voice": "running"})
+    panel = StatusPanel(manager)
+    qtbot.addWidget(panel)
+    good_text = panel._resource_label.text()
+
+    manager.check_resources.side_effect = RuntimeError("psutil exploded")
+    panel.refresh()
+
+    assert panel._resource_label.text() == good_text

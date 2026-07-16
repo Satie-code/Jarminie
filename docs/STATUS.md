@@ -10,7 +10,7 @@ Tracks progress against the roadmap in [04_Master_Implementation_Plan.md](04_Mas
 | 1.2 Core Framework | Complete | All four sprints done (1.2 Configuration Manager, 1.3 Logging System, 1.4 Health Monitor, 1.5 Core Manager) — see [sprint_book/INDEX.md](sprint_book/INDEX.md). `main.py` runs end-to-end: config loads, logging initializes, JARMINEI starts up and shuts down cleanly. |
 | 1.3 Desktop Interface | Complete | All four sprints done (Desktop Shell, Status Panel, Settings Window, Debug Console). Settings persist across a restart and logs stream live in-app, both verified end-to-end. |
 
-**Level 1 acceptance pass recorded in [sprint_book/sprint_1_9.md](sprint_book/sprint_1_9.md). Released as [0.1.0](changelog/0.1.0.md).** 88/88 tests passing, `ruff check .` clean.
+**Level 1 acceptance pass + post-release review recorded in [sprint_book/sprint_1_9.md](sprint_book/sprint_1_9.md). Released as [0.1.0](changelog/0.1.0.md).** 95/95 tests passing, `ruff check .` clean.
 
 ## Level 2 — Communication (target: v0.2)
 

@@ -186,3 +186,30 @@ Per this sprint's own Future Considerations, before tagging `0.1.0`:
 Full suite: 88/88 passing, `ruff check .` clean. Three real event-loop smoke scripts (window open/close, settings persistence, debug console) all pass. `main.py` is a real, working PySide6 desktop application: it loads config, initializes logging, starts Core, shows a window with live module/resource status, lets the user edit and persist settings, and lets the user watch live logs — then shuts down cleanly on close.
 
 **Level 1 — Foundation is complete. Release v0.1.**
+
+---
+
+## Post-Release Review (2026-07-16)
+
+Explicit request: re-review every Level 1 source file (Sprints 1.1–1.9) against its sprint spec before v0.1.0 is committed, and resolve any bugs or missing elements found. Full read-through of `config/`, `core/`, `ui/`, `main.py`, every test file, and the dependency/lint config files. Baseline before starting: 88/88 tests passing, `ruff check .` clean — no regressions existed going in.
+
+### Findings and Fixes
+
+1. **`config/loader.py` — `YamlFileConfigSource.read()` didn't validate the loaded YAML was a mapping.** Syntactically valid YAML with the wrong shape at the top level (a list, a bare scalar) passed silently through and crashed several calls later inside `_deep_merge()`/`_dict_to_config()` with a confusing `AttributeError` or `ValueError`, not a clear `ConfigError` at the point the actual problem exists. Fixed: raise `ConfigError` immediately if the parsed data isn't `None` or a `dict`. Regression test: `test_load_non_mapping_yaml_raises_clear_error`.
+2. **`core/manager.py` — `check_health()` and `restart_module()` raised an uncaught `KeyError` for an unregistered module name**, rather than the graceful, logged failure the Fail Gracefully Rule calls for elsewhere in this same class. Not reachable by any current code path (no `unregister()` exists yet), but a real gap once Level 2+ calls these with dynamically-computed names. Fixed: added `ModuleRegistry.has()`, both methods now check it first and return `False` with a logged error. Regression tests: `test_check_health_of_unregistered_module_returns_false_not_keyerror`, `test_restart_module_of_unregistered_module_returns_false_not_keyerror`.
+3. **`ui/settings_window.py` — `on_save()` didn't catch a failed `ConfigLoader.save()` call.** A validated config can still fail to persist (permissions, full disk, a deleted directory) — this would have raised an uncaught `OSError` out of a Qt slot instead of showing the same kind of inline error a validation failure gets. Fixed: wrapped the save call, showing `Could not save settings: {error}` on failure. Regression test: `test_on_save_shows_error_and_does_not_crash_when_save_raises_oserror`.
+4. **`ui/status_panel.py` — `refresh()` didn't catch a failed sample.** Runs on a recurring `QTimer` callback with no caller to propagate an exception to; a single transient failure (e.g. a `psutil` hiccup) would raise inside the Qt event loop instead of being logged, with the display simply keeping its last-known-good values until the next tick. Fixed: wrapped the sampling calls, log-and-return on failure. Regression tests: `test_refresh_survives_a_failed_sample_without_crashing`, `test_refresh_keeps_last_known_good_display_after_a_later_failure`.
+5. **`QtLogHandler`'s cross-thread safety (flagged as a Potential Risk back in this sprint's own spec) was never actually verified** — every existing test logged from the same thread as the Qt event loop. Added `test_log_from_background_thread_reaches_console_safely`, which logs from a real background `threading.Thread` and uses `qtbot.waitUntil` to confirm the message is delivered via Qt's queued cross-thread signal marshaling, not just designed for it.
+
+### Not Changed (Considered, Rejected)
+
+- Redesigning `ResourceSnapshot` to make every field `Optional` so a partially-failed `psutil` sample could still return partial data — judged disproportionate to the actual risk (psutil calls are reliable in normal operation) and a bigger contract change than this review's scope warranted; the UI-layer fix (#4 above) already contains the blast radius without touching `ResourceMonitor`'s public shape.
+- `AppConfig` schema/validation logic itself — re-checked all boundary conditions (equal warning/critical thresholds, inverted battery direction, path emptiness) against their tests; no further gaps found.
+
+### Verification
+
+95/95 tests passing (88 + 7 new), `ruff check .` clean. All three real event-loop smoke scripts (`smoke_test_sprint_1_6.py`, `_1_8.py`, `_1_9.py`) re-run and still pass with no regressions. `config/local.yaml` confirmed absent from the real project directory afterward.
+
+### Review Documentation Updated
+
+This section. [changelog/0.1.0.md](../changelog/0.1.0.md) — Post-Release Review section added, test count updated to 95.

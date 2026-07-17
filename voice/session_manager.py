@@ -167,13 +167,24 @@ class VoiceSessionManager:
 
     def begin_session(self) -> VoiceSession:
         """Begin a new session: switch the mic to active capture and
-        start listening for the first utterance."""
+        start listening for the first utterance.
+
+        Post-release fix (found via real end-to-end testing after Level 2
+        shipped): flush_stale_audio() immediately after the mode switch
+        discards whatever's already buffered — typically the just-spoken
+        wake phrase itself, since wake-word detection has inherent lag
+        (the model needs a window of audio context before it can
+        recognize a phrase) and the underlying stream never actually
+        pauses (see MicrophoneManager's own docstring). Without this, the
+        wake phrase's own audio was the first thing Whisper transcribed,
+        e.g. "hey jarvis" being echoed back as if it were the command."""
         now = datetime.now(UTC)
         session = VoiceSession(session_id=str(uuid.uuid4()), started_at=now, last_activity_at=now)
         self._session = session
         self._ended = False
         self._state = SessionState.LISTENING
         self._mic.set_mode(MicrophoneMode.ACTIVE_CAPTURE)
+        self._mic.flush_stale_audio()
         self._stop_listening.clear()
         self._reply_ready.clear()
         self._listen_thread = threading.Thread(

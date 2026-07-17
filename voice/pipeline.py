@@ -61,7 +61,7 @@ from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore, ConversationTurn
 from voice.microphone import MicrophoneManager
 from voice.quiet_mode import QuietModeController
-from voice.session_manager import VoiceSessionManager
+from voice.session_manager import SessionEndReason, VoiceSessionManager
 from voice.wake_word import WakeWordDetector
 
 logger = get_logger(__name__)
@@ -146,26 +146,48 @@ class CommunicationPipeline:
     def _handle_turn_complete(self, transcript: str, session_id: str) -> None:
         """The real conversation turn: persona selection -> context ->
         reply composition -> persistence -> spoken reply. Wired as
-        VoiceSessionManager's on_turn_complete callback (via relay)."""
-        explicit = self._persona_manager.detect_explicit_selection(transcript)
-        if explicit is not None:
-            self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
-        else:
-            heuristic = self._persona_manager.detect_context_heuristic(transcript)
-            if heuristic is not None:
-                self._persona_manager.select(heuristic, SwitchReason.CONTEXT_DETECTION)
+        VoiceSessionManager's on_turn_complete callback (via relay).
 
-        persona = self._persona_manager.active_persona()
-        context = self._context_manager.current_context(session_id, persona.name)
-        reply = persona.compose_reply(transcript, context)
+        Sprint 2.13 hardening: this method runs on VoiceSessionManager's
+        own background thread (_session_loop -> _on_utterance_ready ->
+        the relay -> here), with nothing upstream of it catching an
+        exception — before this hardening pass, any unexpected failure
+        here (a bug in compose_reply(), an unforeseen error from any
+        step) would silently kill that thread, leaving the session stuck
+        rather than ended. The try/except below is the fix: any failure
+        ends the session gracefully (SessionEndReason.ERROR) instead of
+        propagating. compose_reply() itself goes through PersonaManager's
+        compose_reply_safely() (scenario e) as a second, more specific
+        layer — this outer catch is for everything else (record_turn()
+        already never raises per Sprint 2.7's own design, scenario f;
+        speak_reply() already contains TextToSpeechError itself, scenario
+        c) — deliberately still wrapped here as defense in depth."""
+        try:
+            explicit = self._persona_manager.detect_explicit_selection(transcript)
+            if explicit is not None:
+                self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
+            else:
+                heuristic = self._persona_manager.detect_context_heuristic(transcript)
+                if heuristic is not None:
+                    self._persona_manager.select(heuristic, SwitchReason.CONTEXT_DETECTION)
 
-        self._conversation_store.record_turn(
-            ConversationTurn(
-                session_id=session_id,
-                persona_name=persona.name,
-                timestamp=datetime.now(UTC),
-                user_text=transcript,
-                response_text=reply,
+            persona = self._persona_manager.active_persona()
+            context = self._context_manager.current_context(session_id, persona.name)
+            reply = self._persona_manager.compose_reply_safely(transcript, context)
+
+            self._conversation_store.record_turn(
+                ConversationTurn(
+                    session_id=session_id,
+                    persona_name=persona.name,
+                    timestamp=datetime.now(UTC),
+                    user_text=transcript,
+                    response_text=reply,
+                )
             )
-        )
-        self._session_manager.speak_reply(reply, persona.voice_id)
+            self._session_manager.speak_reply(reply, persona.voice_id)
+        except Exception:
+            logger.exception(
+                "Unexpected failure while handling a completed turn; ending the session "
+                "rather than leaving it stuck."
+            )
+            self._session_manager.end_session(SessionEndReason.ERROR)

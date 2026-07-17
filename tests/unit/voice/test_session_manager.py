@@ -85,6 +85,26 @@ def test_end_session_returns_mic_to_passive(started_mic, manager_factory):
     assert manager.is_active() is False
 
 
+def test_begin_session_flushes_stale_buffered_audio(
+    started_mic, manager_factory, fake_audio_backend
+):
+    """Post-release fix: begin_session() must flush whatever's already
+    buffered (typically the just-spoken wake phrase itself, since
+    wake-word detection has inherent lag) before listening for the real
+    command. The actual discard behavior (not just that flush() gets
+    called) is verified directly, non-racily, in test_microphone.py's
+    own test_flush_stale_audio_discards_buffered_frames_before_any_read —
+    this fake's flush() is a pure call-counter, since frame_queue here is
+    also how every test in this file scripts utterance content, often
+    pre-loaded before begin_session() runs."""
+    manager = manager_factory()
+
+    manager.begin_session()
+
+    assert fake_audio_backend.flush_calls == 1
+    manager.end_session(SessionEndReason.EXPLICIT_END)
+
+
 def test_end_session_is_idempotent(manager_factory):
     end_reasons = []
     manager = manager_factory(end_reasons=end_reasons)
@@ -154,6 +174,24 @@ def test_stt_failure_ends_session_with_error(
     manager = manager_factory(end_reasons=end_reasons)
 
     manager.begin_session()
+
+    assert session_ended_event.wait(timeout=_WAIT_TIMEOUT)
+    assert end_reasons == [SessionEndReason.ERROR]
+    assert started_mic.current_mode() is MicrophoneMode.PASSIVE_LISTENING
+
+
+def test_microphone_disconnect_mid_capture_ends_session_with_error(
+    manager_factory, session_ended_event, started_mic, fake_audio_backend
+):
+    """Sprint 2.13 hardening (scenario a), isolated at the
+    VoiceSessionManager level: a device disconnect during utterance
+    capture (not just a transcription failure) must also end the session
+    gracefully and return the microphone to passive listening."""
+    end_reasons = []
+    manager = manager_factory(end_reasons=end_reasons)
+
+    manager.begin_session()
+    fake_audio_backend.raise_on_read = True
 
     assert session_ended_event.wait(timeout=_WAIT_TIMEOUT)
     assert end_reasons == [SessionEndReason.ERROR]

@@ -106,3 +106,44 @@ Medium-High — no new logic, but the broadest verification surface of any Level
 ## Next Sprint
 
 3.1 — Memory Store Foundation (SQLite + ChromaDB) (Level 3 — Intelligence; full sprint detail to be written when Level 3 becomes current, per [INDEX.md](INDEX.md), matching how Level 2's own detail was deferred until this task explicitly requested it).
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered the files this sprint's spec named, plus the shared test infrastructure they needed:
+
+- `tests/system/test_level2_acceptance.py` + `tests/system/conftest.py` — a new test tier, one continuous scripted multi-turn conversation (wake → two ordinary turns → an explicit persona switch → silence timeout → Quiet Mode) driven through a real `CoreManager.startup()`/`shutdown()` with the entire 9-module Level 2 graph registered, the same composition-and-orchestration `main.py` performs.
+- `tests/integration/test_voice_pipeline_integration.py` — the four of Sprint 2.13's six hardened scenarios not already covered at the integration level by `test_communication_pipeline.py` (which already had scenarios a and f from 2.13's own work): (b) Whisper failure, (c) Coqui failure, (d) wake-word thread death + restart recovery, (e) persona reply failure → safe fallback, not a session-ending error.
+- `tests/integration/conftest.py` — extracted the harness/fakes `test_communication_pipeline.py` already had (Sprint 2.12/2.13) into a shared fixture file so the new scenario file didn't duplicate ~150 lines of setup; `test_communication_pipeline.py` itself is otherwise unchanged in behavior, just refactored to use the shared fixtures.
+- `docs/changelog/0.2.0.md`, `docs/STATUS.md` (Level 2 marked ✔ RELEASED), `docs/sprint_book/INDEX.md` (all 14 Level 2 rows marked Complete).
+- Removed `tests/integration/.gitkeep` and `tests/system/.gitkeep` — both directories now have real content.
+
+289/289 tests passing project-wide, `ruff check .` clean, stable across repeated runs of every threading-heavy new file.
+
+### Adversarial re-read findings (Testing Checklist item)
+
+Re-read every `voice/` and `personas/` source file against its originating sprint's spec, specifically for unhandled-exception paths and untested documented risks, mirroring Sprint 1.9's Post-Release Review discipline. Two real, live gaps found and fixed immediately (not deferred), each documented as a Post-Sprint Fix on the sprint file that owns the affected code:
+
+- **`QuietModeController.activate()`** set `_mode = ACTIVE` *before* calling `session_manager.begin_session()`, with no exception handling around that call. A `MicrophoneError` in the narrow window between a wake-word thread's successful frame read and `begin_session()`'s own `mic.set_mode()` call would leave the controller permanently believing it was `ACTIVE` with no real session ever started — exactly the inconsistent state `health_check()` exists to catch, but with no way back to `DORMANT` short of an external `restart_module()` call. Fixed: the mode now rolls back to `DORMANT` if `begin_session()` raises. See [sprint_2_6.md](sprint_2_6.md).
+- **`ConversationSessionStore.purge_older_than()`** had no failure handling at all, unlike its sibling methods `record_turn()` (Sprint 2.7) and `get_recent_turns()` (hardened in Sprint 2.13). No live caller exists yet (`backlog/technical_debt.md` item 11), but a future one shouldn't inherit an unprotected failure path. Fixed with the same catch-log-return-safe-default pattern as its siblings. See [sprint_2_7.md](sprint_2_7.md).
+
+Also specifically checked for thread-safety races given the concurrent-thread shape of this Level (wake-word thread, session thread, watchdog thread): confirmed `QuietModeController._mode`'s two mutators (`activate()` from the wake-word thread, `deactivate()` from the session thread via the relay) cannot actually race, because Sprint 2.12's own frame-stealing fix already guarantees the wake-word thread is paused (not calling `_on_wake_word_detected`) for the entire window a session is active — structurally, not just by convention. `PersonaManager`'s and `ConversationSessionStore`'s mutable state are each only ever touched from the single session thread in normal operation. Not exhaustive — per Sprint 1.9's own precedent, this pass is thorough, not infallible; Level 6 (6.2 Async Background Task Audit, 6.3 Stress & Recovery Testing) is where sustained, adversarial concurrency testing becomes an ongoing practice.
+
+### Real, non-mocked verification
+
+Two real smoke runs (scratchpad, not committed), continuing the precedent established at every prior Level 2 sprint:
+
+1. Re-ran Sprint 2.12's own `main.py` composition smoke test unchanged, confirming no regression: all 9 modules still reach `RUNNING` on startup (~13-15s) and `STOPPED` cleanly on shutdown with real Whisper/Coqui/openWakeWord models and a real microphone.
+2. A new smoke run specifically exercising the Sprint 2.13/2.14-hardened *code paths* — the `_healthy` flags, `compose_reply_safely()`, `_handle_turn_complete()`'s try/except, the `QuietModeController.activate()` rollback — which had only ever been tested against fakes until now. Programmatically triggered activation (skipping the need for a real spoken wake phrase, already verified at Sprint 2.12) and let one real turn run to completion: real microphone capture → real Whisper transcription (correctly returned empty text for silence, confirming the Sprint 2.3/2.5 no-speech-threshold fix still holds against a real model) → real `JarvisPersona.compose_reply_safely()` → real SQLite persistence (`Persisted turns this session: 1`) → real Coqui synthesis, played aloud through the actual speakers ("I didn't catch anything that time. Could you repeat that?"). Forcing shutdown mid-session additionally exercised `VoiceSessionManager.stop()`'s real cleanup path and confirmed `CallbackRelay` safely no-ops once disconnected (`CallbackRelay invoked before wiring was established; ignoring` — the exact, correct, designed-for log line during real shutdown ordering).
+
+### The one criterion no automation can satisfy
+
+Per this sprint's own Acceptance Criteria, a live, human-voice wake-word-to-spoken-reply round trip on the actual target laptop is "the one criterion that cannot be satisfied by any automated test in this Sprint Book" — genuinely outside what this session can perform (no way to produce human speech audio or perceive audio output). **Not done.** Per the same Acceptance Criteria's own ordering ("performed... before tagging the release"), the `v0.2.0` git tag has deliberately **not** been created. Everything upstream of that specific interactive step has real, non-mocked verification (above).
+
+### Acceptance Criteria Checklist
+
+- ✔ Every Phase 2.1 ("Wake phrase activates JARMINEI. Speech recognition functions. Voice responses function."), 2.2 ("Natural conversation maintained during session."), and 2.3 ("Correct persona selected. Correct voice selected. No simultaneous personas.") criterion verified together in one system-test run (`tests/system/test_level2_acceptance.py`).
+- ✔ The complete Level 1 + Level 2 test suite (289 tests) passes together, zero regressions.
+- ✔ `docs/changelog/0.2.0.md` created, mirroring `0.1.0.md`'s structure, including a "Notable Bugs Found and Fixed" section per the Level 1 precedent (this Level's equivalent of a Post-Release Review, done as planned closure rather than retroactively).
+- ✖ Real-hardware manual verification — **not performed**, explicitly flagged above and in the changelog, not silently skipped.
+
+**Level 2 — Communication is functionally complete and verified as thoroughly as automation allows. Formal release (git tag `v0.2.0`) awaits the one remaining manual step: a real person confirming a real wake-word-to-spoken-reply conversation on the target laptop.**

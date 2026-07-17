@@ -126,3 +126,19 @@ def test_health_check_false_when_dormant_but_session_running(fake_session_manage
     fake_session_manager.set_active(True)
 
     assert controller.health_check() is False
+
+
+def test_activate_reverts_to_dormant_when_begin_session_fails(fake_session_manager):
+    """Sprint 2.14 hardening (found during the Level 2 adversarial
+    re-read): without this, a begin_session() failure left the
+    controller stuck believing it was ACTIVE with no real session ever
+    started — exactly the inconsistent state health_check() exists to
+    catch, but with no way back to DORMANT on its own."""
+    fake_session_manager.raise_on_begin_session = True
+    controller = QuietModeController(fake_session_manager)
+    controller.start()
+
+    controller._on_wake_word_detected("hey jarminei")  # must not raise
+
+    assert controller.current_mode() is OperatingMode.DORMANT
+    assert controller.health_check() is True

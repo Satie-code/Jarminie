@@ -134,13 +134,17 @@ def test_turns_survive_a_simulated_restart(db_path, database_config):
 
 class _RaisingSqliteClient:
     """Local double: connects/creates the table via a real SqliteClient,
-    then fails every subsequent execute() call — simulates a write failure
-    (e.g. a locked/read-only database file) without needing to actually
-    lock a file cross-platform."""
+    then fails every subsequent execute()/query() call — simulates a
+    write or read failure (e.g. a locked/read-only or disconnected
+    database) without needing to actually lock a file cross-platform.
+    should_raise gates execute() (Sprint 2.7); should_raise_on_query
+    gates query() separately (Sprint 2.13 hardening, scenario f) since a
+    read failure and a write failure are independent, real scenarios."""
 
     def __init__(self, real_client: SqliteClient) -> None:
         self._real = real_client
         self.should_raise = False
+        self.should_raise_on_query = False
 
     def connect(self) -> None:
         self._real.connect()
@@ -151,6 +155,8 @@ class _RaisingSqliteClient:
         self._real.execute(sql, params)
 
     def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.should_raise_on_query:
+            raise RuntimeError("simulated read failure (disconnected database)")
         return self._real.query(sql, params)
 
     def close(self) -> None:
@@ -170,6 +176,26 @@ def test_record_turn_swallows_and_logs_a_write_failure(db_path, database_config)
         store.stop()
 
     assert remaining == []
+
+
+def test_get_recent_turns_swallows_and_logs_a_read_failure(db_path, database_config):
+    """Sprint 2.13 hardening (scenario f): a read failure — not just a
+    write failure — must also degrade gracefully to "no history
+    available" rather than raising out to Context Manager (Sprint 2.8),
+    which would otherwise abort the caller's entire turn."""
+    raising_client = _RaisingSqliteClient(SqliteClient(db_path))
+    store = ConversationSessionStore(raising_client, database_config)
+    store.start()
+    try:
+        store.record_turn(make_turn())
+        raising_client.should_raise_on_query = True
+
+        recent = store.get_recent_turns("session-1", limit=10)  # must not raise
+    finally:
+        raising_client.should_raise_on_query = False
+        store.stop()
+
+    assert recent == []
 
 
 def test_start_raises_conversation_store_error_on_connect_failure(database_config):
@@ -229,3 +255,22 @@ def test_purge_older_than_defaults_to_configured_retention(db_path):
         store.stop()
 
     assert removed == 1
+
+
+def test_purge_older_than_swallows_and_logs_a_failure(db_path, database_config):
+    """Sprint 2.14 hardening (found during the Level 2 adversarial
+    re-read): purge_older_than() had no failure handling at all, unlike
+    record_turn()/get_recent_turns() — no live caller exists yet
+    (backlog/technical_debt.md item 11), but a future one shouldn't
+    inherit an unprotected failure path."""
+    raising_client = _RaisingSqliteClient(SqliteClient(db_path))
+    store = ConversationSessionStore(raising_client, database_config)
+    store.start()
+    try:
+        raising_client.should_raise_on_query = True
+        removed = store.purge_older_than(days=1)  # must not raise
+    finally:
+        raising_client.should_raise_on_query = False
+        store.stop()
+
+    assert removed == 0

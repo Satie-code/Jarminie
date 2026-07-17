@@ -50,6 +50,8 @@ class AudioBackend(Protocol):
 
     def read(self, num_frames: int) -> bytes: ...
 
+    def flush(self) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -78,6 +80,18 @@ class SoundDeviceAudioBackend:
         if overflowed:
             logger.warning("Microphone input buffer overflowed; some audio was dropped.")
         return bytes(data)
+
+    def flush(self) -> None:
+        """Discard whatever audio is already buffered, without blocking.
+        The underlying stream keeps recording continuously regardless of
+        who's reading (see this module's own docstring on mode changes
+        never pausing hardware) — so backlog can build up during any gap
+        where nothing is actively reading."""
+        if self._stream is None:
+            return
+        available = self._stream.read_available
+        if available > 0:
+            self._stream.read(available)
 
     def close(self) -> None:
         if self._stream is not None:
@@ -116,10 +130,22 @@ class MicrophoneManager:
         logger.info("Microphone opened in PASSIVE_LISTENING mode.")
 
     def stop(self) -> None:
-        """Close the device. Safe to call even if start() partially failed."""
-        self._backend.close()
-        self._is_open = False
-        self._mode = MicrophoneMode.MUTED
+        """Close the device. Safe to call even if start() partially failed,
+        or if the device itself is already gone (e.g. physically
+        unplugged) — closing an already-broken backend can itself raise,
+        and is_open/mode must still reset regardless (try/finally), or a
+        later read_frame()/set_mode() would incorrectly believe the
+        device is still usable. Sprint 2.13 hardening: see
+        docs/sprint_book/sprint_2_13.md scenario (a)."""
+        try:
+            self._backend.close()
+        except Exception:
+            logger.exception(
+                "Microphone backend failed to close cleanly (device likely already disconnected)."
+            )
+        finally:
+            self._is_open = False
+            self._mode = MicrophoneMode.MUTED
         logger.info("Microphone closed.")
 
     def health_check(self) -> bool:
@@ -158,6 +184,28 @@ class MicrophoneManager:
         with self._lock:
             self._mode = mode
         logger.info("Microphone mode changed to %s.", mode.value)
+
+    def flush_stale_audio(self) -> None:
+        """Discard whatever audio is already buffered from before this
+        call, without blocking.
+
+        Found via real end-to-end testing (Sprint 2.14, post-release):
+        the underlying audio stream keeps recording continuously through
+        a wake-word detection — it is never paused, only gated by mode
+        (see this module's own docstring). Wake-word detection itself has
+        inherent lag (the model needs a window of audio context before it
+        can recognize a phrase), so by the time PASSIVE_LISTENING switches
+        to ACTIVE_CAPTURE, the just-spoken wake phrase (or its tail end)
+        is often still sitting unread in the stream's buffer — and would
+        otherwise become the first "spoken" content Voice Session Manager
+        captures, indistinguishable from a real command. Callers that are
+        about to start a fresh utterance capture (VoiceSessionManager.
+        begin_session()) should call this right after switching to
+        ACTIVE_CAPTURE, before actually listening for speech."""
+        if not self._is_open:
+            raise MicrophoneError("Cannot flush audio before start() or after stop().")
+        with self._lock:
+            self._backend.flush()
 
     def current_mode(self) -> MicrophoneMode:
         return self._mode

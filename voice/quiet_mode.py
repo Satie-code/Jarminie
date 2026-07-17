@@ -113,13 +113,30 @@ class QuietModeController:
     def activate(self, reason: ActivationReason) -> None:
         """Transition DORMANT -> ACTIVE and begin a voice session. A no-op
         (logged) if already ACTIVE — activations cannot stack, matching
-        "only one session at a time"."""
+        "only one session at a time".
+
+        Sprint 2.14 hardening (found during the Level 2 adversarial
+        re-read, fixed here since this file owns QuietModeController):
+        begin_session() can raise MicrophoneError in a narrow window (the
+        microphone failing between a wake-word thread's successful read
+        and this call). Without the try/except below, that would leave
+        _mode stuck at ACTIVE with no real session ever started — exactly
+        the inconsistent state health_check() exists to catch, but with
+        no way back to DORMANT short of a restart_module() call. The mode
+        is rolled back to DORMANT so the system can react to the next
+        wake phrase instead of staying wedged."""
         if self._mode is OperatingMode.ACTIVE:
             logger.info("activate(%s) ignored — already ACTIVE.", reason.value)
             return
         self._mode = OperatingMode.ACTIVE
         logger.info("Activating (%s): DORMANT -> ACTIVE.", reason.value)
-        self._session_manager.begin_session()
+        try:
+            self._session_manager.begin_session()
+        except Exception:
+            self._mode = OperatingMode.DORMANT
+            logger.exception(
+                "Failed to begin a session during activation; reverting to DORMANT."
+            )
 
     def deactivate(self) -> None:
         """Transition ACTIVE -> DORMANT. Called internally when the wired

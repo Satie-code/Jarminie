@@ -138,6 +138,13 @@ def test_detect_explicit_selection_returns_none_for_unrelated_text(manager):
     assert manager.detect_explicit_selection("what's the weather like today") is None
 
 
+def test_detect_explicit_selection_matches_common_minie_mishearings(manager):
+    """Post-release fix: real end-to-end testing showed Whisper
+    transcribing "talk to minie" as "talk to my knee"."""
+    assert manager.detect_explicit_selection("talk to my knee please") == "minie"
+    assert manager.detect_explicit_selection("switch to minnie") == "minie"
+
+
 def test_detect_context_heuristic_matches_minie_keywords(manager):
     assert manager.detect_context_heuristic("I'm feeling really stressed today") == "minie"
 
@@ -176,3 +183,36 @@ def test_exactly_one_persona_active_across_a_sequence_of_operations(manager):
     for step in steps:
         step()
         assert manager.health_check() is True
+
+
+def test_compose_reply_safely_returns_the_real_reply(manager, conversation_context_factory):
+    context = conversation_context_factory()
+
+    reply = manager.compose_reply_safely("hello there", context)
+
+    assert "hello there" in reply
+
+
+def test_compose_reply_safely_falls_back_when_the_persona_raises(
+    manager, conversation_context_factory
+):
+    """Sprint 2.13 hardening (scenario e): a bug in Persona.compose_reply()
+    must never propagate out and abort the caller's turn."""
+
+    class _BrokenPersona:
+        name = "jarvis"
+        voice_id = "p340"
+
+        def compose_reply(self, transcript, context):
+            raise RuntimeError("persona logic exploded")
+
+        def describe(self):
+            return "Broken — for testing"
+
+    manager._personas["jarvis"] = _BrokenPersona()
+    context = conversation_context_factory()
+
+    reply = manager.compose_reply_safely("hello there", context)
+
+    assert reply  # a non-empty fallback, not a raised exception
+    assert "hello there" not in reply

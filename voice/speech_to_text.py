@@ -66,11 +66,16 @@ class WhisperSpeechToText:
     def __init__(self, model_config: ModelConfig) -> None:
         self._model_name = model_config.whisper_model
         self._no_speech_threshold = model_config.whisper_no_speech_threshold
+        self._initial_prompt = model_config.whisper_initial_prompt
         self._model = None
+        self._healthy = False
 
     def start(self) -> None:
         """Load the configured Whisper model. Safe to call again without
-        an intervening stop() — does not reload."""
+        an intervening stop() (does not reload) — including after a
+        previous failed attempt, since self._model stays None until load
+        actually succeeds, so the guard below correctly retries rather
+        than skipping."""
         if self._model is not None:
             return
         import whisper
@@ -81,14 +86,23 @@ class WhisperSpeechToText:
             raise SpeechToTextError(
                 f"Failed to load Whisper model {self._model_name!r}: {exc}"
             ) from exc
+        self._healthy = True
         logger.info("Whisper model loaded: %s", self._model_name)
 
     def stop(self) -> None:
         self._model = None
+        self._healthy = False
         logger.info("Whisper model released.")
 
     def health_check(self) -> bool:
-        return self._model is not None
+        """Sprint 2.13 hardening (scenario b): a crashed transcribe() call
+        leaves self._model itself untouched (the loaded model object is
+        still there), so checking only "is _model set" would keep
+        reporting healthy even after a real inference failure. _healthy
+        tracks the outcome of the most recent transcribe() call — set
+        False on a crash, restored True on the next successful one — the
+        same flag pattern already used by MicrophoneManager."""
+        return self._model is not None and self._healthy
 
     def transcribe(self, audio: bytes) -> TranscriptionResult:
         """Transcribe a complete utterance buffer (int16 PCM bytes).
@@ -105,10 +119,12 @@ class WhisperSpeechToText:
         started_at = time.monotonic()
         try:
             samples = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
-            result = self._model.transcribe(samples)
+            result = self._model.transcribe(samples, initial_prompt=self._initial_prompt or None)
         except Exception as exc:
+            self._healthy = False
             logger.exception("Whisper transcription failed.")
             raise SpeechToTextError("Failed to transcribe audio.") from exc
+        self._healthy = True
         duration_ms = int((time.monotonic() - started_at) * 1000)
 
         segments = result.get("segments", [])

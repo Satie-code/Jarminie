@@ -17,9 +17,15 @@ voice:
   jarvis_trigger_phrases:
     - "talk to jarvis"
     - "switch to jarvis"
+  # Includes "my knee"/"minnie" mishearing variants — see
+  # backlog/technical_debt.md item 12.
   minie_trigger_phrases:
     - "talk to minie"
     - "switch to minie"
+    - "talk to minnie"
+    - "switch to minnie"
+    - "talk to my knee"
+    - "switch to my knee"
   mic_device_index: null
   mic_sample_rate_hz: 16000
   wake_word_sensitivity: 0.5
@@ -55,6 +61,10 @@ models:
   # hallucinated segment; WhisperSpeechToText applies this threshold
   # itself, unconditionally — see backlog/technical_debt.md item 9.
   whisper_no_speech_threshold: 0.6
+  # Biases transcription toward JARMINEI's own vocabulary — without this,
+  # "talk to minie" was misheard as "talk to my knee" — see
+  # backlog/technical_debt.md item 12.
+  whisper_initial_prompt: "Jarvis and Minie are JARMINEI's two personas."
   tts_model: "tts_models/en/vctk/vits"
 
 logging:

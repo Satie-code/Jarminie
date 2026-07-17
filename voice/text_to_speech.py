@@ -64,10 +64,14 @@ class CoquiTextToSpeech:
         self._output = output
         self._tts = None
         self._known_speakers: list[str] = []
+        self._healthy = False
 
     def start(self) -> None:
         """Load the configured Coqui model. Safe to call again without an
-        intervening stop() — does not reload."""
+        intervening stop() (does not reload) — including after a previous
+        failed attempt, since self._tts stays None until load actually
+        succeeds, so the guard below correctly retries rather than
+        skipping."""
         if self._tts is not None:
             return
         from TTS.api import TTS
@@ -79,6 +83,7 @@ class CoquiTextToSpeech:
                 f"Failed to load Coqui TTS model {self._model_name!r}: {exc}"
             ) from exc
         self._known_speakers = list(self._tts.speakers or [])
+        self._healthy = True
         logger.info(
             "Coqui TTS model loaded: %s (%d speakers).",
             self._model_name,
@@ -88,10 +93,17 @@ class CoquiTextToSpeech:
     def stop(self) -> None:
         self._tts = None
         self._known_speakers = []
+        self._healthy = False
         logger.info("Coqui TTS model released.")
 
     def health_check(self) -> bool:
-        return self._tts is not None
+        """Sprint 2.13 hardening (scenario c): a crashed speak() call
+        leaves the loaded model object itself untouched, so checking only
+        "is _tts set" would keep reporting healthy after a real synthesis
+        or playback failure. _healthy tracks the outcome of the most
+        recent speak() call — same flag pattern as WhisperSpeechToText
+        (scenario b) and MicrophoneManager."""
+        return self._tts is not None and self._healthy
 
     def speak(self, text: str, voice_id: str) -> None:
         """Synthesize text with the given voice_id and play it, blocking
@@ -110,6 +122,7 @@ class CoquiTextToSpeech:
         try:
             samples = self._tts.tts(text=text, speaker=voice_id)
         except Exception as exc:
+            self._healthy = False
             logger.exception("Coqui TTS synthesis failed.")
             raise TextToSpeechError("Failed to synthesize speech.") from exc
 
@@ -121,5 +134,7 @@ class CoquiTextToSpeech:
         try:
             self._output.play(audio_bytes, sample_rate_hz)
         except Exception as exc:
+            self._healthy = False
             logger.exception("Audio playback failed.")
             raise TextToSpeechError("Failed to play synthesized speech.") from exc
+        self._healthy = True

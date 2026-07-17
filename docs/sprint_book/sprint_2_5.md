@@ -161,6 +161,7 @@ Implemented `SessionState`, `SessionEndReason`, `VoiceSession`, and `VoiceSessio
 
 - ~~Whisper hallucinated a plausible-sounding sentence from real ambient room noise during the real end-to-end test~~ — **resolved same-day, at the user's request**: see `sprint_2_3.md`'s Post-Sprint Fix and `backlog/technical_debt.md` item 9. `WhisperSpeechToText` now forces empty text whenever its average `no_speech_prob` crosses a configurable threshold, verified against the exact real audio sample that produced the original hallucination (deterministically suppressed across 5 repeated runs).
 - The RMS threshold and utterance-silence duration are both, like `wake_word_sensitivity`, starting points rather than validated values — real tuning needs a real conversational environment, deferred to Sprint 2.12 integration as the project's established pattern for this category of parameter.
+- ~~`begin_session()` started listening immediately after switching the mic to `ACTIVE_CAPTURE`, without clearing any audio already buffered from before the switch~~ — **resolved post-release**, found via real end-to-end use on the actual target laptop: the just-spoken wake phrase itself was being echoed back as the "command" ("hey jarvis" transcribed as if it were what the user said next). See `sprint_2_1.md`'s Post-Sprint Fix (adds `MicrophoneManager.flush_stale_audio()`) and `backlog/technical_debt.md` item 13 — `begin_session()` now calls it immediately after `set_mode(ACTIVE_CAPTURE)`.
 
 ### Technical Debt
 

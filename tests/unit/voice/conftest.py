@@ -48,7 +48,9 @@ class FakeAudioBackend:
         self.read_calls: list[int] = []
         self.raise_on_open = False
         self.raise_on_read = False
+        self.raise_on_close = False
         self.frame_queue: list[bytes] = []
+        self.flush_calls = 0
 
     def open(self, device_index: int | None, sample_rate_hz: int) -> None:
         if self.raise_on_open:
@@ -64,7 +66,20 @@ class FakeAudioBackend:
             return self.frame_queue.pop(0)
         return b"\x00\x00" * num_frames
 
+    def flush(self) -> None:
+        """Deliberately just a call counter, not a real discard — this
+        fake's frame_queue is also how every test scripts an utterance's
+        content, often pre-loaded before begin_session() runs (which now
+        calls flush() internally); actually clearing frame_queue here
+        would wipe out that scripted content, not simulate discarding
+        backlog. The real discard behavior (SoundDeviceAudioBackend.
+        flush() draining read_available frames) is verified directly,
+        non-racily, in tests/unit/voice/test_microphone.py instead."""
+        self.flush_calls += 1
+
     def close(self) -> None:
+        if self.raise_on_close:
+            raise RuntimeError("simulated close failure (device already disconnected)")
         self.is_open = False
 
 
@@ -183,9 +198,12 @@ class FakeVoiceSessionManager:
     def __init__(self) -> None:
         self.begin_session_calls = 0
         self._active = False
+        self.raise_on_begin_session = False
 
     def begin_session(self):
         self.begin_session_calls += 1
+        if self.raise_on_begin_session:
+            raise RuntimeError("simulated microphone failure while beginning a session")
         self._active = True
         return None
 

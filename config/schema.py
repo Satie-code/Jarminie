@@ -53,11 +53,25 @@ class VoiceConfig:
     minie_voice_id: str = "p243"
     # Sprint 2.11 — Persona Switching's Explicit Selection input (matched
     # case-insensitively as plain substrings by PersonaManager; no NLU).
+    # minie_trigger_phrases includes "my knee"/"minnie" variants — a
+    # post-release fix (backlog/technical_debt.md item 12): Whisper's
+    # "base" model, even with whisper_initial_prompt's vocabulary hint,
+    # isn't guaranteed to always recognize the uncommon name "Minie", and
+    # real testing showed "talk to minie" transcribed as "talk to my
+    # knee". This is a pragmatic safety net, not NLU — still exact
+    # substring matching against known mishearings, no fuzzy logic.
     jarvis_trigger_phrases: list[str] = field(
         default_factory=lambda: ["talk to jarvis", "switch to jarvis"]
     )
     minie_trigger_phrases: list[str] = field(
-        default_factory=lambda: ["talk to minie", "switch to minie"]
+        default_factory=lambda: [
+            "talk to minie",
+            "switch to minie",
+            "talk to minnie",
+            "switch to minnie",
+            "talk to my knee",
+            "switch to my knee",
+        ]
     )
     mic_device_index: int | None = None
     mic_sample_rate_hz: int = 16000
@@ -115,11 +129,21 @@ class ModelConfig:
     docs/sprint_book/sprint_2_5.md's Remaining Risks. WhisperSpeechToText
     applies this threshold itself, unconditionally, rather than relying on
     Whisper's own override-prone default.
+
+    whisper_initial_prompt (added post-release, found via real end-to-end
+    testing after Level 2 shipped): Whisper's "base" model, with no
+    context, misheard the uncommon proper noun "Minie" as "my knee" —
+    "talk to minie" was transcribed as "talk to my knee", silently
+    breaking PersonaManager.detect_explicit_selection()'s substring match.
+    Passed as Whisper's own initial_prompt parameter, a standard technique
+    for biasing transcription toward specific vocabulary the model
+    wouldn't otherwise favor.
     """
 
     ollama_model: str = "gemma3"
     whisper_model: str = "base"
     whisper_no_speech_threshold: float = 0.6
+    whisper_initial_prompt: str = "Jarvis and Minie are JARMINEI's two personas."
     tts_model: str = "tts_models/en/vctk/vits"
 
 

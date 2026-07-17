@@ -119,13 +119,25 @@ class ConversationSessionStore:
     def get_recent_turns(self, session_id: str, limit: int) -> list[ConversationTurn]:
         """Return up to `limit` most recent turns for a session, oldest
         first — the order a conversation actually happened in, ready for a
-        caller (Context Manager, Sprint 2.8) to consume directly."""
-        rows = self._sqlite_client.query(
-            "SELECT session_id, persona_name, timestamp, user_text, response_text "
-            "FROM conversation_turns WHERE session_id = ? "
-            "ORDER BY timestamp DESC LIMIT ?",
-            (session_id, limit),
-        )
+        caller (Context Manager, Sprint 2.8) to consume directly.
+
+        Sprint 2.13 hardening: a failed read is caught and logged,
+        returning an empty list — the same Fail Gracefully discipline as
+        record_turn(), so a broken persistence layer degrades the
+        conversation's context to "none available" rather than aborting
+        the whole turn (Context Manager already treats an empty list as a
+        normal, valid case — Sprint 2.8's own "empty session" handling —
+        so no caller needed to change for this)."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT session_id, persona_name, timestamp, user_text, response_text "
+                "FROM conversation_turns WHERE session_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (session_id, limit),
+            )
+        except Exception:
+            logger.exception("Failed to read recent turns for session %s.", session_id)
+            return []
         turns = [
             ConversationTurn(
                 session_id=row[0],
@@ -141,12 +153,26 @@ class ConversationSessionStore:
     def purge_older_than(self, days: int | None = None) -> int:
         """Delete turns strictly older than `days` (default:
         DatabaseConfig.conversation_retention_days). Returns the count
-        removed."""
+        removed, or 0 if the purge itself failed.
+
+        Sprint 2.14 hardening (found during the Level 2 adversarial
+        re-read, fixed here since this file owns ConversationSessionStore):
+        this method had no failure handling at all, unlike record_turn()/
+        get_recent_turns() (Sprint 2.7/2.13). No caller exists yet
+        (backlog/technical_debt.md item 11), but a future caller
+        shouldn't inherit an unprotected failure path — same Fail
+        Gracefully discipline as this class's other two methods."""
         if days is None:
             days = self._database_config.conversation_retention_days
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
-        removed = self._sqlite_client.query(
-            "SELECT COUNT(*) FROM conversation_turns WHERE timestamp < ?", (cutoff,)
-        )[0][0]
-        self._sqlite_client.execute("DELETE FROM conversation_turns WHERE timestamp < ?", (cutoff,))
+        try:
+            removed = self._sqlite_client.query(
+                "SELECT COUNT(*) FROM conversation_turns WHERE timestamp < ?", (cutoff,)
+            )[0][0]
+            self._sqlite_client.execute(
+                "DELETE FROM conversation_turns WHERE timestamp < ?", (cutoff,)
+            )
+        except Exception:
+            logger.exception("Failed to purge conversation turns older than %s days.", days)
+            return 0
         return removed

@@ -41,8 +41,14 @@ from enum import Enum
 from config.schema import VoiceConfig
 from core.logging_setup import get_logger
 from personas.base import Persona
+from voice.context_manager import ConversationContext
 
 logger = get_logger(__name__)
+
+_FALLBACK_REPLY = "Sorry, I had trouble putting that into words. Could you try again?"
+"""Sprint 2.13 hardening (scenario e): Persona.compose_reply()'s contract
+already promises never to raise (Sprint 2.9), but a hardening pass
+doesn't take that promise on faith — see compose_reply_safely()."""
 
 _MINIE_HEURISTIC_KEYWORDS: tuple[str, ...] = (
     "feel",
@@ -130,6 +136,19 @@ class PersonaManager:
 
     def active_persona(self) -> Persona:
         return self._personas[self._active_name]
+
+    def compose_reply_safely(self, transcript: str, context: ConversationContext) -> str:
+        """Compose a reply through the active persona, catching any
+        failure so a bug in Persona.compose_reply() can never abort a
+        live conversation turn (Fail Gracefully Rule) — see
+        docs/sprint_book/sprint_2_13.md scenario (e). The caller
+        (CommunicationPipeline, Sprint 2.12) should call this instead of
+        active_persona().compose_reply() directly."""
+        try:
+            return self.active_persona().compose_reply(transcript, context)
+        except Exception:
+            logger.exception("Persona.compose_reply() raised; using a safe fallback reply.")
+            return _FALLBACK_REPLY
 
     def select(self, persona_name: str, reason: SwitchReason) -> bool:
         """Switch the active persona if reason's priority is at or above

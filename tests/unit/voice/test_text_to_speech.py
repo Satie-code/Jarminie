@@ -149,3 +149,81 @@ def test_speak_wraps_playback_exception_in_text_to_speech_error(model_config, fa
 
     with pytest.raises(TextToSpeechError, match="Failed to play synthesized speech"):
         tts_engine.speak("hello", "p225")
+
+
+def test_health_check_false_after_a_synthesis_failure(model_config, fake_audio_output):
+    """Sprint 2.13 hardening (scenario c): a crashed speak() call leaves
+    the loaded model object itself untouched, so health_check() must
+    track the crash separately from "is a model loaded"."""
+    fake_tts = _fake_tts(speakers=("p225",))
+    fake_tts.tts.side_effect = RuntimeError("synthesis blew up")
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS", return_value=fake_tts):
+        tts_engine.start()
+    assert tts_engine.health_check() is True
+
+    with pytest.raises(TextToSpeechError):
+        tts_engine.speak("hello", "p225")
+
+    assert tts_engine.health_check() is False
+
+
+def test_health_check_false_after_a_playback_failure(model_config, fake_audio_output):
+    fake_tts = _fake_tts(speakers=("p225",))
+    fake_audio_output.raise_on_play = True
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS", return_value=fake_tts):
+        tts_engine.start()
+
+    with pytest.raises(TextToSpeechError):
+        tts_engine.speak("hello", "p225")
+
+    assert tts_engine.health_check() is False
+
+
+def test_health_check_recovers_after_a_subsequent_successful_speak(model_config, fake_audio_output):
+    fake_tts = _fake_tts(speakers=("p225",))
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS", return_value=fake_tts):
+        tts_engine.start()
+    fake_audio_output.raise_on_play = True
+    with pytest.raises(TextToSpeechError):
+        tts_engine.speak("hello", "p225")
+    assert tts_engine.health_check() is False
+
+    fake_audio_output.raise_on_play = False
+    tts_engine.speak("hello again", "p225")
+
+    assert tts_engine.health_check() is True
+
+
+def test_unrecognized_voice_id_does_not_affect_health(model_config, fake_audio_output):
+    """A bad voice_id is a caller usage error, not evidence the engine
+    itself is broken — health_check() must stay unaffected by it."""
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS") as tts_cls:
+        tts_cls.return_value = _fake_tts(speakers=("p225", "p226"))
+        tts_engine.start()
+
+    with pytest.raises(TextToSpeechError, match="Unrecognized voice_id"):
+        tts_engine.speak("hello", "not_a_real_speaker")
+
+    assert tts_engine.health_check() is True
+
+
+def test_restart_after_a_failed_load_retries_cleanly(model_config, fake_audio_output):
+    """Confirms start() also works as the retry half of
+    CoreManager.restart_module() after a genuine load failure."""
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+
+    with patch("TTS.api.TTS", side_effect=RuntimeError("disk full")):
+        with pytest.raises(TextToSpeechError):
+            tts_engine.start()
+    assert tts_engine.health_check() is False
+
+    with patch("TTS.api.TTS") as tts_cls:
+        tts_cls.return_value = _fake_tts()
+        tts_engine.start()
+
+    tts_cls.assert_called_once()
+    assert tts_engine.health_check() is True

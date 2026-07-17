@@ -129,6 +129,36 @@ def test_microphone_error_mid_loop_ends_thread_and_marks_unhealthy(
     assert detector.health_check() is False
 
 
+def test_restart_after_thread_death_relaunches_and_recovers(
+    started_mic, fake_wake_word_engine_factory, fake_audio_backend
+):
+    """Sprint 2.13 hardening (scenario d): mirrors the exact stop()-then-
+    start() sequence CoreManager.restart_module() performs, proving a
+    dead listen thread is recoverable when a restart is invoked —
+    whether by a human via Debug Console, or a future automated driver
+    (see docs/sprint_book/sprint_2_13.md's Sprint Completion Report on
+    why this sprint doesn't build that driver itself)."""
+    engine = fake_wake_word_engine_factory()
+    detector = WakeWordDetector(started_mic, engine, lambda phrase: None)
+    detector.start()
+    assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+
+    fake_audio_backend.raise_on_read = True
+    detector._thread.join(timeout=_WAIT_TIMEOUT)
+    assert detector.health_check() is False
+
+    # restart_module()'s own sequence: stop() then start() again.
+    detector.stop()
+    fake_audio_backend.raise_on_read = False
+    engine.processed_event.clear()
+    detector.start()
+    try:
+        assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+        assert detector.health_check() is True
+    finally:
+        detector.stop()
+
+
 def test_engine_processing_failure_does_not_end_passive_listening(
     started_mic, fake_wake_word_engine_factory
 ):
@@ -162,12 +192,19 @@ def test_listen_loop_pauses_while_mic_not_passive_listening(
     detector.start()
     try:
         assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
-        calls_before_pause = engine.calls
 
         started_mic.set_mode(MicrophoneMode.ACTIVE_CAPTURE)
+        # A single frame already mid-flight when set_mode() runs can still
+        # land (the loop only checks mode at the top of each iteration) —
+        # a brief settle window absorbs that one-frame race without
+        # weakening what this test actually proves: no further frames
+        # after the pause takes effect.
+        time.sleep(0.05)
+        calls_after_switch = engine.calls
+
         time.sleep(_PAUSE_OBSERVE_SECONDS)
 
-        assert engine.calls == calls_before_pause
+        assert engine.calls == calls_after_switch
     finally:
         started_mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
         detector.stop()

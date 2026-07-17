@@ -39,24 +39,26 @@ Every other component identity, name, and dependency below is unchanged from the
 
 See the Level 1 Acceptance Pass in [sprint_1_9.md](sprint_1_9.md) and [changelog/0.1.0.md](../changelog/0.1.0.md).
 
-## LEVEL 2 — Communication → Release v0.2 — Sprint Book fully specified (2026-07-16)
+## LEVEL 2 — Communication → Release v0.2 — ✔ RELEASED (2026-07-17)
 
 | Sprint | Name                                       | Phase       | Depends On                | Complexity  | Detail                             |
 | ------ | ------------------------------------------ | ----------- | ------------------------- | ----------- | ---------------------------------- |
-| 2.1    | Microphone Manager                         | 2.1         | 1.5, 1.2                  | Medium      | [sprint_2_1.md](sprint_2_1.md)     |
-| 2.2    | Wake Word Detector                         | 2.1         | 2.1                       | Medium      | [sprint_2_2.md](sprint_2_2.md)     |
-| 2.3    | Speech-to-Text Engine (Whisper)            | 2.1         | 2.1                       | Medium–High | [sprint_2_3.md](sprint_2_3.md)     |
-| 2.4    | Text-to-Speech Engine (Coqui, dual voice)  | 2.1         | 1.2                       | Medium–High | [sprint_2_4.md](sprint_2_4.md)     |
-| 2.5    | Voice Session Manager & Timeout            | 2.1         | 2.3, 2.4, 2.1             | Medium      | [sprint_2_5.md](sprint_2_5.md)     |
-| 2.6    | Quiet Mode Controller                      | 2.1         | 2.2, 2.5                  | Medium      | [sprint_2_6.md](sprint_2_6.md)     |
-| 2.7    | Conversation Session Store                 | 2.2         | 2.5, database (3.1) stub  | Medium      | [sprint_2_7.md](sprint_2_7.md)     |
-| 2.8    | Context Manager                            | 2.2         | 2.7                       | Low–Medium  | [sprint_2_8.md](sprint_2_8.md)     |
-| 2.9    | Persona Base & Jarvis Persona              | 2.3         | 2.4                       | Low–Medium  | [sprint_2_9.md](sprint_2_9.md)     |
-| 2.10   | Minie Persona                              | 2.3         | 2.9                       | Low         | [sprint_2_10.md](sprint_2_10.md)   |
-| 2.11   | Persona Switching & Explicit Selection     | 2.3         | 2.9, 2.10                 | Medium–High | [sprint_2_11.md](sprint_2_11.md)   |
-| 2.12   | Communication Pipeline Integration         | integration | 2.1–2.11                  | Medium–High | [sprint_2_12.md](sprint_2_12.md)   |
-| 2.13   | Error Handling & Recovery Hardening        | reliability | 2.12                      | Medium      | [sprint_2_13.md](sprint_2_13.md)   |
-| 2.14   | Integration Testing & Level Freeze         | level gate  | 2.13                      | Medium–High | [sprint_2_14.md](sprint_2_14.md)   |
+| 2.1    | Microphone Manager                         | 2.1         | 1.5, 1.2                  | Medium      | [sprint_2_1.md](sprint_2_1.md) — **Complete** |
+| 2.2    | Wake Word Detector                         | 2.1         | 2.1                       | Medium      | [sprint_2_2.md](sprint_2_2.md) — **Complete** |
+| 2.3    | Speech-to-Text Engine (Whisper)            | 2.1         | 2.1                       | Medium–High | [sprint_2_3.md](sprint_2_3.md) — **Complete** |
+| 2.4    | Text-to-Speech Engine (Coqui, dual voice)  | 2.1         | 1.2                       | Medium–High | [sprint_2_4.md](sprint_2_4.md) — **Complete** |
+| 2.5    | Voice Session Manager & Timeout            | 2.1         | 2.3, 2.4, 2.1             | Medium      | [sprint_2_5.md](sprint_2_5.md) — **Complete** |
+| 2.6    | Quiet Mode Controller                      | 2.1         | 2.2, 2.5                  | Medium      | [sprint_2_6.md](sprint_2_6.md) — **Complete** |
+| 2.7    | Conversation Session Store                 | 2.2         | 2.5, database (3.1) stub  | Medium      | [sprint_2_7.md](sprint_2_7.md) — **Complete** |
+| 2.8    | Context Manager                            | 2.2         | 2.7                       | Low–Medium  | [sprint_2_8.md](sprint_2_8.md) — **Complete** |
+| 2.9    | Persona Base & Jarvis Persona              | 2.3         | 2.4                       | Low–Medium  | [sprint_2_9.md](sprint_2_9.md) — **Complete** |
+| 2.10   | Minie Persona                              | 2.3         | 2.9                       | Low         | [sprint_2_10.md](sprint_2_10.md) — **Complete** |
+| 2.11   | Persona Switching & Explicit Selection     | 2.3         | 2.9, 2.10                 | Medium–High | [sprint_2_11.md](sprint_2_11.md) — **Complete** |
+| 2.12   | Communication Pipeline Integration         | integration | 2.1–2.11                  | Medium–High | [sprint_2_12.md](sprint_2_12.md) — **Complete** |
+| 2.13   | Error Handling & Recovery Hardening        | reliability | 2.12                      | Medium      | [sprint_2_13.md](sprint_2_13.md) — **Complete** |
+| 2.14   | Integration Testing & Level Freeze         | level gate  | 2.13                      | Medium–High | [sprint_2_14.md](sprint_2_14.md) — **Complete** |
+
+See the Level 2 Acceptance Pass in [sprint_2_14.md](sprint_2_14.md) and [changelog/0.2.0.md](../changelog/0.2.0.md). One criterion (a live, human-voice wake-to-reply round trip) remains manual-only, not yet performed — the `v0.2.0` tag is deferred until it is, per `sprint_2_14.md`'s own Acceptance Criteria ordering.
 
 Note: `2.11`'s dependency on Level 3's Authority System (originally noted here as "authority (3.10) partial") is now handled differently — see [sprint_2_11.md](sprint_2_11.md)'s Engineering Rationale: the `CRITICAL_EMERGENCY` priority slot is reserved in the `SwitchReason` enum but deliberately left unwired until Sprint 3.10 exists, rather than treating 3.10 as a partial dependency of this Level.
 

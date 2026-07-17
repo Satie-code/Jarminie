@@ -16,6 +16,10 @@ openwakeword>=0.6
 coqui-tts>=0.27    # Coqui TTS — the original `TTS` PyPI package is archived and has no
                    # Python 3.12-compatible release; `coqui-tts` is the maintained fork
 
+# Phase 2.1 (Sprint 2.1) — Voice Pipeline audio I/O (microphone capture and,
+# later, Sprint 2.4's speaker playback — one library serves both directions)
+sounddevice>=0.4
+
 # Phase 1.2 / 2.2 — AI runtime client
 ollama>=0.3
 

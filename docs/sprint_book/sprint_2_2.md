@@ -105,3 +105,62 @@ Medium — thread lifecycle correctness matters more than the detection logic it
 ## Next Sprint
 
 2.3 — Speech-to-Text Engine (Whisper).
+
+---
+
+## Sprint Completion Report
+
+### Summary
+
+Implemented `WakeWordDetector` (continuous background listening thread + callback-based detection), the `WakeWordEngine` Protocol, and `OpenWakeWordEngine`. Verified the listen-loop/thread lifecycle against a `FakeWakeWordEngine` (automated suite), and separately verified `OpenWakeWordEngine` against a real, downloaded openWakeWord pretrained model — a real end-to-end run, not just a fake. That real run surfaced and resolved a genuine platform issue (see Engineering Decisions) and also surfaced an important **product-level limitation worth your attention** (see Remaining Risks, first bullet) — the configured default wake phrase, `"hey jarminei"`, has no pretrained model and cannot actually be detected yet.
+
+### Files Created
+
+- `voice/wake_word.py` — `WakeWordEngine`, `OpenWakeWordEngine`, `WakeWordDetector`.
+- `tests/unit/voice/test_wake_word.py` (8 tests).
+
+### Files Modified
+
+- `voice/errors.py` — added `WakeWordError`.
+- `config/schema.py` — `VoiceConfig.wake_word_sensitivity: float = 0.5`; range validation `(0, 1]` added to `AppConfig._validate_voice()`.
+- `config/defaults.yaml` — added `wake_word_sensitivity: 0.5`.
+- `tests/unit/voice/conftest.py` — `FakeWakeWordEngine` + `fake_wake_word_engine_factory` fixture.
+- `tests/unit/config/test_schema.py` — 3 new tests for the sensitivity bound.
+- `.venv` — installed `openwakeword` (already listed in `requirements.txt` since Sprint 1.1's bootstrap; this is its actual first install, per the same per-phase install practice used for `sounddevice` in Sprint 2.1).
+
+### Engineering Decisions
+
+- **Guard-check ordering resolved as planned**: `MicrophoneManager.read_frame()`'s own "not open" check (Sprint 2.1) already takes precedence correctly; this sprint's `WakeWordDetector.start()` separately asserts the mic is in `PASSIVE_LISTENING` before launching the thread at all, so the two modules' checks don't overlap or conflict.
+- **Two different failure-handling paths inside `_listen_loop()`, by design**: a `MicrophoneError` (device-level) ends the listening thread — continuing would just busy-loop against an already-broken microphone; any other exception (an engine/processing hiccup) is logged and the loop continues, per this sprint's own Risk that "a single bad frame shouldn't end passive listening." `health_check()`'s staleness window means a *repeatedly*-failing engine still eventually reports unhealthy even though the thread stays alive.
+- **`OpenWakeWordEngine` explicitly requests `inference_framework="onnx"`** — a real finding, not something anticipated in the sprint plan: openwakeword defaults to a `tflite` backend, and `tflite-runtime` has no readily available Windows wheel (this project's only target platform). `onnxruntime` is already a transitive dependency of `openwakeword` itself, so pinning to it introduces no new dependency. Discovered by actually attempting to load a real model, not assumed from documentation.
+- **Real model files (melspectrogram/embedding/wakeword `.onnx`) are downloaded on demand via `openwakeword.utils.download_models()`**, not automatically inside `OpenWakeWordEngine.__init__()` — baking a network download into a constructor would be a surprising hidden side effect. This is an operational/deployment step (run once, or ship the files), not something this sprint's code does implicitly. Not yet wired into `main.py` since no composition root touches Level 2 modules until Sprint 2.12.
+
+### Tests Added
+
+8 in `tests/unit/voice/test_wake_word.py` (detection fires exactly once on a genuine match; no false positive when the engine never matches; `start()` rejects a non-`PASSIVE_LISTENING` mic; `stop()` really joins the thread — checked via a real `threading.Thread` reference, not a mock; health check false before start / true while running; a `MicrophoneError` mid-loop ends the thread and marks unhealthy; an engine-side failure does *not* end the thread), 3 in `tests/unit/config/test_schema.py` (sensitivity bound). **124/124 total passing** (113 from Sprint 2.1 + 11 new), `ruff check .` clean, no flakiness across 3 repeated runs of the threading-heavy test file. Plus a real (non-committed) verification: downloaded openWakeWord's actual `hey_jarvis` pretrained model and ran `OpenWakeWordEngine` against real silent audio end-to-end, confirming no false positive and, along the way, catching the `tflite`-vs-`onnx` backend issue above.
+
+### Documentation Updated
+
+`voice/wake_word.py` module and class docstrings (state the `start()`/`stop()`-as-continuous-listening framing, the two-failure-path distinction, and the `onnx` backend choice with its rationale). This Sprint Completion Report. `docs/STATUS.md` intentionally left unchanged, per this sprint's own Documentation Checklist (Phase 2.1 stays "in progress" until Sprint 2.6 closes Quiet Mode).
+
+### Acceptance Criteria Checklist
+
+- ✔ With a fake `WakeWordEngine` forced to match on a specific frame, `on_detected` fires exactly once with the correct phrase.
+- ✔ No frame content or transcript is stored anywhere beyond the scan itself (verified by inspection — `_listen_loop()` holds no buffer beyond the current frame).
+- ✔ `stop()` cleanly joins the background thread — verified against a real `threading.Thread` reference, confirmed not alive afterward.
+- ✔ A `MicrophoneError` mid-loop is caught, logged, and reflected in `health_check() -> False`, never raised out of the thread.
+
+### Remaining Risks
+
+- **Product-level, not just engineering**: the shipped default `voice.wake_phrases: ["hey jarminei"]` (set back in Sprint 1.2) has **no corresponding pretrained openWakeWord model** — `OpenWakeWordEngine` will raise `WakeWordError` at construction time if used as-configured today. Getting a real "hey jarminei" detector requires either (a) training a custom wake-word model offline (a data-collection/ML-training task, not something any coding sprint can do), or (b) changing the configured phrase to one of openWakeWord's shipped pretrained names (e.g. `hey_jarvis`) as a stand-in until a custom model exists. This wasn't discoverable until this sprint actually tried to load a real model — flagging it now rather than letting it surface silently later, and leaving the choice to you rather than changing `config/defaults.yaml`'s product-facing wake phrase unilaterally.
+- `wake_word_sensitivity`'s default (0.5) remains an unvalidated starting point — real false-positive/negative tuning needs a real microphone in a real environment, deferred to Sprint 2.12 integration as this sprint's own spec already anticipated.
+- No automatic reconnect/restart if the microphone fails mid-listen — `health_check()` correctly reports the failure; recovery orchestration is Sprint 2.13's job.
+
+### Technical Debt
+
+None introduced. (The `tflite`/`onnx` backend choice is a resolved engineering decision, not a deferred shortcut; the missing "hey jarminei" model is a pre-existing product/tech-stack reality dating to Sprint 1.2's default, surfaced here rather than caused here.)
+
+### Recommendations for Sprint 2.3
+
+- `WhisperSpeechToText` will need its own real-model verification pass, same pattern as this sprint's — budget time for a first-real-model-load surprise the way this sprint hit the tflite/onnx one.
+- Consider resolving the "hey jarminei" model gap (via a decision from you) before Sprint 2.12's integration sprint, since that's the first point a real end-to-end wake-to-speech demo becomes possible — no need to resolve it earlier than that.

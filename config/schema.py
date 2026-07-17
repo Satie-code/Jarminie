@@ -22,11 +22,15 @@ VALID_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITI
 
 @dataclass
 class VoiceConfig:
-    """Voice Engine settings (Sprint 2.1+). Wake phrases and default voice IDs."""
+    """Voice Engine settings (Sprint 2.1+). Wake phrases, default voice IDs,
+    and microphone hardware settings (Sprint 2.1 — Microphone Manager)."""
 
     wake_phrases: list[str] = field(default_factory=lambda: ["hey jarminei"])
     jarvis_voice_id: str = "jarvis_default"
     minie_voice_id: str = "minie_default"
+    mic_device_index: int | None = None
+    mic_sample_rate_hz: int = 16000
+    wake_word_sensitivity: float = 0.5
 
 
 @dataclass
@@ -137,6 +141,15 @@ class AppConfig:
         for phrase in self.voice.wake_phrases:
             if not phrase or not phrase.strip():
                 raise ConfigError("voice.wake_phrases must not contain empty strings")
+        if self.voice.mic_sample_rate_hz <= 0:
+            raise ConfigError(
+                f"voice.mic_sample_rate_hz must be positive, got {self.voice.mic_sample_rate_hz}"
+            )
+        if not (0 < self.voice.wake_word_sensitivity <= 1):
+            raise ConfigError(
+                "voice.wake_word_sensitivity must be in (0, 1], "
+                f"got {self.voice.wake_word_sensitivity}"
+            )
 
     def _validate_logging(self) -> None:
         if self.logging.level not in VALID_LOG_LEVELS:

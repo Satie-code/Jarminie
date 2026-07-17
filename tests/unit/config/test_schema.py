@@ -44,6 +44,28 @@ def test_blank_wake_phrase_raises():
         config.validate()
 
 
+def test_non_positive_mic_sample_rate_hz_raises():
+    config = AppConfig(voice=VoiceConfig(mic_sample_rate_hz=0))
+    with pytest.raises(ConfigError, match="mic_sample_rate_hz"):
+        config.validate()
+
+
+def test_wake_word_sensitivity_zero_raises():
+    config = AppConfig(voice=VoiceConfig(wake_word_sensitivity=0.0))
+    with pytest.raises(ConfigError, match="wake_word_sensitivity"):
+        config.validate()
+
+
+def test_wake_word_sensitivity_above_one_raises():
+    config = AppConfig(voice=VoiceConfig(wake_word_sensitivity=1.5))
+    with pytest.raises(ConfigError, match="wake_word_sensitivity"):
+        config.validate()
+
+
+def test_wake_word_sensitivity_at_upper_bound_is_valid():
+    AppConfig(voice=VoiceConfig(wake_word_sensitivity=1.0)).validate()
+
+
 def test_invalid_log_level_raises():
     config = AppConfig(logging=LoggingConfig(level="VERBOSE"))
     with pytest.raises(ConfigError, match="logging.level"):

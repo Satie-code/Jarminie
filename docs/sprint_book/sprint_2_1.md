@@ -112,3 +112,65 @@ Medium — first real-hardware-facing module in the project; the fake-backend te
 ## Next Sprint
 
 2.2 — Wake Word Detector.
+
+---
+
+## Sprint Completion Report
+
+### Summary
+
+Implemented `MicrophoneManager`: device open/close lifecycle, the `PASSIVE_LISTENING`/`ACTIVE_CAPTURE`/`MUTED` mode gate, and a `SoundDeviceAudioBackend` behind an `AudioBackend` Protocol seam. Established `voice/errors.py` as the shared error hierarchy for Level 2. Verified against both a fake backend (automated suite) and, opportunistically, the real microphone available on this development machine (a real-hardware smoke script, not part of the committed suite) — confirming `sounddevice`/PortAudio work correctly on Windows, which de-risks the one item this sprint's own spec flagged as unverified.
+
+### Files Created
+
+- `voice/errors.py` — `VoiceError`, `MicrophoneError`.
+- `voice/microphone.py` — `MicrophoneMode`, `AudioBackend`, `SoundDeviceAudioBackend`, `MicrophoneManager`.
+- `tests/unit/voice/conftest.py` — `FakeAudioBackend`, `fake_audio_backend` fixture, `voice_config_factory`.
+- `tests/unit/voice/test_microphone.py` (16 tests).
+
+### Files Modified
+
+- `config/schema.py` — `VoiceConfig` gained `mic_device_index: int | None = None`, `mic_sample_rate_hz: int = 16000`; `AppConfig._validate_voice()` rejects a non-positive sample rate.
+- `config/defaults.yaml` — added the two new `voice:` fields at their default values, matching the existing convention of every schema field appearing in the shipped defaults file.
+- `requirements.txt` — added `sounddevice>=0.4`.
+- `tests/unit/config/test_schema.py` — added `test_non_positive_mic_sample_rate_hz_raises`.
+- `docs/STATUS.md` — Phase 2.1 row → `Developing`.
+- `.venv` — installed `sounddevice` (+ its `cffi`/`pycparser` transitive deps), per the established per-phase install practice from `backlog/technical_debt.md` item 1.
+
+### Engineering Decisions
+
+- **Check order in `read_frame()`**: "not open" is checked before "MUTED," not the reverse — `_mode` defaults to `MUTED` before `start()` is ever called, so checking MUTED first would have misreported a genuinely never-started manager as merely muted. Caught by a failing test (`test_read_frame_raises_before_start`) during implementation, not assumed correct in the plan.
+- **`set_mode()` is mechanism-only, as flagged in the approved plan**: any of the three modes is settable once the device is open; this sprint does not police *which* transitions make sense for the conversation state (that's Quiet Mode Controller's job, Sprint 2.6).
+- **Mode changes never reopen/close the underlying stream** — `MUTED` is a logical gate on `read_frame()`, not a hardware pause, avoiding repeated expensive PortAudio stream open/close cycles (Resource Protection).
+- **`health_check()` reports last-known state rather than probing** — consistent with the existing "Core owns how, a caller owns when" pattern from `core/manager.py`; a failed `read_frame()` is what actually flips it to unhealthy, mirroring how `ResourceMonitor`/`CoreManager.check_resources()` is caller-triggered, not internally polled.
+- **Frame size derived from `mic_sample_rate_hz`** (30ms chunks) rather than a second, independent constant — verified at two different sample rates (16kHz → 480 samples, 8kHz → 240 samples) to confirm it actually scales rather than just working at the default.
+
+### Tests Added
+
+16 in `tests/unit/voice/test_microphone.py` (start/stop lifecycle, health check across start/stop/failure, frame-size derivation at two sample rates, MUTED gating, mode-transition validity before/after open, backend-failure → `MicrophoneError` + unhealthy), 1 in `tests/unit/config/test_schema.py` (sample-rate validation). 113/113 total passing, `ruff check .` clean. Plus a real-hardware smoke script (scratchpad, not committed, matching the Sprint 1.6 precedent for this kind of verification) exercising the actual Realtek microphone on this machine end-to-end — passive frame, active frame, MUTED rejection, and post-stop health all confirmed against real audio hardware, not just the fake.
+
+### Documentation Updated
+
+`voice/microphone.py` and `voice/errors.py` module docstrings (mode gate, Microphone Rule reference, error hierarchy purpose). `docs/STATUS.md`. This Sprint Completion Report.
+
+### Acceptance Criteria Checklist
+
+- ✔ `start()` opens the configured device in `PASSIVE_LISTENING`; `stop()` releases it cleanly.
+- ✔ Exactly one mode active at a time; the API only ever exposes `current_mode()` as a single value — no dual-mode state is representable.
+- ✔ Backend failures are caught, logged, and surface via `health_check() -> False`, never raised out of a caller's control flow uncaught.
+- ✔ No frame is ever readable in `MUTED` mode (raises `MicrophoneError`, confirmed the backend's `read()` is never even called in that case).
+
+### Remaining Risks
+
+- `sounddevice` behavior was verified only on this one development machine's microphone/driver combination (Realtek, MME/WASAPI backends available) — different hardware on the eventual target laptop could still surface a different real-world issue; the risk is reduced, not eliminated.
+- `MicrophoneManager` itself has no automatic reconnect/retry if a device disappears mid-stream — it correctly reports unhealthy via `health_check()`, but recovery (via `CoreManager.restart_module()`) is Sprint 2.13's (Error Handling & Recovery Hardening) responsibility, not this sprint's, per the Sprint Book's own scoping.
+- `config/loader.py`'s env-var coercion (`_coerce()`) does not special-case `Optional`/Union-typed fields — an env override for `mic_device_index` (typed `int | None`) would currently fall through to being left as a raw string rather than coerced to `int` or `None`. Not exercised by any acceptance criterion in this sprint (no test needs it), and no existing Level 1 field hit this case either; flagged here rather than silently patched, since fixing `_coerce()` was outside this sprint's approved Files to Modify.
+
+### Technical Debt
+
+None introduced (the `_coerce()` Optional-typing gap above is a pre-existing limitation surfaced by this sprint's new field, not a shortcut taken by it — recorded as a Remaining Risk rather than formal technical debt since nothing currently depends on it working).
+
+### Recommendations for Sprint 2.2
+
+- `WakeWordDetector` should receive its `MicrophoneManager` via constructor DI and call `read_frame()` in `PASSIVE_LISTENING` mode from its own background thread — no changes to `MicrophoneManager`'s public API are anticipated.
+- The real-hardware smoke test pattern established here (open → read in each mode → confirm MUTED rejection → stop) is cheap to extend once Sprint 2.2 exists — worth chaining a wake-word-in-the-loop version of it rather than writing one from scratch.

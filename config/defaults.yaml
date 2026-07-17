@@ -7,6 +7,9 @@ voice:
     - "hey jarminei"
   jarvis_voice_id: "jarvis_default"
   minie_voice_id: "minie_default"
+  mic_device_index: null
+  mic_sample_rate_hz: 16000
+  wake_word_sensitivity: 0.5
 
 resources:
   cpu_warning_percent: 70.0

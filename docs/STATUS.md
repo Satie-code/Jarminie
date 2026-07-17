@@ -16,7 +16,7 @@ Tracks progress against the roadmap in [04_Master_Implementation_Plan.md](04_Mas
 
 | Phase | Status |
 |---|---|
-| 2.1 Voice Pipeline | Planned |
+| 2.1 Voice Pipeline | Developing (Sprint 2.1 Microphone Manager complete; see [sprint_book/sprint_2_1.md](sprint_book/sprint_2_1.md)) |
 | 2.2 Conversation Engine | Planned |
 | 2.3 Persona Engine | Planned |
 

@@ -51,6 +51,14 @@ class VoiceConfig:
     wake_phrases: list[str] = field(default_factory=lambda: ["hey_jarvis"])
     jarvis_voice_id: str = "p340"
     minie_voice_id: str = "p243"
+    # Sprint 2.11 — Persona Switching's Explicit Selection input (matched
+    # case-insensitively as plain substrings by PersonaManager; no NLU).
+    jarvis_trigger_phrases: list[str] = field(
+        default_factory=lambda: ["talk to jarvis", "switch to jarvis"]
+    )
+    minie_trigger_phrases: list[str] = field(
+        default_factory=lambda: ["talk to minie", "switch to minie"]
+    )
     mic_device_index: int | None = None
     mic_sample_rate_hz: int = 16000
     wake_word_sensitivity: float = 0.5
@@ -81,10 +89,18 @@ class ResourceThresholds:
 
 @dataclass
 class DatabaseConfig:
-    """Persistence paths (Sprint 3.1+)."""
+    """Persistence paths (Sprint 3.1+) and policy (Sprint 2.7+).
+
+    conversation_retention_days is Conversation Session Store's (Sprint 2.7)
+    rolling-log retention window — lives here, alongside the paths, rather
+    than in VoiceConfig, since persistence *policy* belongs next to
+    persistence *paths* (this dataclass's existing responsibility), not
+    inside the Voice Engine's own settings.
+    """
 
     sqlite_path: str = "database/jarminei.db"
     chroma_path: str = "database/chroma"
+    conversation_retention_days: int = 30
 
 
 @dataclass
@@ -210,6 +226,13 @@ class AppConfig:
                 "voice.max_utterance_seconds must be positive, "
                 f"got {self.voice.max_utterance_seconds}"
             )
+        for field_name in ("jarvis_trigger_phrases", "minie_trigger_phrases"):
+            phrases = getattr(self.voice, field_name)
+            if not phrases:
+                raise ConfigError(f"voice.{field_name} must not be empty")
+            for phrase in phrases:
+                if not phrase or not phrase.strip():
+                    raise ConfigError(f"voice.{field_name} must not contain empty strings")
 
     def _validate_models(self) -> None:
         if not (0 < self.models.whisper_no_speech_threshold <= 1):
@@ -241,3 +264,8 @@ class AppConfig:
             raise ConfigError("database.sqlite_path must not be empty")
         if not self.database.chroma_path.strip():
             raise ConfigError("database.chroma_path must not be empty")
+        if self.database.conversation_retention_days <= 0:
+            raise ConfigError(
+                "database.conversation_retention_days must be positive, "
+                f"got {self.database.conversation_retention_days}"
+            )

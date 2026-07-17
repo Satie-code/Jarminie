@@ -98,3 +98,18 @@ Low — structurally identical to 2.9 by design.
 ## Next Sprint
 
 2.11 — Persona Switching & Explicit Selection.
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered exactly the files this sprint's spec named:
+
+- `personas/minie.py` — `MiniePersona(Persona)`, constructor DI on `VoiceConfig`, `voice_id` bound to `minie_voice_id`.
+- `tests/unit/personas/test_minie.py` — 11 tests, including the spec-mandated shared parametrized contract test (`test_persona_contract_shape_is_identical_across_implementations`, parametrized over `[JarvisPersona, MiniePersona]`).
+
+**`personas/base.py` needed no changes** — confirming, per this sprint's own Objectives, that the `Persona` ABC from Sprint 2.9 was correctly designed for a second implementation rather than under-fitted to Jarvis alone. No files were modified. 227/227 tests passing project-wide (216 prior + 11 new), `ruff check .` clean.
+
+**All Acceptance Criteria met**: `MiniePersona.voice_id` always resolves through `VoiceConfig.minie_voice_id` (tested with both a non-default value and the schema default); `compose_reply()` was exercised with normal/empty/whitespace-only/very-long transcripts and never raises, matching Jarvis's robustness guarantee; the shared parametrized contract test asserts identical shape (`isinstance(persona, Persona)`, non-empty `name`/`voice_id`/`describe()`, a string `compose_reply()` result that's never empty even for blank input) against both concrete classes — the concrete proof the `Persona` abstraction is sound and `PersonaManager` (2.11) can depend on it alone.
+
+**Placeholder discipline maintained per this sprint's own Risks**: `MiniePersona.compose_reply()` is template-only, tonally warmer than Jarvis's ("Got it — you said... I'm here if you need anything else." vs. Jarvis's "Understood. You said...") but structurally identical — no wellness logic, no emotional inference, no keyword branching. `test_minie_reply_tone_is_textually_distinct_from_jarvis` confirms the two replies differ as strings, without asserting anything about "how different" they should feel — deliberately not over-investing in placeholder personality depth, per the spec's explicit caution against doing so at this Level.
+
+`docs/STATUS.md` intentionally **not changed** — per this sprint's own Documentation Checklist, Phase 2.3 (Persona Engine) stays **Designing** until Sprint 2.11 (Persona Switching) closes the phase. **Sprint 2.11 (Persona Switching & Explicit Selection) is next.**

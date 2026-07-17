@@ -173,6 +173,34 @@ def fake_tts() -> FakeTextToSpeech:
     return FakeTextToSpeech()
 
 
+class FakeVoiceSessionManager:
+    """In-memory VoiceSessionManager double — never touches a real
+    microphone, STT, or TTS. begin_session() just records that it was
+    called and flips is_active(); a test controls is_active() directly via
+    set_active() to simulate the real session lifecycle for health_check()
+    consistency checks."""
+
+    def __init__(self) -> None:
+        self.begin_session_calls = 0
+        self._active = False
+
+    def begin_session(self):
+        self.begin_session_calls += 1
+        self._active = True
+        return None
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+
+
+@pytest.fixture
+def fake_session_manager() -> FakeVoiceSessionManager:
+    return FakeVoiceSessionManager()
+
+
 @pytest.fixture
 def voice_config_factory():
     """Factory fixture: build a VoiceConfig with sensible defaults,

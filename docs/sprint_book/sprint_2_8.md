@@ -97,3 +97,18 @@ Low-Medium — the aggregation logic itself is simple; the discipline is in resi
 ## Next Sprint
 
 2.9 — Persona Base & Jarvis Persona.
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered exactly the files this sprint's spec named, nothing else:
+
+- `voice/context_manager.py` — `ConversationContext` (dataclass), `ContextManager` (plain class, not a `ManagedModule`, per spec).
+- `tests/unit/voice/test_context_manager.py` — 10 tests, all against a real `ConversationSessionStore` backed by a real SQLite file under `tmp_path` (Sprint 2.7's own established pattern — `ContextManager`'s job is aggregating exactly what the store returns, so exercising the real store's bounded-window/ordering contract together with this module's logic is the most faithful test of "reflects exactly... from the store").
+
+No files were modified — `voice/conversation_store.py` is untouched, per the spec's own "Files to Modify: None." 207/207 tests passing project-wide (197 prior + 10 new), `ruff check .` clean.
+
+**All Acceptance Criteria met**: `current_context()` returns exactly the configured `recent_turn_window` most recent turns oldest-first (tested at the boundary — exactly 6, and one over at 7, confirming the oldest turn is the one dropped); an empty session returns an empty `recent_turns` list rather than erroring; calling `current_context()` twice with an unchanged store returns equal (dataclass `==`, not identity) results, and a newly recorded turn is picked up on the very next call (no internal caching). No inference/scoring/classification dependency exists anywhere in the module — its only imports are `dataclasses`, `datetime`, and `voice.conversation_store`.
+
+**One real spec gap resolved during implementation, worth recording**: the spec's `ConversationContext` wants `session_started_at`/`last_activity_at` fields, and its Objectives line describes them as "session timing metadata (from 2.5)" — but this sprint's Dependencies list only 2.7, and `ContextManager`'s Expected Classes constructor signature is explicitly `(store: ConversationSessionStore, recent_turn_window: int = 6)`, with no `VoiceSessionManager` parameter to read live session timing from. Files to Modify is also "None," ruling out adding a new timing-query method to `ConversationSessionStore`. Resolved by deriving both timestamps purely from the bounded `recent_turns` window `get_recent_turns()` already returns: `session_started_at` = earliest turn's timestamp, `last_activity_at` = latest turn's timestamp, both within the same window — meaning for a session with more history than `recent_turn_window`, `session_started_at` reflects the start of the *visible window*, not the session's true first turn. This is documented as a deliberate approximation in `current_context()`'s own docstring (a working-context aggregator, not a historical record). For a session with zero turns, both fields fall back to the moment of the call (`datetime.now(UTC)`), covered by `test_empty_session_timing_metadata_defaults_to_now`. If a future sprint (2.9+, or Sprint 2.12 integration) needs the *true* session start rather than the visible window's start, that would mean either widening the query in `ConversationSessionStore` or injecting `VoiceSessionManager` directly — flagged here rather than guessed at, since it wasn't needed by anything in this sprint's own Acceptance Criteria.
+
+Phase 2.2 (Conversation Engine) is now **Complete** — `docs/STATUS.md` updated accordingly. **Sprint 2.9 (Persona Base & Jarvis Persona) is next.**

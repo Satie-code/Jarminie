@@ -111,3 +111,31 @@ Medium — the SQLite mechanics are simple; the discipline of *not* growing this
 ## Next Sprint
 
 2.8 — Context Manager.
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered exactly the files this sprint's spec named:
+
+- `database/sqlite_client.py` — `SqliteClient` (`connect`/`execute`/`query`/`close`), WAL mode enabled on connect, schema-agnostic per the spec.
+- `voice/conversation_store.py` — `ConversationTurn` (dataclass), `ConversationSessionStore(ManagedModule)`.
+- `voice/errors.py` — `ConversationStoreError(VoiceError)` added.
+- `config/schema.py` — `DatabaseConfig.conversation_retention_days: int = 30`, validated (`> 0`) in `AppConfig._validate_paths()`; `config/defaults.yaml` updated to match. No `config/loader.py` change needed — `database` was already registered in `_SECTION_SCHEMAS` (Sprint 1.2), so the new field is picked up by file/env loading automatically (the exact step that was easy to forget, per this project's own Sprint 1.8 lesson — checked and confirmed not applicable here since only a *field*, not a new *section*, was added).
+- `tests/unit/database/test_sqlite_client.py` (7 tests), `tests/unit/voice/test_conversation_store.py` (12 tests), plus one new test in `tests/unit/config/test_schema.py`. 197/197 tests passing project-wide (177 prior + 20 new), `ruff check .` clean.
+
+**All Acceptance Criteria met**, each verified against a real SQLite file under `tmp_path` (no mocking of the persistence path itself, matching the spec's own "real save, real reload" framing):
+
+- `record_turn()` → `get_recent_turns()` round-trip verified, including a genuine restart simulation (`test_turns_survive_a_simulated_restart`: a second, independent `SqliteClient` + `ConversationSessionStore` pair pointed at the same file, after the first pair's `stop()`).
+- A failed write is caught and logged without raising (`test_record_turn_swallows_and_logs_a_write_failure`, via a small local `_RaisingSqliteClient` double — see Engineering Decisions below).
+- `purge_older_than()` boundary behavior tested with three rows (well-within / just-under / just-over a 1-day retention window) — only the strictly-older row is removed, return value matches the removed count.
+- No table other than `conversation_turns` is created; no relevance/importance/scoring column exists anywhere in this sprint's code.
+
+**Two engineering decisions made during implementation, not fully specified by the sprint file, recorded here:**
+
+1. **`get_recent_turns()` return order**: the spec didn't state whether results come back newest-first or oldest-first. Implemented as oldest-first (chronological) within the returned window — `SELECT ... ORDER BY timestamp DESC LIMIT ?` then reversed in Python — since the stated consumer (Context Manager, Sprint 2.8, per this file's own Data Flow) wants a directly-usable recent-transcript window, not a list it has to reverse itself. Documented in `get_recent_turns()`'s own docstring.
+2. **`purge_older_than()`'s `days` parameter was given a default** (`int | None = None`, falling back to `database_config.conversation_retention_days`) rather than staying a bare required `int` as the spec's Expected Functions line literally shows. This is what actually gives the sprint's own `database_config: DatabaseConfig` constructor parameter a real, immediate use — without it, `database_config` would have been accepted but never read anywhere in this sprint's code, an "unused for now, forward-compatible" pattern this project has used before (`CoreManager.__init__`, Sprint 1.5) but only as a last resort. A caller can still pass `days` explicitly to override the configured default. `test_purge_older_than_defaults_to_configured_retention` covers the no-argument path.
+
+**Boundary-test timing note**: the "just-under"/"just-over" purge tests use 1-minute margins around the 1-day retention boundary rather than millisecond-exact timestamps, to stay robust against normal test-execution jitter while still exercising the strict-less-than cutoff semantics ("exactly at the window" is kept, not purged). Documented inline in the test file.
+
+**No real-hardware/model verification needed or run** — unlike the voice-pipeline sprints (2.1–2.6), this sprint's only external dependency is Python's stdlib `sqlite3` against a real file, which every test already exercises directly (no fake/mock stands in for SQLite itself; only the one write-failure-injection test uses a double, and only for the `execute()` call it needs to fail).
+
+`docs/STATUS.md` updated: Phase 2.2 (Conversation Engine) is now **Designing** (this sprint done; 2.8 Context Manager onward still Planned). **Sprint 2.8 (Context Manager) is next.**

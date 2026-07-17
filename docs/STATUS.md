@@ -16,9 +16,9 @@ Tracks progress against the roadmap in [04_Master_Implementation_Plan.md](04_Mas
 
 | Phase | Status |
 |---|---|
-| 2.1 Voice Pipeline | Developing (Sprint 2.1 Microphone Manager complete; see [sprint_book/sprint_2_1.md](sprint_book/sprint_2_1.md)) |
-| 2.2 Conversation Engine | Planned |
-| 2.3 Persona Engine | Planned |
+| 2.1 Voice Pipeline | Complete — all six sprints done (2.1 Microphone Manager, 2.2 Wake Word Detector, 2.3 Speech-to-Text, 2.4 Text-to-Speech, 2.5 Voice Session Manager & Timeout, 2.6 Quiet Mode Controller); see [sprint_book/INDEX.md](sprint_book/INDEX.md). Wake phrase, speech recognition, and voice responses all function (verified against fakes for the Quiet Mode state machine; real-hardware/model verification done per-sprint in 2.1–2.5). Wiring these modules together in `main.py` is deferred to Sprint 2.12 (Communication Pipeline Integration) by design. |
+| 2.2 Conversation Engine | Complete — both sprints done (2.7 Conversation Session Store, 2.8 Context Manager); see [sprint_book/INDEX.md](sprint_book/INDEX.md). `database/sqlite_client.py`, `voice/conversation_store.py`, and `voice/context_manager.py` assemble a queryable working-context object (recent turns, active persona, session timing) from persisted turns — no inference/scoring anywhere in this phase, by design (that's Level 3's Decision Engine). |
+| 2.3 Persona Engine | Complete — all three sprints done (2.9 Persona Base & Jarvis Persona, 2.10 Minie Persona, 2.11 Persona Switching & Explicit Selection); see [sprint_book/INDEX.md](sprint_book/INDEX.md). `PersonaManager` enforces exactly-one-active-persona with Part 2's full priority-ordered switching mechanism — only Explicit Selection and a heuristic Context Detection are wired in Level 2; Critical Emergency (Sprint 3.10) and Daily Routine (Sprint 4.8+) are named but reserved. `compose_reply()` remains a deliberate Level 2 placeholder (templated acknowledgement, no real reasoning) until Sprint 3.7's Decision Engine. **This closes all of Level 2's individual-component sprints (2.1–2.11).** |
 
 ## Level 3 — Intelligence (target: v0.3)
 

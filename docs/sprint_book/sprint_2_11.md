@@ -115,3 +115,21 @@ Medium-High — the priority-ordered switching/resume logic has more edge cases 
 ## Next Sprint
 
 2.12 — Communication Pipeline Integration.
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered the files this sprint's spec named:
+
+- `personas/persona_manager.py` — `SwitchReason` (Enum, declaration order = priority), `PersonaManager(ManagedModule)`.
+- `tests/unit/personas/test_persona_manager.py` — 20 tests.
+- `config/schema.py` — `VoiceConfig.jarvis_trigger_phrases`/`minie_trigger_phrases` added, plus validation (non-empty, no blank entries) in `_validate_voice()`, mirroring the existing `wake_phrases` pattern; `config/defaults.yaml` updated to match. 4 new tests added to `tests/unit/config/test_schema.py` for this validation — not explicitly called out in the sprint's own Testing Checklist, but a natural extension of the already-established `wake_phrases` validation convention for a new field of the same shape, not a new feature.
+
+251/251 tests passing project-wide (227 prior + 24 new), `ruff check .` clean.
+
+**All Acceptance Criteria met**: exactly one persona is active at all times, verified both through normal operation sequences (`test_exactly_one_persona_active_across_a_sequence_of_operations`) and defensively — `health_check()` correctly fails when the internal per-persona active-flag dict is deliberately corrupted to zero or two flags set, which is *why* active state is tracked as a flag dict rather than a single reference (a single reference would make "two active" structurally impossible to simulate, defeating the point of this sprint's own defensive Testing Checklist item). An explicit selection ("talk to minie") switches both the active persona and its `voice_id` correctly. `CONTEXT_DETECTION` cannot override a persona active via `EXPLICIT_SELECTION` — confirmed directly. `resume_previous()` restores the correct prior persona after a simulated `CRITICAL_EMERGENCY` interruption (no real emergency trigger exists until Sprint 3.10, so the sprint's own Acceptance Criteria explicitly call for a fake higher-priority interruption in tests) and is a no-op, logged, when nothing is recorded to resume.
+
+**One design decision made during implementation, not literally specified, recorded here**: active-persona state is a `dict[str, bool]` of per-persona flags (`_active_flags`) plus a `_active_name: str | None` pointer, rather than a single `Persona | None` reference. This is what makes "confirms exactly one persona is active" (Expected Interfaces' `health_check()` description) and the Testing Checklist's explicit "fails if internal state ever ends up with zero or more than one active flag set" item both literally testable — a test can directly corrupt `_active_flags` to simulate the bug class being defended against, which a single-reference design would make structurally impossible to even express.
+
+**Placeholder discipline maintained per this sprint's own Risks**: `detect_context_heuristic()`'s keyword lists (`_MINIE_HEURISTIC_KEYWORDS`/`_JARVIS_HEURISTIC_KEYWORDS`) are a small, non-configurable module-level constant, explicitly documented as a known-crude Sprint 3.8 replacement candidate — not promoted to `VoiceConfig`, per the spec's own instruction that doing so would overstate its permanence. `resume_previous()` tracks exactly one prior (persona, reason) pair, not a stack (`test_resume_previous_only_restores_one_level` confirms a second call after a completed resume is a no-op) — deeper resume-of-resume semantics are deliberately left unsolved, per the spec's explicit caution against over-engineering ahead of Sprint 3.10's real emergency wiring.
+
+This sprint closes Phase 2.3 (Persona Engine) **and, in combination with Sprints 2.1–2.10, all of Level 2's individual-component sprints** — `docs/STATUS.md` updated accordingly. **Sprint 2.12 (Communication Pipeline Integration) is next** — the first sprint that actually wires `main.py`/`CoreManager` to every component built across 2.1–2.11 (every one of those sprints deliberately left `main.py` untouched for exactly this reason).

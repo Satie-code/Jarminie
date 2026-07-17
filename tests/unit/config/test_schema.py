@@ -5,6 +5,7 @@ import pytest
 from config.errors import ConfigError
 from config.schema import (
     AppConfig,
+    DatabaseConfig,
     LoggingConfig,
     ModelConfig,
     ResourceThresholds,
@@ -48,6 +49,30 @@ def test_empty_wake_phrases_raises():
 def test_blank_wake_phrase_raises():
     config = AppConfig(voice=VoiceConfig(wake_phrases=["  "]))
     with pytest.raises(ConfigError, match="wake_phrases"):
+        config.validate()
+
+
+def test_empty_jarvis_trigger_phrases_raises():
+    config = AppConfig(voice=VoiceConfig(jarvis_trigger_phrases=[]))
+    with pytest.raises(ConfigError, match="jarvis_trigger_phrases"):
+        config.validate()
+
+
+def test_blank_jarvis_trigger_phrase_raises():
+    config = AppConfig(voice=VoiceConfig(jarvis_trigger_phrases=["  "]))
+    with pytest.raises(ConfigError, match="jarvis_trigger_phrases"):
+        config.validate()
+
+
+def test_empty_minie_trigger_phrases_raises():
+    config = AppConfig(voice=VoiceConfig(minie_trigger_phrases=[]))
+    with pytest.raises(ConfigError, match="minie_trigger_phrases"):
+        config.validate()
+
+
+def test_blank_minie_trigger_phrase_raises():
+    config = AppConfig(voice=VoiceConfig(minie_trigger_phrases=["  "]))
+    with pytest.raises(ConfigError, match="minie_trigger_phrases"):
         config.validate()
 
 
@@ -131,6 +156,12 @@ def test_empty_database_path_raises():
     config = AppConfig()
     config.database.sqlite_path = ""
     with pytest.raises(ConfigError, match="sqlite_path"):
+        config.validate()
+
+
+def test_non_positive_conversation_retention_days_raises():
+    config = AppConfig(database=DatabaseConfig(conversation_retention_days=0))
+    with pytest.raises(ConfigError, match="conversation_retention_days"):
         config.validate()
 
 

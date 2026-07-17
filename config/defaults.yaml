@@ -13,6 +13,13 @@ voice:
   # user-confirmed by ear 2026-07-17 — see backlog/technical_debt.md item 7.
   jarvis_voice_id: "p340"
   minie_voice_id: "p243"
+  # Sprint 2.11 — Persona Switching's Explicit Selection input.
+  jarvis_trigger_phrases:
+    - "talk to jarvis"
+    - "switch to jarvis"
+  minie_trigger_phrases:
+    - "talk to minie"
+    - "switch to minie"
   mic_device_index: null
   mic_sample_rate_hz: 16000
   wake_word_sensitivity: 0.5
@@ -38,6 +45,8 @@ resources:
 database:
   sqlite_path: "database/jarminei.db"
   chroma_path: "database/chroma"
+  # Sprint 2.7 — Conversation Session Store's rolling-log retention window.
+  conversation_retention_days: 30
 
 models:
   ollama_model: "gemma3"

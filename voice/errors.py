@@ -31,3 +31,10 @@ class TextToSpeechError(VoiceError):
 
 class SessionError(VoiceError):
     """Raised for voice session lifecycle failures."""
+
+
+class ConversationStoreError(VoiceError):
+    """Raised for conversation session store lifecycle failures (e.g.
+    starting before the underlying SQLite connection can be opened).
+    Individual failed reads/writes are logged, not raised — see
+    ConversationSessionStore.record_turn()."""

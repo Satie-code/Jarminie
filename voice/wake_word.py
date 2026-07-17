@@ -30,6 +30,12 @@ stuck failing repeatedly, not just a dead thread."""
 
 _THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 
+_MODE_POLL_SECONDS = 0.1
+"""How often the listen loop re-checks the microphone's mode while paused
+(mode is not PASSIVE_LISTENING — a voice session is active). Short enough
+to resume wake-word scanning promptly once the session ends and the
+microphone returns to PASSIVE_LISTENING."""
+
 
 class WakeWordEngine(Protocol):
     """Wake-phrase detection contract. Interface-first per
@@ -141,6 +147,22 @@ class WakeWordDetector:
 
     def _listen_loop(self) -> None:
         while not self._stop_event.is_set():
+            if self._mic.current_mode() is not MicrophoneMode.PASSIVE_LISTENING:
+                # A voice session is active (or the mic is muted) — reading
+                # frames here would steal audio VoiceSessionManager's own
+                # utterance capture needs, since both threads would
+                # otherwise read the same underlying stream concurrently
+                # with no coordination (found during Sprint 2.12's real
+                # end-to-end integration testing, not by unit tests, which
+                # never ran both threads together against a real/fake
+                # microphone at once). Pause until PASSIVE_LISTENING
+                # resumes rather than busy-looping. This counts as
+                # healthy, not stale: deliberately idle is not the same
+                # failure mode _last_processed_at's staleness check exists
+                # to catch.
+                self._last_processed_at = time.monotonic()
+                self._stop_event.wait(timeout=_MODE_POLL_SECONDS)
+                continue
             try:
                 frame = self._mic.read_frame()
                 phrase = self._engine.process(frame)

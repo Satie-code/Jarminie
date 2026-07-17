@@ -8,6 +8,7 @@ Checklist, mirroring the Whisper/Coqui precedent from the Sprint Book).
 """
 
 import threading
+import time
 
 import pytest
 
@@ -16,6 +17,10 @@ from voice.microphone import MicrophoneManager, MicrophoneMode
 from voice.wake_word import WakeWordDetector
 
 _WAIT_TIMEOUT = 2.0
+_PAUSE_OBSERVE_SECONDS = 0.3
+"""Long enough to span several of the listen loop's _MODE_POLL_SECONDS
+(0.1s) intervals, so a regression that resumes reading frames too eagerly
+would show up as engine.calls increasing during this window."""
 
 
 @pytest.fixture
@@ -140,4 +145,72 @@ def test_engine_processing_failure_does_not_end_passive_listening(
         assert detector._thread.is_alive()
     finally:
         engine.should_raise = False
+        detector.stop()
+
+
+def test_listen_loop_pauses_while_mic_not_passive_listening(
+    started_mic, fake_wake_word_engine_factory
+):
+    """Regression test for a real bug found during Sprint 2.12's real
+    end-to-end integration testing (never caught by any of this file's
+    other tests, since none of them ran the listen loop concurrently with
+    an active session): the loop used to call mic.read_frame()
+    unconditionally, stealing frames from VoiceSessionManager's own
+    utterance capture once a session made the microphone ACTIVE_CAPTURE."""
+    engine = fake_wake_word_engine_factory()
+    detector = WakeWordDetector(started_mic, engine, lambda phrase: None)
+    detector.start()
+    try:
+        assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+        calls_before_pause = engine.calls
+
+        started_mic.set_mode(MicrophoneMode.ACTIVE_CAPTURE)
+        time.sleep(_PAUSE_OBSERVE_SECONDS)
+
+        assert engine.calls == calls_before_pause
+    finally:
+        started_mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
+        detector.stop()
+
+
+def test_listen_loop_resumes_after_mic_returns_to_passive_listening(
+    started_mic, fake_wake_word_engine_factory
+):
+    engine = fake_wake_word_engine_factory()
+    detector = WakeWordDetector(started_mic, engine, lambda phrase: None)
+    detector.start()
+    try:
+        assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+
+        started_mic.set_mode(MicrophoneMode.ACTIVE_CAPTURE)
+        time.sleep(_PAUSE_OBSERVE_SECONDS)
+        calls_while_paused = engine.calls
+        engine.processed_event.clear()
+
+        started_mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
+
+        assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+        assert engine.calls > calls_while_paused
+    finally:
+        detector.stop()
+
+
+def test_health_check_stays_true_while_paused_for_an_active_session(
+    started_mic, fake_wake_word_engine_factory
+):
+    """Deliberately idle (session active) must not be reported the same
+    as stuck-and-failing — see _listen_loop()'s own comment on why
+    _last_processed_at is still updated during the pause."""
+    engine = fake_wake_word_engine_factory()
+    detector = WakeWordDetector(started_mic, engine, lambda phrase: None)
+    detector.start()
+    try:
+        assert engine.processed_event.wait(timeout=_WAIT_TIMEOUT)
+
+        started_mic.set_mode(MicrophoneMode.ACTIVE_CAPTURE)
+        time.sleep(_PAUSE_OBSERVE_SECONDS)
+
+        assert detector.health_check() is True
+    finally:
+        started_mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
         detector.stop()

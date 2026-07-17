@@ -121,3 +121,20 @@ Medium — the state machine itself is small; getting the callback wiring direct
 ## Next Sprint
 
 2.7 — Conversation Session Store.
+
+## Sprint Completion Report (2026-07-17)
+
+Delivered exactly the files this sprint's spec named:
+
+- `voice/quiet_mode.py` — `OperatingMode`, `ActivationReason`, `QuietModeController`.
+- `tests/unit/voice/test_quiet_mode.py` — 13 unit tests, all against a fake `VoiceSessionManager` (`FakeVoiceSessionManager`, added to `tests/unit/voice/conftest.py` alongside the project's other fake doubles).
+
+No files were modified beyond `docs/STATUS.md` and this file — `voice/wake_word.py` and `voice/session_manager.py` are untouched, per the spec's own "Files to Modify: None."
+
+**All Acceptance Criteria met**: starts `DORMANT`; a wake-word detection (via `_on_wake_word_detected`) transitions to `ACTIVE` and calls `begin_session()` exactly once; a second detection while `ACTIVE` is a no-op (`begin_session_calls` stays at 1); a session-end event (tested for every `SessionEndReason` value) transitions back to `DORMANT`; `health_check()` returns `False` for either inconsistent combination (`ACTIVE` with no session running, or `DORMANT` with one still running), not just the single example the spec called out. 177/177 tests passing project-wide (164 prior + 13 new), `ruff check .` clean.
+
+**One real engineering decision this sprint's spec left ambiguous, resolved and worth recording**: the spec's Expected Classes section says `QuietModeController` "Registers itself as `WakeWordDetector`'s `on_detected` callback and `VoiceSessionManager`'s `on_session_ended` callback at `start()`" — but both those callbacks are fixed as constructor-only parameters on their respective classes (confirmed by reading `voice/wake_word.py` and `voice/session_manager.py`; neither has a post-construction setter), and this sprint's own "Files to Modify: None" rules out adding one. Also, the spec's constructor signature for `QuietModeController` names only `session_manager`, not a `WakeWordDetector` reference to call a setter on even if one existed. Resolved by reading "registers... at start()" as describing the *effect*, not a literal live API call: the actual callable wiring (passing `controller._on_wake_word_detected` / `controller._on_session_ended` into `WakeWordDetector`'s and `VoiceSessionManager`'s own constructors) happens wherever those two objects are themselves assembled — which, per the existing Sprint Book design (`sprint_2_1.md`'s Engineering Rationale, item 18 of the sprint-workflow history), is Sprint 2.12 (Communication Pipeline Integration), the sprint that owns all `main.py`/`CoreManager` wiring by design. To still give `start()`/`stop()` real, testable meaning matching "attaches/detaches," both internal callback handlers now check a `_started` flag and ignore (log, no transition) a callback that fires while stopped — so the controller only *reacts* to wiring while running, even though the bound-method references themselves exist for its whole lifetime. This is documented at the top of `voice/quiet_mode.py`'s module docstring so Sprint 2.12 doesn't need to rediscover it.
+
+**Verification note**: per this sprint's own Acceptance Criteria ("verified against fakes... not real hardware"), no real-hardware/real-model smoke test was run — `QuietModeController` has no hardware or ML dependency of its own, and the real end-to-end wake-word-to-session wiring this module enables will get its first real, non-mocked exercise in Sprint 2.12, once `main.py` actually constructs all the pieces together.
+
+Phase 2.1 (Voice Pipeline) is now **Complete** — `docs/STATUS.md` updated accordingly. **Sprint 2.7 (Conversation Session Store) is next.**

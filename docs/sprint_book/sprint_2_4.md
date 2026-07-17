@@ -106,3 +106,78 @@ Medium-High — multi-speaker model configuration and playback-completion timing
 ## Next Sprint
 
 2.5 — Voice Session Manager & Timeout.
+
+---
+
+## Sprint Completion Report
+
+### Summary
+
+Implemented `AudioOutput`/`SoundDeviceAudioOutput`, `TextToSpeech`, and `CoquiTextToSpeech`. Automated tests mock `TTS.api.TTS` (per this sprint's own Testing Checklist). Getting the real, non-mocked Coqui model chain working surfaced **four separate real dependency issues in sequence**, each resolved except the last, which needs a decision from you before real audio can be verified.
+
+### Files Created
+
+- `voice/text_to_speech.py` — `AudioOutput`, `SoundDeviceAudioOutput`, `TextToSpeech`, `CoquiTextToSpeech`.
+- `tests/unit/voice/test_text_to_speech.py` (12 tests).
+
+### Files Modified
+
+- `voice/errors.py` — added `TextToSpeechError`.
+- `config/schema.py` / `config/defaults.yaml` — `ModelConfig.tts_model: str = "tts_models/en/vctk/vits"`.
+- `requirements.txt` — `coqui-tts>=0.27` → `coqui-tts[codec]>=0.27`, plus an explicit `torchaudio` line.
+- `docs/backlog/technical_debt.md` — items 6 (resolved) and 7 (open, needs your input).
+- `.venv` — installed `coqui-tts[codec]`, `torchaudio`, `transformers==4.57.6` (downgraded from an incompatible 5.14.1).
+
+### Engineering Decisions
+
+- **Real Coqui API confirmed to match the sprint's assumed design exactly**: `TTS(model_name=...)` and `.tts(text=..., speaker=...)` — no code changes needed once the import chain worked.
+- **`voice_id` validation only enforced when the model actually reports speakers** (`self._known_speakers` non-empty) — a single-speaker model has no list to validate against, so any `voice_id` is accepted in that case (covered by its own test).
+- **Same lazy-import + sensitive-logging pattern as Sprints 2.2/2.3** — `from TTS.api import TTS` stays inside `start()`, not at module level; spoken text logged only at DEBUG with `extra={"sensitive": True}`.
+
+### The dependency chain saga (all discovered by actually trying to load the model, not from documentation)
+
+1. `ModuleNotFoundError: torchaudio` — not declared as coqui-tts's dependency despite being imported by its code. **Fixed**: installed `torchaudio` explicitly.
+2. `ImportError: isin_mps_friendly` — coqui-tts 0.27.5's XTTS code needs `transformers<5`; pip had resolved the newest 5.14.1. **Fixed**: pinned `transformers<5,>=4.57` (installed 4.57.6).
+3. `ImportError: ...torchcodec library is required...` — PyTorch 2.9+ changed its audio I/O backend. **Fixed**: installed `coqui-tts[codec]`.
+4. `FileNotFoundError: No espeak backend found` — the VITS/VCTK model's default phonemizer needs the **`espeak-ng` system binary**, not a Python package. **Not fixed** — this is an OS-level install (bigger, less reversible than anything else so far), so I stopped and did not install it without asking. See Remaining Risks.
+
+### Tests Added
+
+12 in `tests/unit/voice/test_text_to_speech.py` (model load/idempotency/failure, stop/health-check, speak-before-start, unrecognized-voice_id rejection, correct routing for two configured voice_ids verified against the *same* loaded model instance, no-known-speakers edge case, synthesis-failure and playback-failure wrapping). **145/145 total passing** (133 from Sprints 2.1–2.3 + 12 new), `ruff check .` clean.
+
+### Documentation Updated
+
+`voice/text_to_speech.py` docstrings. `docs/backlog/technical_debt.md` (items 6, 7). This Sprint Completion Report. `docs/STATUS.md` intentionally unchanged, per this sprint's own Documentation Checklist.
+
+### Acceptance Criteria Checklist
+
+- ✔ `speak()` with two different `voice_id`s both route through the same running model instance (verified via mock — `TTS()` called exactly once across both calls).
+- ✔ An unrecognized `voice_id` raises `TextToSpeechError`, never a silent fallback.
+- ✔ `health_check()` reflects model-loaded state.
+- ✔ No spoken text appears in logs above DEBUG-with-redaction.
+- ✔ **Verified** (updated below): the real, audible-distinctness check was completed once `espeak-ng` was installed — see "Real Audio Verification & Voice Selection" below.
+
+### Real Audio Verification & Voice Selection (2026-07-17)
+
+User installed `espeak-ng-x64.msi` (v1.49.2) themselves with administrator rights after a first silent-install attempt from this session failed on insufficient privileges (error 1925). The installer didn't add its directory to `PATH`, so it was added to the current Windows user's `PATH` (`HKCU\Environment`, no admin required) so Coqui's `shutil.which("espeak-ng")` check succeeds in new processes.
+
+With `espeak-ng` available, the real `tts_models/en/vctk/vits` model loaded successfully (109 speakers, 22050 Hz output) and was exercised end-to-end through the real `CoquiTextToSpeech`/`SoundDeviceAudioOutput` classes — genuine synthesis and playback through this machine's real speakers, not mocks.
+
+Picking real speaker IDs for `jarvis_voice_id`/`minie_voice_id` had two obstacles: (1) the model's speaker index is known to *not* reliably match VCTK's published gender/accent metadata for this specific checkpoint ([coqui-ai/TTS#2258](https://github.com/coqui-ai/TTS/issues/2258)), so the public metadata couldn't be trusted; (2) Claude cannot hear synthesized audio, so no amount of listening-in-code substitutes for genuine perceptual judgment. Resolved by combining both: all 108 real speakers were synthesized once and analyzed with `librosa` (mean fundamental frequency + RMS energy) to objectively shortlist "confident" (low pitch, high energy) vs. "soft/gentle" (high pitch, lower energy) candidates — a measurable proxy Claude *can* compute, standing in for a judgment it can't make directly. The user then listened to the shortlists (played live through the real speakers, iterating across several rounds) and made the actual perceptual call.
+
+**Final, user-confirmed choices**: `jarvis_voice_id = "p340"` (≈117 Hz mean pitch, high energy), `minie_voice_id = "p243"` (≈256 Hz mean pitch) — both updated in `config/schema.py`, `config/defaults.yaml`, and `tests/unit/voice/conftest.py`'s fixture defaults (Sprint 1.2's `"jarvis_default"`/`"minie_default"` placeholders retired). Full regression re-run: 145/145 passing, `ruff check .` clean.
+
+### Remaining Risks
+
+- The acoustic-proxy shortlisting (pitch/energy) is a good objective narrowing heuristic, not a guarantee of "confident"/"gentle" perception on its own — the user's own listening pass is what actually confirmed the final choice, which is exactly why this two-step process (compute a shortlist, then have a human judge it) was used rather than picking automatically from the numbers alone.
+- `espeak-ng`'s `PATH` entry is user-scoped (`HKCU\Environment`), not machine-wide — a different Windows user account on this same machine, or a fresh environment/CI runner, won't have it without repeating the same `PATH` addition (or their own `espeak-ng` install). Worth remembering if `main.py` is ever run under a different account or a clean CI image.
+
+### Technical Debt
+
+Items 6, 7, and 8 (dependency chain, espeak-ng install, voice ID selection) all resolved and documented in `docs/backlog/technical_debt.md`. None outstanding from this sprint.
+
+### Recommendations for Sprint 2.5
+
+- Build the TTS→STT round-trip test recommended at the end of Sprint 2.3 — now that both real models work end-to-end, this closes Whisper's real-content verification gap with a synthesized-then-transcribed known phrase, no human recording needed.
+- `VoiceSessionManager` (2.5) will be the first real caller sequencing `WhisperSpeechToText.transcribe()` and `CoquiTextToSpeech.speak()` together — worth double-checking the blocking-playback risk flagged in this sprint's own spec once that exists.
+- If Sprint 2.5+ work happens under a different Windows account or CI environment, re-check `espeak-ng` is discoverable there too (see Remaining Risks).

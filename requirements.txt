@@ -13,8 +13,14 @@ PySide6>=6.7
 # Phase 2.1 — Voice Pipeline
 openai-whisper>=20231117
 openwakeword>=0.6
-coqui-tts>=0.27    # Coqui TTS — the original `TTS` PyPI package is archived and has no
-                   # Python 3.12-compatible release; `coqui-tts` is the maintained fork
+coqui-tts[codec]>=0.27  # Coqui TTS — the original `TTS` PyPI package is archived and has no
+                        # Python 3.12-compatible release; `coqui-tts` is the maintained fork.
+                        # `[codec]` pulls in torchcodec, required for audio I/O since PyTorch
+                        # 2.9+ (see backlog/technical_debt.md item 6). `torchaudio` is also
+                        # needed (imported by coqui-tts's own code) but is not declared as its
+                        # dependency, so it is pinned explicitly below.
+torchaudio              # Required by coqui-tts at import time; not in its own dependency list —
+                        # see backlog/technical_debt.md item 6.
 
 # Phase 2.1 (Sprint 2.1) — Voice Pipeline audio I/O (microphone capture and,
 # later, Sprint 2.4's speaker playback — one library serves both directions)

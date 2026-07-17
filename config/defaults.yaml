@@ -3,13 +3,27 @@
 # see docs/sprint_book/sprint_1_2.md for the override precedence.
 
 voice:
+  # "hey_jarvis" is openWakeWord's shipped pretrained stand-in for the
+  # product's intended "hey jarminei" phrase, which has no pretrained
+  # model yet (needs custom offline training) — see
+  # backlog/technical_debt.md item 5.
   wake_phrases:
-    - "hey jarminei"
-  jarvis_voice_id: "jarvis_default"
-  minie_voice_id: "minie_default"
+    - "hey_jarvis"
+  # Real speaker IDs from models.tts_model (tts_models/en/vctk/vits),
+  # user-confirmed by ear 2026-07-17 — see backlog/technical_debt.md item 7.
+  jarvis_voice_id: "p340"
+  minie_voice_id: "p243"
   mic_device_index: null
   mic_sample_rate_hz: 16000
   wake_word_sensitivity: 0.5
+  # Sprint 2.5 — Voice Session Manager. session_timeout_seconds is the
+  # inter-turn inactivity window; the other three govern intra-utterance
+  # silence detection (utterance boundary) — see
+  # docs/sprint_book/sprint_2_5.md's Engineering Decisions.
+  session_timeout_seconds: 30.0
+  utterance_silence_ms: 700.0
+  utterance_silence_threshold: 0.02
+  max_utterance_seconds: 30.0
 
 resources:
   cpu_warning_percent: 70.0
@@ -28,6 +42,11 @@ database:
 models:
   ollama_model: "gemma3"
   whisper_model: "base"
+  # Whisper's own no-speech skip can be overridden by a confident-looking
+  # hallucinated segment; WhisperSpeechToText applies this threshold
+  # itself, unconditionally — see backlog/technical_debt.md item 9.
+  whisper_no_speech_threshold: 0.6
+  tts_model: "tts_models/en/vctk/vits"
 
 logging:
   level: "INFO"

@@ -3,7 +3,14 @@
 import pytest
 
 from config.errors import ConfigError
-from config.schema import AppConfig, LoggingConfig, ResourceThresholds, UIConfig, VoiceConfig
+from config.schema import (
+    AppConfig,
+    LoggingConfig,
+    ModelConfig,
+    ResourceThresholds,
+    UIConfig,
+    VoiceConfig,
+)
 
 
 def test_default_config_is_valid():
@@ -64,6 +71,42 @@ def test_wake_word_sensitivity_above_one_raises():
 
 def test_wake_word_sensitivity_at_upper_bound_is_valid():
     AppConfig(voice=VoiceConfig(wake_word_sensitivity=1.0)).validate()
+
+
+def test_non_positive_session_timeout_seconds_raises():
+    config = AppConfig(voice=VoiceConfig(session_timeout_seconds=0))
+    with pytest.raises(ConfigError, match="session_timeout_seconds"):
+        config.validate()
+
+
+def test_non_positive_utterance_silence_ms_raises():
+    config = AppConfig(voice=VoiceConfig(utterance_silence_ms=0))
+    with pytest.raises(ConfigError, match="utterance_silence_ms"):
+        config.validate()
+
+
+def test_utterance_silence_threshold_out_of_range_raises():
+    config = AppConfig(voice=VoiceConfig(utterance_silence_threshold=1.5))
+    with pytest.raises(ConfigError, match="utterance_silence_threshold"):
+        config.validate()
+
+
+def test_non_positive_max_utterance_seconds_raises():
+    config = AppConfig(voice=VoiceConfig(max_utterance_seconds=0))
+    with pytest.raises(ConfigError, match="max_utterance_seconds"):
+        config.validate()
+
+
+def test_whisper_no_speech_threshold_zero_raises():
+    config = AppConfig(models=ModelConfig(whisper_no_speech_threshold=0.0))
+    with pytest.raises(ConfigError, match="whisper_no_speech_threshold"):
+        config.validate()
+
+
+def test_whisper_no_speech_threshold_above_one_raises():
+    config = AppConfig(models=ModelConfig(whisper_no_speech_threshold=1.5))
+    with pytest.raises(ConfigError, match="whisper_no_speech_threshold"):
+        config.validate()
 
 
 def test_invalid_log_level_raises():

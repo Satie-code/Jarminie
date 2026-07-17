@@ -19,3 +19,15 @@ class MicrophoneError(VoiceError):
 
 class WakeWordError(VoiceError):
     """Raised for wake-word engine load or detection failures."""
+
+
+class SpeechToTextError(VoiceError):
+    """Raised for speech-to-text model load or transcription failures."""
+
+
+class TextToSpeechError(VoiceError):
+    """Raised for text-to-speech model load, synthesis, or playback failures."""
+
+
+class SessionError(VoiceError):
+    """Raised for voice session lifecycle failures."""

@@ -102,3 +102,71 @@ Medium-High — the interface and lifecycle are straightforward; correctness und
 ## Next Sprint
 
 2.4 — Text-to-Speech Engine (Coqui, dual voice).
+
+---
+
+## Sprint Completion Report
+
+### Summary
+
+Implemented `TranscriptionResult`, `SpeechToText` (Protocol), and `WhisperSpeechToText`. Automated tests mock `whisper.load_model()` (per this sprint's own Testing Checklist); the real, non-mocked verification loaded the actual `base` model and ran real inference on synthetic audio — this confirmed the real `whisper.transcribe()` result-dict shape matches exactly what the mocked tests assumed (`text`/`segments`/`language` keys), and surfaced real CPU-inference timing data. One genuine limitation could not be resolved in this sandboxed session: verifying "known spoken content → correct text" needs an actual human voice recording, which I have no way to produce myself — see Remaining Risks.
+
+### Files Created
+
+- `voice/speech_to_text.py` — `TranscriptionResult`, `SpeechToText`, `WhisperSpeechToText`.
+- `tests/unit/voice/test_speech_to_text.py` (9 tests).
+
+### Files Modified
+
+- `voice/errors.py` — added `SpeechToTextError`.
+- `docs/backlog/technical_debt.md` — item 1 updated (`openai-whisper`/`torch` now installed).
+- `.venv` — installed `openai-whisper` (pulls in `torch`, `tiktoken`, `numba`, etc. — the single largest dependency installed so far in this project).
+
+### Engineering Decisions
+
+- **`whisper`/`numpy` imports kept lazy** (inside `start()`/`transcribe()`, not at module top-level) — same rationale as `OpenWakeWordEngine` (Sprint 2.2): importing this module for its `SpeechToText` Protocol/`TranscriptionResult` dataclass shouldn't pay the cost of a heavy ML library import when a caller only needs a fake for testing.
+- **`start()` made idempotent** (returns immediately if a model is already loaded) rather than reloading — matches the acceptance criterion "a second start() call... does not reload it" literally, verified by asserting `load_model` is called exactly once across two `start()` calls.
+- **Confidence derived from Whisper's `avg_logprob` via `exp()`**, converting a log-probability into a roughly 0–1 scale — explicitly named `average_confidence` and documented as unrelated to Part 2's Dynamic Memory confidence score, per the sprint spec's own explicit warning against conflating the two.
+- **Two-tier logging**: transcription duration/confidence (non-sensitive metadata) logged at INFO; the actual transcript text logged only at DEBUG with `extra={"sensitive": True}` — this is the *first real usage* of Sprint 1.3's `SensitiveDataFilter` for its intended purpose (it existed since Sprint 1.3 but nothing had actually invoked it with real conversation-shaped content until now).
+
+### Tests Added
+
+9 in `tests/unit/voice/test_speech_to_text.py` (model load/idempotency/failure, stop/health-check lifecycle, transcribe-before-start, correct-result parsing including the confidence formula, zero-segment edge case, inference-failure wrapping). **133/133 total passing** (124 from Sprints 2.1–2.2 + 9 new), `ruff check .` clean.
+
+**Real (non-mocked) verification**: loaded the actual Whisper `base` model (139MB, downloaded on first use) and ran real inference on 2 seconds of synthetic silent audio — model load took ~32s (one-time, includes download), `transcribe()` took ~2.3s, returned `{"text": "", "segments": [], "language": ...}` (correctly no hallucinated speech on silence). This confirms the real library's result shape matches what the mocked unit tests assumed, and that FP16 is unsupported on this CPU (falls back to FP32 automatically, with a warning) — concrete data point for this sprint's own "CPU-only inference latency" Risk.
+
+### Documentation Updated
+
+`voice/speech_to_text.py` docstrings (interface contract, lazy-import rationale, sensitive-logging discipline). `docs/backlog/technical_debt.md`. This Sprint Completion Report. `docs/STATUS.md` intentionally left unchanged, per this sprint's own Documentation Checklist.
+
+### Acceptance Criteria Checklist
+
+- ✔ `start()` loads the model exactly once; a repeated `start()` does not reload (verified via mock call count).
+- ✖ *Partially verified*: `transcribe()` was confirmed correct against the real model's actual output shape and against silent audio (no false transcription) — but "known-content fixture audio → expected text" could not be checked, since no real human speech sample exists in this environment (see Remaining Risks).
+- ✔ A transcription failure raises `SpeechToTextError`, logged, never a raw exception.
+- ✔ No conversation text appears in logs above DEBUG, and only via the redaction filter.
+
+### Remaining Risks
+
+- **The "known-content" real-speech acceptance criterion is unverified** — I have no way to generate or supply an actual recorded human voice sample in this sandboxed session. Recommend one of: (a) you provide a short recorded WAV (e.g. "hello jarminei") for a manual one-off check, or (b) defer this specific verification to Sprint 2.4/2.12 — once Coqui TTS exists, a TTS→STT round-trip test (synthesize a known phrase, transcribe it back, compare) closes this gap without needing any human-recorded audio at all. I'd suggest (b) as the more durable fix.
+- CPU-only inference latency is real and non-trivial (~2.3s for 2s of audio on this machine) — acceptable for now per the sprint's own risk framing, but worth re-measuring once real conversational audio (not silence) is available.
+- Cold-start model load (~32s including download) will affect `CoreManager.startup()` once this module is registered (Sprint 2.12) — flagged, not fixed here, exactly as this sprint's own Risks anticipated.
+
+### Technical Debt
+
+None introduced.
+
+### Recommendations for Sprint 2.4
+
+- Build a TTS→STT round-trip test once `CoquiTextToSpeech` exists (per Remaining Risks above) — this is the cleanest way to close Sprint 2.3's one open verification gap without needing a human-supplied recording.
+- Budget for `coqui-tts`'s own install/model-download surprises, same pattern as this sprint's whisper install and Sprint 2.2's tflite/onnx discovery — each new ML dependency in this project has so far surfaced at least one real, unanticipated platform detail.
+
+---
+
+## Post-Sprint Fix (2026-07-17, during Sprint 2.5)
+
+Sprint 2.5's real end-to-end verification (wiring this module together with `MicrophoneManager` and `CoquiTextToSpeech` for the first time) captured genuine room silence and got back a fluent, entirely fabricated sentence from Whisper — a real Whisper hallucination, not a bug in this module's own logic at the time. Investigated against Whisper's own source (`transcribe.py`): its built-in `no_speech_threshold` check (default 0.6) is overridden internally whenever a hallucinated segment's `avg_logprob` looks confident enough ("don't skip if the logprob is high enough, despite the no_speech_prob") — so relying on Whisper's own default leniency doesn't reliably prevent this. User asked for it fixed immediately rather than deferred.
+
+**Fix**: added `ModelConfig.whisper_no_speech_threshold` (default 0.6, validated in `(0, 1]`). `WhisperSpeechToText.transcribe()` now computes the average per-segment `no_speech_prob` itself and forces `text=""` whenever it's at or above the threshold — unconditionally, overriding whatever Whisper's own internal logic decided to keep. `TranscriptionResult` gained a `no_speech_probability` field for observability (not something callers need to re-check themselves, since suppression already happened). This deliberately biases toward missing quiet real speech over fabricating fake speech, per the Human First Rule — JARMINEI should never act on words the user never said.
+
+**Verification**: 5 new unit tests (suppression on high `no_speech_prob` despite confident `avg_logprob`, text kept when `no_speech_prob` is low, configurable threshold respected, both existing tests updated with realistic segment shapes). Real, non-mocked confirmation: re-ran the *exact* real ambient-audio sample that produced the original hallucination through the fixed code 5 times — `no_speech_probability=0.762` (correctly above the 0.6 threshold) and `text=''` every time, deterministically. Full suite: 164/164 passing, `ruff check .` clean. Tracked as `backlog/technical_debt.md` item 9 (resolved).

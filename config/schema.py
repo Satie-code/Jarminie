@@ -23,14 +23,41 @@ VALID_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITI
 @dataclass
 class VoiceConfig:
     """Voice Engine settings (Sprint 2.1+). Wake phrases, default voice IDs,
-    and microphone hardware settings (Sprint 2.1 — Microphone Manager)."""
+    and microphone hardware settings (Sprint 2.1 — Microphone Manager).
 
-    wake_phrases: list[str] = field(default_factory=lambda: ["hey jarminei"])
-    jarvis_voice_id: str = "jarvis_default"
-    minie_voice_id: str = "minie_default"
+    wake_phrases defaults to openWakeWord's shipped "hey_jarvis" pretrained
+    model, not the product's intended "hey jarminei" phrase — the latter
+    has no pretrained model and needs a custom-trained one (an offline
+    ML/data-collection task, out of scope for any coding sprint). This is
+    a deliberate, tracked stand-in — see backlog/technical_debt.md item 5
+    and docs/sprint_book/sprint_2_2.md's Sprint Completion Report.
+
+    jarvis_voice_id/minie_voice_id are real speaker IDs from the
+    tts_models/en/vctk/vits model (ModelConfig.tts_model), user-confirmed
+    by ear on 2026-07-17 (a confident-sounding voice for Jarvis, a soft/
+    gentle one for Minie) — see backlog/technical_debt.md item 7 and
+    docs/sprint_book/sprint_2_4.md's Sprint Completion Report. Not
+    hardcoded to any other model; changing ModelConfig.tts_model would
+    require picking new speaker IDs.
+
+    session_timeout_seconds / utterance_silence_ms / utterance_silence_threshold /
+    max_utterance_seconds are Sprint 2.5 (Voice Session Manager) settings —
+    see docs/sprint_book/sprint_2_5.md's Engineering Decisions for how the
+    utterance-boundary-detection approach (energy-based silence detection)
+    was chosen; utterance_silence_threshold in particular is a starting
+    point requiring real-device tuning, same caveat as wake_word_sensitivity.
+    """
+
+    wake_phrases: list[str] = field(default_factory=lambda: ["hey_jarvis"])
+    jarvis_voice_id: str = "p340"
+    minie_voice_id: str = "p243"
     mic_device_index: int | None = None
     mic_sample_rate_hz: int = 16000
     wake_word_sensitivity: float = 0.5
+    session_timeout_seconds: float = 30.0
+    utterance_silence_ms: float = 700.0
+    utterance_silence_threshold: float = 0.02
+    max_utterance_seconds: float = 30.0
 
 
 @dataclass
@@ -62,10 +89,22 @@ class DatabaseConfig:
 
 @dataclass
 class ModelConfig:
-    """AI runtime model selection (Sprint 2.3+ / 3.3+)."""
+    """AI runtime model selection (Sprint 2.3+ / 3.3+).
+
+    whisper_no_speech_threshold (added post-Sprint-2.3, during Sprint 2.5's
+    real-world verification): Whisper's own built-in no-speech skip logic
+    overrides itself when a hallucinated segment's avg_logprob looks
+    confident, so real ambient noise can still produce fabricated text —
+    see docs/sprint_book/sprint_2_3.md's Post-Sprint Fix and
+    docs/sprint_book/sprint_2_5.md's Remaining Risks. WhisperSpeechToText
+    applies this threshold itself, unconditionally, rather than relying on
+    Whisper's own override-prone default.
+    """
 
     ollama_model: str = "gemma3"
     whisper_model: str = "base"
+    whisper_no_speech_threshold: float = 0.6
+    tts_model: str = "tts_models/en/vctk/vits"
 
 
 @dataclass
@@ -107,6 +146,7 @@ class AppConfig:
         """Raise ConfigError on the first invalid field found."""
         self._validate_resources()
         self._validate_voice()
+        self._validate_models()
         self._validate_logging()
         self._validate_ui()
         self._validate_paths()
@@ -149,6 +189,33 @@ class AppConfig:
             raise ConfigError(
                 "voice.wake_word_sensitivity must be in (0, 1], "
                 f"got {self.voice.wake_word_sensitivity}"
+            )
+        if self.voice.session_timeout_seconds <= 0:
+            raise ConfigError(
+                "voice.session_timeout_seconds must be positive, "
+                f"got {self.voice.session_timeout_seconds}"
+            )
+        if self.voice.utterance_silence_ms <= 0:
+            raise ConfigError(
+                "voice.utterance_silence_ms must be positive, "
+                f"got {self.voice.utterance_silence_ms}"
+            )
+        if not (0 < self.voice.utterance_silence_threshold <= 1):
+            raise ConfigError(
+                "voice.utterance_silence_threshold must be in (0, 1], "
+                f"got {self.voice.utterance_silence_threshold}"
+            )
+        if self.voice.max_utterance_seconds <= 0:
+            raise ConfigError(
+                "voice.max_utterance_seconds must be positive, "
+                f"got {self.voice.max_utterance_seconds}"
+            )
+
+    def _validate_models(self) -> None:
+        if not (0 < self.models.whisper_no_speech_threshold <= 1):
+            raise ConfigError(
+                "models.whisper_no_speech_threshold must be in (0, 1], "
+                f"got {self.models.whisper_no_speech_threshold}"
             )
 
     def _validate_logging(self) -> None:

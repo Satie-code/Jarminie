@@ -11,6 +11,25 @@ import threading
 import pytest
 
 from config.schema import VoiceConfig
+from voice.errors import SpeechToTextError, TextToSpeechError
+from voice.speech_to_text import TranscriptionResult
+
+LOUD_FRAME = b"\xff\x7f" * 480
+"""A frame of near-max-amplitude int16 samples (0x7fff), well above any
+sensible utterance_silence_threshold — simulates a frame of speech."""
+
+QUIET_FRAME = b"\x00\x00" * 480
+"""A frame of digital silence — simulates a non-speech frame."""
+
+
+@pytest.fixture
+def loud_frame() -> bytes:
+    return LOUD_FRAME
+
+
+@pytest.fixture
+def quiet_frame() -> bytes:
+    return QUIET_FRAME
 
 
 class FakeAudioBackend:
@@ -18,7 +37,9 @@ class FakeAudioBackend:
 
     Returns synthetic silent frames and records every call so tests can
     assert on interaction, plus toggles to simulate open/read failures
-    (a disconnected or unavailable device).
+    (a disconnected or unavailable device). frame_queue, if non-empty, is
+    popped from first (letting tests script a loud-then-quiet sequence for
+    VAD/utterance-boundary tests) before falling back to silent frames.
     """
 
     def __init__(self) -> None:
@@ -27,6 +48,7 @@ class FakeAudioBackend:
         self.read_calls: list[int] = []
         self.raise_on_open = False
         self.raise_on_read = False
+        self.frame_queue: list[bytes] = []
 
     def open(self, device_index: int | None, sample_rate_hz: int) -> None:
         if self.raise_on_open:
@@ -38,6 +60,8 @@ class FakeAudioBackend:
         self.read_calls.append(num_frames)
         if self.raise_on_read:
             raise RuntimeError("simulated device disconnect")
+        if self.frame_queue:
+            return self.frame_queue.pop(0)
         return b"\x00\x00" * num_frames
 
     def close(self) -> None:
@@ -47,6 +71,28 @@ class FakeAudioBackend:
 @pytest.fixture
 def fake_audio_backend() -> FakeAudioBackend:
     return FakeAudioBackend()
+
+
+class FakeAudioOutput:
+    """In-memory AudioOutput double — never touches real hardware.
+
+    Records every play() call so tests can assert on the audio/sample
+    rate passed through, plus a toggle to simulate a playback failure.
+    """
+
+    def __init__(self) -> None:
+        self.play_calls: list[tuple[bytes, int]] = []
+        self.raise_on_play = False
+
+    def play(self, audio: bytes, sample_rate_hz: int) -> None:
+        self.play_calls.append((audio, sample_rate_hz))
+        if self.raise_on_play:
+            raise RuntimeError("simulated playback failure")
+
+
+@pytest.fixture
+def fake_audio_output() -> FakeAudioOutput:
+    return FakeAudioOutput()
 
 
 class FakeWakeWordEngine:
@@ -89,6 +135,44 @@ def fake_wake_word_engine_factory():
     return _make
 
 
+class FakeSpeechToText:
+    """In-memory SpeechToText double — never loads a real model."""
+
+    def __init__(self, text: str = "hello jarminei") -> None:
+        self.text = text
+        self.calls: list[bytes] = []
+        self.should_raise = False
+
+    def transcribe(self, audio: bytes) -> TranscriptionResult:
+        self.calls.append(audio)
+        if self.should_raise:
+            raise SpeechToTextError("simulated transcription failure")
+        return TranscriptionResult(text=self.text, average_confidence=0.9, duration_ms=1)
+
+
+@pytest.fixture
+def fake_stt() -> FakeSpeechToText:
+    return FakeSpeechToText()
+
+
+class FakeTextToSpeech:
+    """In-memory TextToSpeech double — never loads a real model."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.should_raise = False
+
+    def speak(self, text: str, voice_id: str) -> None:
+        self.calls.append((text, voice_id))
+        if self.should_raise:
+            raise TextToSpeechError("simulated speech synthesis failure")
+
+
+@pytest.fixture
+def fake_tts() -> FakeTextToSpeech:
+    return FakeTextToSpeech()
+
+
 @pytest.fixture
 def voice_config_factory():
     """Factory fixture: build a VoiceConfig with sensible defaults,
@@ -97,8 +181,8 @@ def voice_config_factory():
     def _make(**overrides):
         defaults = dict(
             wake_phrases=["hey jarminei"],
-            jarvis_voice_id="jarvis_default",
-            minie_voice_id="minie_default",
+            jarvis_voice_id="p340",
+            minie_voice_id="p243",
             mic_device_index=None,
             mic_sample_rate_hz=16000,
         )

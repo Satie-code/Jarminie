@@ -164,3 +164,7 @@ None introduced. (The `tflite`/`onnx` backend choice is a resolved engineering d
 
 - `WhisperSpeechToText` will need its own real-model verification pass, same pattern as this sprint's — budget time for a first-real-model-load surprise the way this sprint hit the tflite/onnx one.
 - Consider resolving the "hey jarminei" model gap (via a decision from you) before Sprint 2.12's integration sprint, since that's the first point a real end-to-end wake-to-speech demo becomes possible — no need to resolve it earlier than that.
+
+### Wake Phrase Decision (2026-07-17)
+
+User confirmed proceeding with the recommended stand-in: `VoiceConfig.wake_phrases` and `config/defaults.yaml` now default to `["hey_jarvis"]` (openWakeWord's shipped pretrained model) instead of `"hey jarminei"`. Verified against the real, downloaded `hey_jarvis` model — loads and runs correctly (no false positive on silence). Tracked as [backlog/technical_debt.md](../backlog/technical_debt.md) item 5: training and shipping a custom "hey jarminei" model is offline ML work outside any coding sprint's scope, targeted before public release polish, not blocking Sprint 2.12.

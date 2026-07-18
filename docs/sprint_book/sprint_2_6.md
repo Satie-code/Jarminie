@@ -16,7 +16,7 @@ Implement Quiet Mode as its own explicit module, per [02_System_Architecture.md]
 
 Wake Word Detector (2.2) owns the *mechanism* of detecting a phrase; Microphone Manager (2.1) owns the *mechanism* of switching capture modes. Neither owns the *policy* of what those events mean at the system level — that policy is Quiet Mode itself, and giving it a dedicated module keeps Single Responsibility intact rather than letting dormant/active state logic leak into either lower-level module. This is also the natural place to make Part 2's full activation-priority list *representable*, even though only one of its four triggers has a real caller in Level 2:
 
-1. Critical emergency — no Authority System exists yet (Level 3, Sprint 3.10); reserved, not wired.
+1. Critical emergency — no Authority System exists yet (Level 3, Sprint 3.11 — renumbered from the original 3.10 placeholder when Level 3 was expanded to full detail on 2026-07-18; see `sprint_book/INDEX.md`'s Level 3 breakdown note); reserved, not wired.
 2. Explicit user selection — not a Quiet Mode concern; this is Persona Switching (2.11), which operates *within* an already-active session.
 3. Context detection — same as above; out of scope here.
 4. Daily routine — no Scheduler exists yet (Level 4); reserved, not wired.
@@ -115,7 +115,7 @@ Medium — the state machine itself is small; getting the callback wiring direct
 
 ## Risks
 
-- **`EXPLICIT_EMERGENCY` and `SCHEDULED_ALERT` being unwired stubs** could be mistaken for "already handled" by a future sprint skimming this file — mitigated by the explicit Engineering Rationale wording above; re-confirm at Sprint 3.10 (Authority Evaluation) and Sprint 4.9 (Reminder Engine) that wiring them in doesn't require reshaping this enum.
+- **`EXPLICIT_EMERGENCY` and `SCHEDULED_ALERT` being unwired stubs** could be mistaken for "already handled" by a future sprint skimming this file — mitigated by the explicit Engineering Rationale wording above; re-confirm at Sprint 3.11 (Authority Evaluation) and Sprint 4.9 (Reminder Engine) that wiring them in doesn't require reshaping this enum.
 - **No true interrupt path yet**: today, `activate()` while already `ACTIVE` is simply ignored. Once `EXPLICIT_EMERGENCY` is wired (Level 3), Part 2's rule that emergency "temporarily suspends the active persona" and resumes it afterward will need real suspend/resume semantics this sprint does not build — flagged here so it isn't a surprise at that Level, not something to solve now.
 
 ## Next Sprint

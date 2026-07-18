@@ -140,3 +140,62 @@ Medium.
 
 - Sprint 4.9 (Reminder Engine) and Phase 5.2 (Wellness) should call `PriorityQueueManager.enqueue()` directly with `SCHEDULED_REMINDER`/`WELLNESS` once those sources exist — no anticipated change to this sprint's public API.
 - If real concurrent load ever makes `pop_next()` a contention point, revisit its internal locking — not a concern at Level 3's actual usage pattern.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `decision/priority_queue.py` (`PriorityLevel`, `PriorityItem`, `PriorityQueueManager`). Also added `ResourceAlert` and `ResourceMonitor.critical_alerts()` to Sprint 1.4's already-shipped `core/resource_monitor.py` — a real, necessary gap found while implementing this sprint (see Engineering Decisions), not a deviation from it, following the same additive-fix pattern established in Sprint 3.9. 512/512 tests passing (484 prior + 28 new), `ruff check .` clean.
+
+### Files Created
+
+- `decision/priority_queue.py` — `PriorityLevel` (Enum), `PriorityItem` (dataclass), `PriorityQueueManager`.
+- `tests/unit/decision/test_priority_queue.py` — 20 tests.
+
+### Files Modified
+
+- `core/resource_monitor.py` — added `ResourceAlert` (dataclass) and `ResourceMonitor.critical_alerts()`; `breached_resources()` unchanged.
+- `tests/unit/core/test_resource_monitor.py` — 8 new tests for `critical_alerts()`.
+- `docs/STATUS.md` — Phase 3.3 (Decision Engine) row's descriptive text updated; status itself deliberately left at `Designing`, per this sprint's own Documentation Checklist.
+
+### Tests Added
+
+28 total. In `test_priority_queue.py` (a real `ResourceMonitor` — cheap and side-effect-free to construct, no need for a fake): `classify()` for `EMERGENCY` vs. every other `IntentCategory` (parametrized across all six non-`EMERGENCY` categories); `classify_resource_alert()` always returning `IMPORTANT_ALERT`; strict priority ordering across all five levels enqueued out of order; FIFO-within-level ordering, including a monkeypatched-`datetime` test proving the tiebreaking counter holds even under identical timestamps (a real possibility on a fast machine, not just theoretical); a higher-priority item enqueued *after* a lower-priority one still popping first; `pop_next()`/`peek_next()` on an empty queue; `peek_next()` not removing its item; `PriorityItem`'s carried fields; and `health_check()`'s sane-depth bound (true under normal load, false past 1000 items). In `test_resource_monitor.py`: each resource's critical threshold independently, the battery inversion, `None` battery not alerting, multiple simultaneous critical alerts, and — the one genuinely new case this addition needed to prove — a warning-level-only breach does NOT produce a critical alert.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `decision/priority_queue.py`'s module docstring (full priority table with wired/reserved status per level, mirroring `PersonaManager`'s `SwitchReason` documentation shape). `core/resource_monitor.py`'s new docstrings. `docs/STATUS.md` as above.
+
+### Acceptance Criteria Checklist
+
+- ✔ Items enqueued out of priority order are always popped in strict priority order (1 before 2 before 3 before 4 before 5).
+- ✔ Two items at the same priority level pop in FIFO (enqueue) order — proven both under normal timestamps and under a forced-identical-timestamp scenario.
+- ✔ `intent.category == EMERGENCY` always classifies as `CRITICAL_EMERGENCY`; every other category (all six checked) classifies as `GENERAL_SUGGESTION`.
+- ✔ A critical `ResourceAlert` always classifies as `IMPORTANT_ALERT`.
+- ✔ `pop_next()` on an empty queue returns `None`, not an error.
+
+### Engineering Decisions
+
+- **Added `ResourceAlert`/`critical_alerts()` to `core/resource_monitor.py` (Sprint 1.4), purely additively.** This sprint's spec assumed "`ResourceMonitor`'s critical-threshold alerts (Sprint 1.4)" already existed and listed Files to Modify as "None" on that basis — but Sprint 1.4 only ever shipped warning-threshold checking (`breached_resources()`, returning plain resource-name strings) plus the critical-percent config fields' Settings Window display (Sprint 1.8); nothing checked a live sample against those critical fields, and no `ResourceAlert` class existed anywhere. Resolved the same way Sprint 3.9 resolved an analogous gap in `PersonaScopedMemory`/`EventMemory`: a new, additive method (`critical_alerts()`) alongside the existing one (`breached_resources()`), zero behavior change to any existing caller/test. Documented as a Post-Sprint Fix on `sprint_1_4.md`.
+- **`classify_resource_alert()` is an unconditional constant return (`IMPORTANT_ALERT`), never branching on the alert's own fields.** This looked like a strange, possibly-incomplete function at first, but it's correct given the sprint's own spec wording ("a critical `ResourceAlert` always classifies as `IMPORTANT_ALERT`") combined with the fact that `critical_alerts()` (this sprint's own addition) is the *only* thing that ever constructs a `ResourceAlert` at all, and it only does so for genuinely critical-threshold breaches — there is no lower-severity `ResourceAlert` for this method to need to distinguish from.
+- **The internal heap uses plain `(priority.value, enqueued_at, counter, item)` tuples, not a dedicated wrapper dataclass.** `itertools.count()`'s monotonic, guaranteed-unique counter as the third tuple element means heapq's comparison can never actually fall through to comparing the fourth element (`PriorityItem`, whose `payload: object` isn't necessarily orderable) — achieving deterministic FIFO-within-level ordering without introducing an extra class the spec's own Expected Classes didn't list.
+- **`_MAX_SANE_QUEUE_DEPTH` (1000) is a plain module-level constant, not a `MemoryConfig`/new config field** — this sprint's own Files to Modify list didn't include any config file, and 1000 is intentionally far beyond any value Level 3's actual request volume (a single conversation turn plus occasional resource alerts) could plausibly reach, matching the same "large enough that a real value never plausibly reaches it" convention as `memory/event_memory.py`'s/`short_term_memory.py`'s `_LARGE_LIMIT`.
+
+### Remaining Risks
+
+- **Confirmed via real, non-mocked verification**: sampled actual system resources on this development machine via a real `ResourceMonitor` (no critical alerts under normal load, as expected), then ran real `Intent` objects (one `EMERGENCY`, one `CASUAL_CONVERSATION`) through `classify()`/`enqueue()`/`pop_next()` — the emergency item correctly popped first regardless of enqueue order, exactly matching the unit-test-level proof.
+- This sprint's own flagged risks stand as expected: `classify()`'s binary EMERGENCY-or-GENERAL_SUGGESTION mapping is an honest limitation of what exists at this point in the roadmap (not an oversight), and no genuine concurrency exists yet to stress-test `pop_next()` (both explicitly deferred, not built speculatively).
+- `backlog/technical_debt.md` item 16 (shipped `ollama_model` default) doesn't apply here — this sprint has no Ollama/LLM dependency.
+
+### Technical Debt
+
+None new. The `ResourceAlert`/`critical_alerts()` addition is documented as an Engineering Decision above rather than technical debt, since it's a clean, permanent, non-breaking design (not a shortcut requiring future resolution) — same framing Sprint 3.9 used for its own analogous addition.
+
+### Recommendations
+
+- **For Sprint 3.11 (Authority Evaluation & Engine Selection)**: consumes `pop_next()`/`peek_next()` — worth double-checking its own spec's assumptions about `PriorityItem`'s shape against what actually shipped here, per the established "check the next sprint's assumptions" pattern.
+- **For Sprint 3.12 (Decision Engine Integration)**: this sprint's two wired sources (Intent-based classification, `ResourceMonitor` critical alerts) both still need a real caller — `classify()`/`enqueue()` for every turn's `Intent`, and some cadence (likely alongside `CoreManager`'s existing resource-sampling loop) calling `critical_alerts()` and enqueueing any results.
+
+**Sprint 3.10 (Priority Queue) is complete.** **Sprint 3.11 (Authority Evaluation & Engine Selection) is next.**

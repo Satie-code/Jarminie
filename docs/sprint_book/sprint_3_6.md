@@ -144,3 +144,61 @@ Medium.
 
 - A UI surface for `run_monthly_review()`'s reports (Status Panel or a new Settings tab) — no Level 3 UI sprint exists for this; revisit once a concrete need or user request arrives.
 - A real periodic caller once Sprint 4.9 (Reminder Engine) or APScheduler more broadly exists — do not build a timer mechanism speculatively before then, consistent with `backlog/technical_debt.md` item 11's own resolution guidance.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `memory/lifecycle_manager.py`'s `CleanupReport`/`ReviewReport`/`MemoryLifecycleManager` and the `MemoryConfig` additions this sprint's spec named. This sprint closes **Phase 3.2 (Dynamic Memory)** and, with it, all of Level 3's individual "Memory Engine"/"Dynamic Memory" component sprints (3.1–3.6). One real gap against Sprint 3.1's shipped `MemoryRecord` was found and fixed at the root before implementing — see `sprint_3_1.md`'s Post-Sprint Fix (`band_entered_at`).
+
+### Files Created
+
+- `memory/lifecycle_manager.py` — `CleanupReport`, `ReviewReport`, `MemoryLifecycleManager` (`run_cleanup_pass`, `run_monthly_review`, `apply_user_override`, plus the `ManagedModule` trio).
+- `tests/unit/memory/test_lifecycle_manager.py` — 16 tests.
+
+### Files Modified
+
+- `config/schema.py` — `MemoryConfig.cleanup_grace_period_days: int = 7`, `monthly_review_min_band_days: int = 30`; validation added to `_validate_memory()` (both positive).
+- `config/defaults.yaml` — `memory:` section extended to match.
+- `memory/models.py`, `memory/memory_store.py`, `tests/unit/memory/test_memory_store.py` — the `band_entered_at` addition, a prerequisite discovered while implementing this sprint (counted in Sprint 3.1's Post-Sprint Fix, not duplicated here).
+- `docs/STATUS.md` — Phase 3.2 (Dynamic Memory) marked **Complete**.
+- `docs/backlog/technical_debt.md` — new item recording the deferred periodic-cadence caller, alongside item 11.
+
+### Tests Added
+
+16 tests in `test_lifecycle_manager.py`, all against a real `MemoryStore` + real `ConfidenceScorer`: the defensive `is_permanent`/`user_override` exclusion tests for both `run_cleanup_pass()` and `run_monthly_review()`; rescoring count reporting; the grace-period boundary (just-under survives, just-over is deleted); `band_entered_at` advancing only on a genuine band transition and staying put otherwise; per-record error isolation via a small `_ScoreRaisingConfidenceScorer` double (one record fails, the rest of the pass still completes and the failure is recorded); `run_monthly_review()`'s zero-write contract and its own band/age boundary correctness; `apply_user_override()`'s persistence and unknown-id handling; and `health_check()` delegation. 405/405 tests passing project-wide, `ruff check .` clean.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `memory/lifecycle_manager.py`'s module docstring (full band-to-action table). `docs/STATUS.md` — Phase 3.2 marked Complete. `docs/backlog/technical_debt.md` — new item 15.
+
+### Acceptance Criteria Checklist
+
+- ✔ `run_cleanup_pass()` never deletes or rescoring-mutates a record with `is_permanent=True` or `user_override=True`, verified defensively with records deliberately constructed to score in the Temporary band (`test_run_cleanup_pass_never_touches_is_permanent_records`, `test_run_cleanup_pass_never_touches_user_override_records`).
+- ✔ A Temporary-band record younger than `cleanup_grace_period_days` survives a cleanup pass; the same record, once older, is deleted on the next pass (`test_temporary_record_younger_than_grace_period_survives`, `test_temporary_record_older_than_grace_period_is_deleted`).
+- ✔ `run_monthly_review()` performs zero writes and returns only records that are both Monthly-review-band and old enough in that band (`test_run_monthly_review_performs_no_writes` and the three boundary/scope tests around it).
+- ✔ `apply_user_override()` persists `confidence_score=100.0`, `user_override=True`, verified by a subsequent `get_by_id()` read.
+- ✔ A single record's scoring failure during `run_cleanup_pass()` is caught, logged, and recorded in `CleanupReport.errors` without aborting the rest of the pass.
+
+### Engineering Decisions
+
+- **`band_entered_at` addition** — see `sprint_3_1.md`'s own Post-Sprint Fix for the full reasoning; this sprint is where the gap was found.
+- **Both `run_cleanup_pass()` and `run_monthly_review()` iterate all five `MemoryType`s**, not a hardcoded "non-Event" subset — the spec's own Data Flow says "for each non-permanent MemoryType," but permanence is a per-*record* flag (`is_permanent`), not a per-*type* guarantee enforceable at the `MemoryType` level itself. Iterating every type and relying on the `is_permanent`/`user_override` guard to skip Event Memory records (which always carry `is_permanent=True`, per `EventMemory.record_milestone()`) is more defensive than assuming EVENT is special-cased by type — it doesn't hardcode an assumption about which types happen to be permanent today.
+- **`update_confidence()`'s two-branch `if/else` generalized into a dynamic `SET`-clause builder** — adding `band_entered_at` as a third independently-optional field would have meant a third `if/elif` branch (four total combinations); the generalized version scales to any future optional field without further branching.
+
+### Remaining Risks
+
+All three risks named in this sprint's own Potential Risks remain open, unchanged by implementation: no periodic caller for either method (tracked below); `cleanup_grace_period_days`/`recency_half_life_days` interaction is untuned; `run_monthly_review()` reports have no UI surface yet.
+
+### Technical Debt
+
+- **New item 15** in `docs/backlog/technical_debt.md`: `run_cleanup_pass()`/`run_monthly_review()` have no periodic caller, mirroring item 11's still-open gap for `ConversationSessionStore.purge_older_than()` — both deferred to the same future Scheduler resolution (Sprint 4.9+), per this sprint's own Documentation Checklist instruction to record it alongside item 11 rather than as an isolated new gap.
+
+### Recommendations
+
+- **For Sprint 3.7 (Intent Detection)**: this is the first Decision Engine sprint and the first to touch Ollama — no memory-layer dependency, but worth a deliberate check (per the pattern established across 3.1–3.6) of whether its own spec's assumptions about `ConversationContext`/`Intent` match what Sprint 2.8 actually shipped, before implementing.
+- **For whoever resolves `backlog/technical_debt.md` item 15/11 together (Sprint 4.9+)**: both `MemoryLifecycleManager`'s passes and `ConversationSessionStore.purge_older_than()` are simple, parameterless, idempotent methods — a single generic periodic-task registration mechanism could plausibly serve all of them, rather than three ad hoc timers. Worth deciding at that point, not now.
+
+**Phase 3.2 (Dynamic Memory) is now `Complete`** — both sprints (3.5, 3.6) done; the full Dynamic Memory Formula computes real scores and drives real lifecycle outcomes. **This also closes all of Level 3's Memory Engine/Dynamic Memory component sprints (3.1–3.6).** **Sprint 3.7 (Intent Detection) is next**, beginning Phase 3.3 (Decision Engine).

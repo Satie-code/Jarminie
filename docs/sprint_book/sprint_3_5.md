@@ -146,3 +146,59 @@ Medium-High — the formula itself is straightforward arithmetic, but getting th
 
 - Sprint 5.2 (Emotion Inference & Contextual Adaptation) should replace the fixed emotional-significance placeholder with a real signal — the exact function signature (`score(record)`) should not need to change, only what feeds the emotional term internally, if this sprint's separation is respected.
 - Sprint 5.4 (Pattern Recognition / Preference Learning) is a plausible future home for learned, per-user category weights instead of the static default table — not built now.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `memory/confidence_scorer.py`'s `ConfidenceBand`/`ConfidenceScorer` and the `MemoryConfig` weight/threshold fields this sprint's spec named. No `MemoryRecord`/`MemoryStore` gap this time — every field `score()` needs (`access_count`, `last_accessed_at`, `category`, `user_override`) already existed. One real design ambiguity in this sprint's own spec was resolved before writing code, documented below.
+
+### Files Created
+
+- `memory/confidence_scorer.py` — `ConfidenceBand` (Enum), `ConfidenceScorer` (`score`, `band`, `detect_override_phrase`, `apply_user_override`).
+- `tests/unit/memory/test_confidence_scorer.py` — 29 tests.
+
+### Files Modified
+
+- `config/schema.py` — `MemoryConfig` extended with `frequency_weight`, `recency_weight`, `recency_half_life_days`, `importance_weight`, `category_weight`, `category_importance`, `category_default_weight`, `emotional_weight`, `override_trigger_phrases`; `_validate_memory()` extended with per-weight range checks, the five-weight sum-to-1.0 check, half-life positivity, category weight range checks, and non-empty/non-blank override phrase checks.
+- `config/defaults.yaml` — `memory:` section extended to match.
+- `docs/STATUS.md` — Phase 3.2 (Dynamic Memory) row updated to `Designing`.
+
+### Tests Added
+
+29 tests in `test_confidence_scorer.py`, all pure (no database/Chroma fixture, per this sprint's own Architecture Notes): frequency factor monotonicity and diminishing returns; recency factor at exactly one half-life (verified against the expected 12.5-point contribution at default weights); known-category vs. unknown-category-fallback, including a `category=None` case; the `user_override=True` short-circuit regardless of every other field; `apply_user_override()`'s new-record-not-mutated contract; override-phrase detection (match/no-match, case-insensitivity, parametrized over all three default phrases); all six band boundaries; the un-overridden 80-point ceiling (see Engineering Decisions); and 8 `MemoryConfig` validation tests (weight sum, individual weight range, half-life positivity, category weight ranges, override phrase list). 389/389 tests passing project-wide, `ruff check .` clean.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `config/schema.py`'s `MemoryConfig` docstring (full explanation of the importance/short-circuit design). `docs/STATUS.md` — Phase 3.2 row.
+
+### Acceptance Criteria Checklist
+
+- ✔ Higher `access_count`, all else equal, produces a higher score (`test_higher_access_count_produces_higher_score`).
+- ✔ More recent `last_accessed_at`, all else equal, produces a higher score (`test_more_recent_last_accessed_at_produces_higher_score`).
+- ✔ A record with `user_override=True` always scores exactly `100.0`, regardless of its other fields (`test_user_override_always_scores_100_regardless_of_other_fields`).
+- ✔ `detect_override_phrase()` matches all three configured default phrases case-insensitively and does not match unrelated text.
+- ✔ `band()` correctly maps scores at each of the five bands' boundaries.
+- ✔ The five configured weights sum to `1.0`; `AppConfig` loading rejects a configuration where they don't (`test_weights_not_summing_to_one_raises`).
+
+### Engineering Decisions
+
+- **Resolved a real ambiguity in this sprint's own spec before implementing**: the Engineering Rationale says Importance is "handled as a formula short-circuit, not a weighted input," but the five weights (including `importance_weight`) were specified to sum to `1.0` as if all five participate in one weighted formula. Both can't be literally true at once — if importance only acts via the override short-circuit, it contributes nothing to the *un-overridden* formula, meaning the four weights that do participate (frequency/recency/category/emotional) only sum to `0.8`. Resolved by keeping `importance_weight` in the five-weight sum (so the config still documents what "full confidence" is conceptually built from) while giving it zero contribution in `score()`'s actual normal-path arithmetic. The consequence — an un-overridden record can never exceed score `80` (the Long-term band's ceiling) — is treated as a deliberate, desirable property, not a bug: it means Permanent (90-100) is reachable *only* through an explicit user override or Event Memory's structural `is_permanent` flag, never through ordinary accumulation of frequency/recency/category alone. Recorded in both `MemoryConfig`'s docstring and `confidence_scorer.py`'s own module docstring so this isn't rediscovered as a "bug" later. Verified by `test_score_never_exceeds_80_without_override_at_default_weights`.
+- **Frequency curve chosen as `access_count / (access_count + 1)`** — a self-normalizing diminishing-returns curve (0 at zero accesses, 0.5 at one, asymptotically approaching 1) that needs no extra tunable constant beyond what the spec already named, and has no division-by-zero edge case at `access_count=0`.
+
+### Remaining Risks
+
+- **Weight values remain an untested guess**, unchanged from this sprint's own Potential Risks — config-driven specifically so this is correctable without a code change.
+- **Recency's `elapsed_days` computation has no defensive guard against `last_accessed_at` being in the future** (clock skew, or a bug elsewhere) — would inflate `recency_factor` above `1.0` before the final `[0, 100]` clamp catches it at the top level. Not hardened here; Sprint 3.13 (Error Handling & Recovery Hardening) is this Sprint Book's designated place for confidence-scoring edge cases, per its own Objective (c).
+
+### Technical Debt
+
+None introduced.
+
+### Recommendations
+
+- **For Sprint 3.6 (Memory Lifecycle Manager)**: the un-overridden 80-point ceiling (see Engineering Decisions) means `run_monthly_review()`'s 50-69 band and `run_cleanup_pass()`'s 0-29 band are both easily reachable by ordinary scoring, but the *Permanent* band is not — worth keeping in mind when writing that sprint's own tests so a "why did nothing reach Permanent" result isn't mistaken for a scoring bug.
+
+**Phase 3.2 (Dynamic Memory) is `Designing`** — Sprint 3.5 complete; Sprint 3.6 (Memory Lifecycle Manager) remains to close the phase. **Sprint 3.6 is next.**

@@ -131,3 +131,59 @@ Medium-High.
 
 - Sprint 5.2 (Emotion Inference) is the natural future consumer of a richer emotional signal — `sentiment_hint` should stay coarse until that Level exists, not be expanded speculatively now.
 - If `suggested_persona` and the Level 2 heuristic disagree often in real use (Sprint 3.14+), that is prompt-tuning feedback, not a signal to keep the heuristic as a permanent second opinion.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `decision/context_analyzer.py` (`SentimentHint`, `ContextAnalysis`, `ContextAnalyzer(ManagedModule)`). No files modified — reuses Sprint 3.7's `LanguageModelClient`/`OllamaClient` unchanged, exactly as this sprint's own Files to Modify ("None") specified. 460/460 tests passing (439 prior + 21 new), `ruff check .` clean.
+
+### Files Created
+
+- `decision/context_analyzer.py` — `SentimentHint` (Enum, 5 values), `ContextAnalysis` (dataclass), `ContextAnalyzer(ManagedModule)`.
+- `tests/unit/decision/test_context_analyzer.py` — 21 tests (incl. 2 parametrized cases: 3 persona fixtures, 2 references-past-memory fixtures).
+
+### Files Modified
+
+- `docs/STATUS.md` — Phase 3.3 (Decision Engine) row's descriptive text updated to mention this sprint; status itself deliberately left at `Designing`, per this sprint's own Documentation Checklist.
+
+### Tests Added
+
+21 total, all against a fake `LanguageModelClient` — no real network call in the committed suite, matching Sprint 3.7's own convention exactly. Covers: topic/entity extraction from a labeled fixture response (incl. an `ENTITIES: NONE` case correctly parsing to an empty list); `suggested_persona` against clearly-technical, clearly-casual, and unclear fixtures; `references_past_memory` for both `YES`/`NO`; the `LlmError`/simulated-timeout/unparseable-response degrade paths (all resolving to the documented neutral default); an unrecognized `PERSONA`/`SENTIMENT` value falling back safely rather than raising a `KeyError`; empty and whitespace-only transcripts short-circuiting before any client call; the configured timeout being passed through; `health_check()`/`start()`/`stop()` including recovery-after-failure and degradation-after-failure of the `_healthy` flag; and a defensive check that no `SentimentHint` value uses clinical/diagnostic language.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `decision/context_analyzer.py`'s module docstring (explicit statement that `suggested_persona` is the real replacement for Sprint 2.11's heuristic, and that `sentiment_hint` is deliberately non-clinical). `docs/STATUS.md` as above.
+
+### Acceptance Criteria Checklist
+
+- ✔ `analyze()` correctly extracts `primary_topic`/`mentioned_entities` for a fixed labeled fixture set (fake client).
+- ✔ `suggested_persona` matches the expected persona for clearly-technical (`"jarvis"`) vs. clearly-casual (`"minie"`) fixture transcripts, and `None` when unclear.
+- ✔ A simulated `LlmError`/timeout/unparseable response degrades to the documented neutral-default `ContextAnalysis`, logged, never raised.
+- ✔ No value in `SentimentHint` (`NEUTRAL`/`POSITIVE`/`STRESSED`/`FRUSTRATED`/`TIRED`) or any `ContextAnalysis` field name uses clinical/diagnostic language — verified by a defensive test, not just visual inspection.
+
+### Engineering Decisions
+
+- **`ContextAnalyzer.analyze()`'s message text comes from `intent.raw_transcript`**, not a separate transcript parameter — the spec's signature is exactly `analyze(intent, context)` with no third parameter, and `Intent` (Sprint 3.7) already carries the transcript it classified. `context.recent_turns` holds only *past* turns, not the in-progress one, so `intent.raw_transcript` is the only available source for "what was just said."
+- **Same `is_reachable()`-via-`getattr` pattern reused from `IntentDetector`** (Sprint 3.7) for `start()`'s readiness check, and the same reasoning for not raising on an unreachable host at startup — `analyze()` recovers per-call regardless, so marking the module `FAILED` would only block automatic recovery that doesn't otherwise happen. Documented once in `decision/llm_client.py`'s docstring (3.7) and referenced here rather than re-explained.
+- **Prompt format mirrors Sprint 3.7's plain-text five-line convention** (`TOPIC:`/`ENTITIES:`/`REFERENCES_PAST:`/`PERSONA:`/`SENTIMENT:`), for the same reason 3.7 avoided Ollama's JSON-forcing `format=` parameter — parsing is regex-based and defensive, with every field independently falling back to a safe default (empty topic, empty entities, `False`, `None`, `NEUTRAL`) rather than raising.
+- **`ContextAnalysis` corrected to a `@dataclass`** during implementation — an early draft used a plain class with a manual `__init__`, caught and fixed before finalizing since the spec's Expected Classes explicitly says "`ContextAnalysis` (dataclass)."
+
+### Remaining Risks
+
+- **Confirmed via real, non-mocked verification** against the actually-running local Ollama instance (`llama3:latest`, same real-service setup used for Sprint 3.7's own extra verification): ran 4 real samples (a technical bug-fix request, an emotional/tired statement, a past-memory reference, a general factual question) through the real `IntentDetector` → `ContextAnalyzer` chain. Topic/entity extraction, `references_past_memory`, and `sentiment_hint` all came back sensible and correctly parsed in every case. **One real mismatch observed**: the emotional/tired sample ("I have been feeling really overwhelmed and tired lately") returned `suggested_persona="jarvis"` where `"minie"` was expected — the model didn't reliably follow the prompt's persona-suitability guidance on this input. This is explicitly named in this sprint's own Potential Risks as an *expected*, not exceptional, outcome during the transition ("any real-world mismatches surfaced during Sprint 3.14's verification should be treated as prompt-tuning feedback, not a sign either implementation is wrong") — not fixed here, left as real data for Sprint 3.14/prompt-tuning, consistent with that guidance.
+- This sprint's own flagged non-determinism and prompt-quality risks stand as expected, same class as Sprint 3.7's. No downstream sprint (3.9+) exists yet to confirm real tolerance of an empty/neutral `ContextAnalysis` in practice.
+- `backlog/technical_debt.md` item 16 (shipped `ollama_model` default vs. the actually-pulled local model) applies equally here — this sprint's real verification also used `llama3` explicitly, not the shipped `"gemma3"` default.
+
+### Technical Debt
+
+None new. Reuses Sprint 3.7's `ollama` install and `backlog/technical_debt.md` item 16 applies unchanged.
+
+### Recommendations
+
+- **For Sprint 3.9 (Memory Retrieval Engine)**: `ContextAnalysis.primary_topic` is the integration point (query text) per this sprint's own Data Flow — worth double-checking against what Sprint 3.9's actual spec expects as input shape before implementing, per the established "check the next sprint's assumptions against what actually shipped" pattern.
+- **For Sprint 3.12 (Decision Engine Integration)**: the one real `suggested_persona` mismatch found above is worth keeping in mind when wiring this sprint's output in as `PersonaManager`'s primary source — not a blocker, just a concrete data point for whatever prompt iteration happens alongside that wiring.
+
+**Sprint 3.8 (Context Analysis) is complete.** **Sprint 3.9 (Memory Retrieval Engine) is next.**

@@ -118,6 +118,90 @@ class DatabaseConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Memory Engine settings (Sprint 3.1+). chroma_collection_prefix
+    namespaces every MemoryType's ChromaDB collection (e.g.
+    "jarminei_memory_shared") so the same chroma_path (DatabaseConfig)
+    could in principle host more than one prefixed set without collision.
+
+    short_term_default_confidence (Sprint 3.4) is the starting score a
+    promoted short-term memory receives — mid-range of the Dynamic Memory
+    Formula's 0-29 "Temporary" band (02_System_Architecture.md), left for
+    Sprint 3.5's ConfidenceScorer to recompute properly.
+
+    short_term_salience_triggers (Sprint 3.4) is a small, deliberately
+    crude keyword heuristic for "is this turn worth remembering" —
+    explicitly a Sprint 3.8 (Context Analysis) replacement candidate, the
+    same placeholder discipline as VoiceConfig's persona trigger phrases.
+
+    frequency_weight/recency_weight/importance_weight/category_weight/
+    emotional_weight (Sprint 3.5) are the Dynamic Memory Formula's five
+    factor weights (02_System_Architecture.md) and must sum to 1.0.
+    importance_weight has no term in ConfidenceScorer.score()'s normal
+    formula — Importance's only real signal is the User Override Rule,
+    handled as a total short-circuit (score() returns 100.0 immediately
+    for user_override=True records) rather than a weighted input, exactly
+    as Part 2 specifies ("immediately receives maximum confidence," not "a
+    boosted score"). Kept in the weight sum anyway so the five weights
+    still document what "full confidence" is built from; its practical
+    effect is that a record's score can never exceed 80 (frequency_weight
+    + recency_weight + category_weight + emotional_weight, all at their
+    maximum) without either an explicit user override or Event Memory's
+    separate is_permanent flag — see sprint_3_5.md's Engineering Decisions
+    for the full reasoning.
+
+    recency_half_life_days is the exponential decay half-life for the
+    recency factor. category_importance/category_default_weight score the
+    category factor; emotional_weight is applied against a fixed neutral
+    placeholder value until Sprint 5.2 (Emotion Inference) exists — see
+    memory/confidence_scorer.py.
+
+    override_trigger_phrases (Sprint 3.5) triggers the User Override Rule
+    — matched case-insensitively as plain substrings, no NLU, the same
+    technique as VoiceConfig's persona trigger phrases.
+
+    cleanup_grace_period_days (Sprint 3.6) protects a genuinely new
+    Temporary-band record from deletion before it's had any chance to be
+    reinforced — MemoryLifecycleManager.run_cleanup_pass() only deletes a
+    Temporary-band record once it is both scored Temporary AND older than
+    this many days (by created_at). monthly_review_min_band_days is the
+    matching guard for run_monthly_review(): a record must have sat in the
+    Monthly-review band (MemoryRecord.band_entered_at) this long before
+    appearing in a review report.
+
+    retrieval_similarity_weight/retrieval_confidence_weight (Sprint 3.9)
+    are MemoryRetrievalEngine's blend weights for combined_rank_score —
+    must sum to 1.0, same validation pattern as the five Dynamic Memory
+    Formula weights above. max_retrieval_results is retrieve()'s default
+    truncation bound, overridable per call.
+    """
+
+    chroma_collection_prefix: str = "jarminei_memory"
+    short_term_default_confidence: float = 15.0
+    short_term_salience_triggers: list[str] = field(
+        default_factory=lambda: ["remind me", "don't forget", "note that", "remember that"]
+    )
+    frequency_weight: float = 0.25
+    recency_weight: float = 0.25
+    recency_half_life_days: float = 14.0
+    importance_weight: float = 0.2
+    category_weight: float = 0.15
+    category_importance: dict[str, float] = field(
+        default_factory=lambda: {"project": 0.9, "goal": 0.9, "routine": 0.6, "preference": 0.7}
+    )
+    category_default_weight: float = 0.5
+    emotional_weight: float = 0.15
+    override_trigger_phrases: list[str] = field(
+        default_factory=lambda: ["remember this", "never forget this", "this is important"]
+    )
+    cleanup_grace_period_days: int = 7
+    monthly_review_min_band_days: int = 30
+    retrieval_similarity_weight: float = 0.6
+    retrieval_confidence_weight: float = 0.4
+    max_retrieval_results: int = 5
+
+
+@dataclass
 class ModelConfig:
     """AI runtime model selection (Sprint 2.3+ / 3.3+).
 
@@ -141,6 +225,8 @@ class ModelConfig:
     """
 
     ollama_model: str = "gemma3"
+    ollama_host: str = "http://localhost:11434"
+    ollama_timeout_seconds: float = 10.0
     whisper_model: str = "base"
     whisper_no_speech_threshold: float = 0.6
     whisper_initial_prompt: str = "Jarvis and Minie are JARMINEI's two personas."
@@ -178,6 +264,7 @@ class AppConfig:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     resources: ResourceThresholds = field(default_factory=ResourceThresholds)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -190,6 +277,7 @@ class AppConfig:
         self._validate_logging()
         self._validate_ui()
         self._validate_paths()
+        self._validate_memory()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -264,6 +352,13 @@ class AppConfig:
                 "models.whisper_no_speech_threshold must be in (0, 1], "
                 f"got {self.models.whisper_no_speech_threshold}"
             )
+        if not self.models.ollama_host.strip():
+            raise ConfigError("models.ollama_host must not be empty")
+        if self.models.ollama_timeout_seconds <= 0:
+            raise ConfigError(
+                "models.ollama_timeout_seconds must be positive, "
+                f"got {self.models.ollama_timeout_seconds}"
+            )
 
     def _validate_logging(self) -> None:
         if self.logging.level not in VALID_LOG_LEVELS:
@@ -292,4 +387,85 @@ class AppConfig:
             raise ConfigError(
                 "database.conversation_retention_days must be positive, "
                 f"got {self.database.conversation_retention_days}"
+            )
+
+    def _validate_memory(self) -> None:
+        if not self.memory.chroma_collection_prefix.strip():
+            raise ConfigError("memory.chroma_collection_prefix must not be empty")
+        if not (0 <= self.memory.short_term_default_confidence <= 100):
+            raise ConfigError(
+                "memory.short_term_default_confidence must be in [0, 100], "
+                f"got {self.memory.short_term_default_confidence}"
+            )
+        if not self.memory.short_term_salience_triggers:
+            raise ConfigError("memory.short_term_salience_triggers must not be empty")
+        for phrase in self.memory.short_term_salience_triggers:
+            if not phrase or not phrase.strip():
+                raise ConfigError(
+                    "memory.short_term_salience_triggers must not contain empty strings"
+                )
+        weights = {
+            "frequency_weight": self.memory.frequency_weight,
+            "recency_weight": self.memory.recency_weight,
+            "importance_weight": self.memory.importance_weight,
+            "category_weight": self.memory.category_weight,
+            "emotional_weight": self.memory.emotional_weight,
+        }
+        for name, value in weights.items():
+            if not (0 <= value <= 1):
+                raise ConfigError(f"memory.{name} must be in [0, 1], got {value}")
+        weight_sum = sum(weights.values())
+        if abs(weight_sum - 1.0) > 1e-6:
+            raise ConfigError(
+                "memory's five Dynamic Memory Formula weights "
+                "(frequency_weight, recency_weight, importance_weight, category_weight, "
+                f"emotional_weight) must sum to 1.0, got {weight_sum}"
+            )
+        if self.memory.recency_half_life_days <= 0:
+            raise ConfigError(
+                "memory.recency_half_life_days must be positive, "
+                f"got {self.memory.recency_half_life_days}"
+            )
+        if not (0 <= self.memory.category_default_weight <= 1):
+            raise ConfigError(
+                "memory.category_default_weight must be in [0, 1], "
+                f"got {self.memory.category_default_weight}"
+            )
+        for category, weight in self.memory.category_importance.items():
+            if not (0 <= weight <= 1):
+                raise ConfigError(
+                    f"memory.category_importance[{category!r}] must be in [0, 1], got {weight}"
+                )
+        if not self.memory.override_trigger_phrases:
+            raise ConfigError("memory.override_trigger_phrases must not be empty")
+        for phrase in self.memory.override_trigger_phrases:
+            if not phrase or not phrase.strip():
+                raise ConfigError("memory.override_trigger_phrases must not contain empty strings")
+        if self.memory.cleanup_grace_period_days <= 0:
+            raise ConfigError(
+                "memory.cleanup_grace_period_days must be positive, "
+                f"got {self.memory.cleanup_grace_period_days}"
+            )
+        if self.memory.monthly_review_min_band_days <= 0:
+            raise ConfigError(
+                "memory.monthly_review_min_band_days must be positive, "
+                f"got {self.memory.monthly_review_min_band_days}"
+            )
+        retrieval_weights = {
+            "retrieval_similarity_weight": self.memory.retrieval_similarity_weight,
+            "retrieval_confidence_weight": self.memory.retrieval_confidence_weight,
+        }
+        for name, value in retrieval_weights.items():
+            if not (0 <= value <= 1):
+                raise ConfigError(f"memory.{name} must be in [0, 1], got {value}")
+        retrieval_weight_sum = sum(retrieval_weights.values())
+        if abs(retrieval_weight_sum - 1.0) > 1e-6:
+            raise ConfigError(
+                "memory's retrieval blend weights (retrieval_similarity_weight, "
+                f"retrieval_confidence_weight) must sum to 1.0, got {retrieval_weight_sum}"
+            )
+        if self.memory.max_retrieval_results <= 0:
+            raise ConfigError(
+                "memory.max_retrieval_results must be positive, "
+                f"got {self.memory.max_retrieval_results}"
             )

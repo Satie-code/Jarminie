@@ -157,3 +157,11 @@ None introduced.
 
 - Core Manager should own the sampling cadence (call `ResourceMonitor.sample()` on a timer) rather than any other subsystem — keeps "who decides how often to check" in one place.
 - No changes anticipated to `ResourceMonitor`'s public API.
+
+## Post-Sprint Fix (2026-07-18, found during Sprint 3.10 implementation)
+
+Sprint 3.10 (Priority Queue) needed a real critical-severity resource-alert signal to feed `PriorityQueueManager.classify_resource_alert()`, and assumed one already existed ("`ResourceMonitor`'s critical-threshold alerts"). It didn't: this sprint shipped the `cpu_critical_percent`/`ram_critical_percent`/`disk_critical_percent`/`battery_critical_percent` config fields and their Settings Window display (Sprint 1.8), but `ResourceMonitor` itself only ever checked warning thresholds via `breached_resources()` (returning plain resource-name strings, not alert objects) — nothing checked a live sample against the critical fields at all.
+
+**Change**: added `ResourceAlert` (dataclass: `resource`, `value`, `threshold`, `timestamp`) and `ResourceMonitor.critical_alerts(snapshot) -> list[ResourceAlert]` — the critical-severity counterpart to `breached_resources()`, same battery-inverted-direction logic. Purely additive: `breached_resources()`'s own signature/behavior and every existing test are unchanged.
+
+**Verification**: 8 new tests in `test_resource_monitor.py` covering each resource independently, the battery inversion, `None` battery not alerting, multiple simultaneous critical alerts, and — the one genuinely new case this addition needed to prove — that a warning-level-only breach does NOT produce a critical alert (the two methods check independent thresholds). Also verified with a real `psutil` sample on the actual development machine (no critical alerts, as expected under normal load). Full detail in `sprint_3_10.md`'s own Sprint Completion Report, which owns this addition.

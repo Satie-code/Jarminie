@@ -123,3 +123,57 @@ Low-Medium.
 ## Future Considerations
 
 - Once Sprint 3.8 (Context Analysis) exists, `promote_from_turn()`'s trigger-phrase check should be replaced by a call into real salience detection — flagged explicitly, not built speculatively now.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `memory/short_term_memory.py`'s `ShortTermMemory` and the `MemoryConfig` additions this sprint's spec named. No gap against Sprint 3.1's shipped `MemoryRecord`/`MemoryStore` this time — `promote_from_turn()`/`active_context_memories()` both map cleanly onto what already exists, following the `EventMemory` (Sprint 3.3) precedent directly for the one place `MemoryStore` doesn't offer a purpose-built query (session-scoped filtering).
+
+### Files Created
+
+- `memory/short_term_memory.py` — `ShortTermMemory` (`promote_from_turn`, `active_context_memories`).
+- `tests/unit/memory/test_short_term_memory.py` — 7 tests.
+
+### Files Modified
+
+- `config/schema.py` — `MemoryConfig.short_term_default_confidence: float = 15.0`, `short_term_salience_triggers: list[str]`; validation added to `_validate_memory()` (confidence in `[0, 100]`, non-empty trigger list, no blank entries).
+- `config/defaults.yaml` — `memory:` section extended to match.
+- `tests/unit/config/test_schema.py` — 4 new tests for the new fields' defaults and validation.
+- `docs/STATUS.md` — Phase 3.1 (Memory Engine) marked **Complete**.
+
+### Tests Added
+
+11 new tests: 7 in `test_short_term_memory.py` (trigger match creates a correctly-scored, session-tagged record; case-insensitive matching; no-match returns `None` and creates nothing; session-scoped `active_context_memories()` with no cross-session leakage; empty result for an unknown session; default config values), 4 in `test_schema.py` (defaults, out-of-range confidence, empty/blank trigger list). 355/355 tests passing project-wide, `ruff check .` clean.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `docs/STATUS.md` — Phase 3.1 marked **Complete**.
+
+### Acceptance Criteria Checklist
+
+- ✔ A turn containing a configured trigger phrase produces a `SHORT_TERM` record with `confidence_score == short_term_default_confidence` and the correct `source_session_id` (`test_promote_from_turn_matches_trigger_and_creates_record`).
+- ✔ A turn without any trigger phrase produces no record and returns `None` (`test_promote_from_turn_no_match_returns_none_and_creates_nothing`).
+- ✔ `active_context_memories(session_id)` only returns records for that session (`test_active_context_memories_scoped_to_session`).
+- ✔ Combined with Sprints 3.1–3.3, Phase 3.1's Acceptance Criteria ("Memory stored correctly. Retrieval accurate.") are met at the per-type level — all five `MemoryType`s now have real storage and retrieval.
+
+### Engineering Decisions
+
+- **`active_context_memories()` fetches via `MemoryStore.recent(SHORT_TERM, limit=_LARGE_LIMIT)` and filters by `source_session_id` in Python**, identical in shape to `EventMemory.list_milestones()`'s category filter (Sprint 3.3) — `MemoryStore` has no session-scoped query of its own. Consistent with that sprint's own reasoning: adding a session-filter parameter to `MemoryStore.recent()` for one caller's need isn't justified yet; revisit if a second caller needs the same filter.
+
+### Remaining Risks
+
+- **The Python-side session filter scans every live `SHORT_TERM` record**, not just one session's — acceptable now (no live caller exists yet, per this sprint's own Integration Considerations, so real volume is zero), but short-term memories accumulate faster than milestones would before Sprint 3.6's cleanup is wired (Sprint 3.12+). Flagged explicitly, not treated as solved — revisit if Sprint 3.12's real integration shows a measured problem, matching the "no premature optimization" principle already applied to `EventMemory`.
+- The salience trigger-phrase heuristic remains a known-crude placeholder, unchanged from this sprint's own Potential Risks — still explicitly scheduled for replacement by Sprint 3.8, not a hidden permanent limitation.
+
+### Technical Debt
+
+None introduced.
+
+### Recommendations
+
+- **For Sprint 3.5 (Confidence Scoring Engine)**: if a second caller ever needs session- or category-scoped `MemoryStore` queries beyond what `EventMemory`/`ShortTermMemory` already needed in Python, that's the signal to add a real `MemoryStore`-level filter instead of a third copy of the same fetch-and-filter pattern — not urgent now, flagged for whoever notices it next.
+
+**Phase 3.1 (Memory Engine) is now `Complete`** — all four sprints (3.1–3.4) done; all five of Part 2's memory layers exist with real storage and per-type retrieval. **Sprint 3.5 (Confidence Scoring Engine) is next**, beginning Phase 3.2 (Dynamic Memory).

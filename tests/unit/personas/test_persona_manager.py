@@ -7,6 +7,8 @@ free value-and-template objects — no need for fakes) throughout.
 import pytest
 
 from config.schema import VoiceConfig
+from memory.models import MemoryRecord, MemoryType
+from memory.retrieval_engine import RetrievedMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager, SwitchReason
@@ -188,9 +190,29 @@ def test_exactly_one_persona_active_across_a_sequence_of_operations(manager):
 def test_compose_reply_safely_returns_the_real_reply(manager, conversation_context_factory):
     context = conversation_context_factory()
 
-    reply = manager.compose_reply_safely("hello there", context)
+    reply = manager.compose_reply_safely("hello there", context, None)
 
     assert "hello there" in reply
+
+
+def test_compose_reply_safely_forwards_the_decision_trace(
+    manager, conversation_context_factory, decision_trace_factory
+):
+    """Sprint 3.12: compose_reply_safely() must actually pass decision_trace
+    through to the active persona, not silently drop it."""
+    context = conversation_context_factory()
+    memory = RetrievedMemory(
+        record=MemoryRecord(memory_type=MemoryType.JARVIS, content="a recalled fact"),
+        similarity_score=0.8,
+        confidence_score=70.0,
+        combined_rank_score=0.76,
+        retrieval_reason="80% similar - Long-term confidence (70/100)",
+    )
+    trace = decision_trace_factory(retrieved_memories=[memory])
+
+    reply = manager.compose_reply_safely("hello there", context, trace)
+
+    assert "a recalled fact" in reply
 
 
 def test_compose_reply_safely_falls_back_when_the_persona_raises(
@@ -203,7 +225,7 @@ def test_compose_reply_safely_falls_back_when_the_persona_raises(
         name = "jarvis"
         voice_id = "p340"
 
-        def compose_reply(self, transcript, context):
+        def compose_reply(self, transcript, context, decision_trace):
             raise RuntimeError("persona logic exploded")
 
         def describe(self):
@@ -212,7 +234,61 @@ def test_compose_reply_safely_falls_back_when_the_persona_raises(
     manager._personas["jarvis"] = _BrokenPersona()
     context = conversation_context_factory()
 
-    reply = manager.compose_reply_safely("hello there", context)
+    reply = manager.compose_reply_safely("hello there", context, None)
 
     assert reply  # a non-empty fallback, not a raised exception
     assert "hello there" not in reply
+
+
+# --- select_from_context() (Sprint 3.12) -------------------------------------
+
+
+def test_select_from_context_prefers_suggested_persona(manager, context_analysis_factory):
+    analysis = context_analysis_factory(suggested_persona="minie")
+
+    switched = manager.select_from_context(analysis, "some transcript")
+
+    assert switched is True
+    assert manager.active_persona().name == "minie"
+
+
+def test_select_from_context_no_switch_when_suggested_persona_is_none(
+    manager, context_analysis_factory
+):
+    """A ContextAnalysis with no clear signal must NOT fall back to the
+    Level 2 heuristic — Sprint 3.8 is authoritative, not merely advisory,
+    per its own spec."""
+    analysis = context_analysis_factory(suggested_persona=None)
+
+    switched = manager.select_from_context(analysis, "i'm feeling really stressed today")
+
+    assert switched is False
+    assert manager.active_persona().name == "jarvis"  # heuristic would have said minie
+
+
+def test_select_from_context_falls_back_to_heuristic_when_analysis_is_none(manager):
+    """Only a totally missing ContextAnalysis (the Decision Engine
+    pipeline itself failed) falls back to the Level 2 heuristic."""
+    switched = manager.select_from_context(None, "i'm feeling really stressed today")
+
+    assert switched is True
+    assert manager.active_persona().name == "minie"
+
+
+def test_select_from_context_none_analysis_and_no_heuristic_match_does_not_switch(manager):
+    switched = manager.select_from_context(None, "the sky is blue")
+
+    assert switched is False
+    assert manager.active_persona().name == "jarvis"
+
+
+def test_select_from_context_respects_the_priority_system(manager, context_analysis_factory):
+    """A suggested_persona switch is still just a CONTEXT_DETECTION
+    priority — it must not override an already-active EXPLICIT_SELECTION."""
+    manager.select("jarvis", SwitchReason.EXPLICIT_SELECTION)
+    analysis = context_analysis_factory(suggested_persona="minie")
+
+    switched = manager.select_from_context(analysis, "some transcript")
+
+    assert switched is False
+    assert manager.active_persona().name == "jarvis"

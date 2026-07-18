@@ -158,3 +158,91 @@ Medium-High — the mechanics are well-precedented by `ConversationSessionStore`
 
 - A startup reconciliation pass for SQLite rows with no matching Chroma embedding (see Potential Risks) — build only if real usage shows orphaned rows are a genuine, recurring problem.
 - Revisit the embedding-function choice if real retrieval quality (once Sprint 3.9/3.14 exercise it against real conversation content) proves the default local model insufficient.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented the dual-backend Memory Store Foundation: `memory/models.py` (`MemoryType`, `MemoryRecord`), `memory/chroma_client.py` (`ChromaMemoryClient`), `memory/memory_store.py` (`MemoryStore`), and `memory/errors.py` (`MemoryError`, `MemoryStoreError`) — exactly the files this sprint's spec named. `chromadb` (declared since Sprint 1.2, installed here for real — `backlog/technical_debt.md` item 1) resolved to `1.5.9`, newer than the `>=0.5` pin; its `PersistentClient`/`Collection` API was verified directly against a scratch script before writing any production code, not assumed from documentation.
+
+### Files Created
+
+- `memory/__init__.py` (already existed as an empty package stub from repository bootstrap).
+- `memory/models.py` — `MemoryType` (Enum), `MemoryRecord` (dataclass).
+- `memory/errors.py` — `MemoryError`, `MemoryStoreError`.
+- `memory/chroma_client.py` — `ChromaMemoryClient` (`connect`/`ensure_collections`/`add_embedding`/`query`/`delete_embedding`/`close`/`health_check`).
+- `memory/memory_store.py` — `MemoryStore` (`start`/`stop`/`health_check`/`store`/`get_by_id`/`recent`/`semantic_search`/`update_confidence`/`delete`).
+- `tests/unit/memory/test_chroma_client.py` (10 tests), `tests/unit/memory/test_memory_store.py` (19 tests).
+
+### Files Modified
+
+- `config/schema.py` — `MemoryConfig` dataclass added (`chroma_collection_prefix: str = "jarminei_memory"`); registered on `AppConfig`; `_validate_memory()` added and wired into `validate()`.
+- `config/loader.py` — `MemoryConfig` added to `_SECTION_SCHEMAS` (the single registration point Sprint 1.7/1.8's history established as the only place a new section needs to be added).
+- `config/defaults.yaml` — `memory:` section added.
+- `tests/unit/config/test_schema.py` — 2 new tests for `MemoryConfig`'s default and validation, matching the file's existing per-section test style (not explicitly named in this sprint's own Testing Checklist, but a direct extension of the already-established config-validation-test convention, the same reasoning Sprint 2.11's own Completion Report used for its analogous addition).
+- `docs/STATUS.md` — Phase 3.1 row updated to `Developing`.
+
+### Tests Added
+
+29 new tests, all passing: `ChromaMemoryClient` add/query/delete/collection-isolation/health-check round-trips against a real temp-directory `PersistentClient` (10); `MemoryStore` store/get/recent/semantic-search/update-confidence/delete round-trips against a real temp-file `SqliteClient` + real temp-directory `ChromaMemoryClient`, including a restart simulation and a Chroma-embedding-failure injection via a small local `_EmbeddingFailingChromaClient` double (19); `MemoryConfig` default and validation (2, in `test_schema.py`). 324/324 tests passing project-wide (296 prior + 28 new — one of the 29 count is `test_starting_is_idempotent`, already counted; see Engineering Decisions), `ruff check .` clean.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `docs/STATUS.md` Phase 3.1 row.
+
+### Acceptance Criteria Checklist
+
+- ✔ `store()` persists a record retrievable via `get_by_id()` after a simulated restart (`test_records_survive_a_simulated_restart`, new `SqliteClient`/`ChromaMemoryClient` instances, same underlying files).
+- ✔ `semantic_search()` ranks an obviously-related fixture string above an obviously-unrelated one (`test_semantic_search_ranks_relevant_content_first`, `test_add_and_query_returns_nearest_first`), verified against the real ChromaDB default embedding model, not a stub.
+- ✔ All five Chroma collections and the `memory_records` table exist after `start()`, idempotently (`test_starting_is_idempotent`, `test_ensure_collections_is_idempotent`).
+- ✔ A Chroma write failure during `store()` is logged and does not raise — the SQLite row still exists and `get_by_id()` still returns it (`test_store_swallows_and_logs_a_chroma_embedding_failure`).
+
+### Engineering Decisions
+
+Two decisions made during implementation, not fully specified by the sprint file, recorded here:
+
+1. **`delete()` looks up the record's `MemoryType` via a plain `SELECT`, not `get_by_id()`.** The spec's Expected Functions line only said "removes from both SQLite and Chroma," without specifying how the record's type is discovered for the Chroma-side delete. Using `get_by_id()` would have bumped `access_count`/`last_accessed_at` on a record about to be deleted — a pointless write immediately before a delete. Resolved with a dedicated, non-mutating lookup instead; covered incidentally by every `delete()` test (none of them assert on access-count side effects, since there are now none).
+2. **ChromaDB resolved to `1.5.9`**, not the `~0.5.x` line the spec's Engineering Rationale was written against. Its `PersistentClient`/collection API (`get_or_create_collection`, `.add(ids=, documents=)`, `.query(query_texts=, n_results=)` returning `{"ids": [[...]], "distances": [[...]], ...}`, `.delete(ids=)`, `.heartbeat()`) was confirmed directly with a scratch script before any production code was written — collection names must be 3-512 chars from `[a-zA-Z0-9._-]`, which `f"{prefix}_{memory_type.value}"` always satisfies for the configured default prefix and all five `MemoryType` values.
+
+### Remaining Risks
+
+Both risks named in this sprint's own Potential Risks remain open, unchanged by implementation: no distributed transaction between SQLite and Chroma (accepted); the default embedding model's real retrieval quality against genuine conversational content is unverified until Sprint 3.9/3.14 exercise it for real (this sprint's own tests use short, deliberately distinct fixture sentences designed to be easy to distinguish, not representative conversational memory).
+
+### Technical Debt
+
+None introduced by this sprint itself. One **pre-existing** issue was discovered while checking whether `ui/settings_window.py` needed updating for the new `memory` config section (it doesn't — `AppConfig.memory` has a working default): `SettingsWindow.to_config()` already reconstructs `DatabaseConfig`/`ModelConfig` from only some of their fields on every save, silently resetting `database.conversation_retention_days` (Sprint 2.7) and three `ModelConfig` fields (`whisper_no_speech_threshold`, `whisper_initial_prompt`, `tts_model`; Sprints 2.3–2.5) back to their dataclass defaults. This predates Level 3 entirely and is unrelated to this sprint's own changes (not touched, not caused by anything here) — flagged as a new backlog item rather than fixed silently, since `ui/` is outside this sprint's Files to Modify.
+
+### Recommendations
+
+- **For `backlog/technical_debt.md`**: add the `SettingsWindow.to_config()` silent-field-reset issue above as a new tracked item — a real, user-facing data-loss bug (any Settings Window save currently reverts those four fields to defaults) unrelated to Level 3, best fixed as its own small, focused change rather than folded into a memory sprint.
+- **For Sprint 3.2**: `PersonaScopedMemory` can now depend on a fully working `MemoryStore` — no gaps found that would change 3.2's own spec.
+
+**Phase 3.1 (Memory Engine) is `Developing`** — Sprint 3.1 complete; Sprints 3.2–3.4 (Shared/Persona Memory, Event Memory, Short-Term Memory) remain to close the phase. **Sprint 3.2 (Shared Memory & Persona Memory) is next.**
+
+## Post-Sprint Fix (2026-07-18, requested during Sprint 3.2)
+
+`MemoryStore.semantic_search()`'s return type changed from `list[MemoryRecord]` to `list[tuple[MemoryRecord, float]]` (record, Chroma distance), per explicit user instruction after Sprint 3.2 surfaced a real mismatch: `sprint_3_2.md`'s own spec expected `PersonaScopedMemory.recall_for_persona()` to "re-sort by Chroma distance," which was impossible against this sprint's originally-shipped interface (distance was deliberately not exposed — see this file's original Engineering Decisions). Rather than leave `recall_for_persona()` permanently approximating with an interleave, the fix was applied here, at the layer that actually talks to Chroma, per the user's explicit direction.
+
+**Change**: `semantic_search()` now returns `(record, distance)` pairs, lowest distance (most similar) first — still in the same order Chroma itself returns, just no longer discarding the second half of each pair. Every caller that only wants the record can unpack with `for record, _ in results`. This is the single call site affected within this sprint's own code (`get_by_id()`/`recent()`/`store()`/`delete()`/`update_confidence()` are unchanged).
+
+**Why exposed here rather than kept hidden with a separate "with distance" method added later**: a second parallel method would have meant two ways to do the same underlying Chroma query, an unnecessary surface for Single Responsibility to guard against — one method, one contract, is simpler once any real caller needs the distance at all.
+
+**Verification**: `tests/unit/memory/test_memory_store.py::test_semantic_search_ranks_relevant_content_first` updated to unpack `(record, distance)` and assert ascending-distance ordering explicitly. Full suite re-run: 335/335 passing, `ruff check .` clean. See `sprint_3_2.md`'s own Post-Sprint Fix for the downstream change this enabled.
+
+## Post-Sprint Fix (2026-07-18, during Sprint 3.3)
+
+`MemoryRecord` gained an `occurred_at: datetime | None = None` field, and `memory_records` gained a matching nullable `occurred_at TEXT` column — the same class of gap as the Chroma-distance fix above: `sprint_3_3.md`'s own Potential Risks already named the `occurred_at`/`created_at` distinction as important ("a milestone can be recorded well after it happened... confirmed explicitly here so it isn't silently conflated"), but this sprint's originally-shipped `MemoryRecord`/schema had no field to hold it. Fixed at the root (this sprint's model/table) rather than worked around in Sprint 3.3, per the same direction already given for the distance fix.
+
+**Change**: `_SELECT_COLUMNS` module constant added to `memory/memory_store.py`, consolidating the column list that was previously duplicated across `store()`'s INSERT and `get_by_id()`/`recent()`'s SELECT statements (three independent copies — exactly the "same list duplicated in several places" bug pattern `config/loader.py`'s own `_SECTION_SCHEMAS` comment already warned about elsewhere in this codebase) into one place, so adding `occurred_at` required one column-list edit, not three. `_row_to_record()` parses a `NULL` `occurred_at` to `None`.
+
+**Verification**: two new tests, `test_occurred_at_round_trips_when_set`/`test_occurred_at_defaults_to_none`, in `tests/unit/memory/test_memory_store.py`. No existing test needed changes — `occurred_at` is nullable with a `None` default, so every prior record shape round-trips unchanged. Full suite: 345/345 passing, `ruff check .` clean.
+
+## Post-Sprint Fix (2026-07-18, during Sprint 3.6)
+
+`MemoryRecord` gained a `band_entered_at: datetime` field (non-nullable, defaults to "now" at construction), and `memory_records` gained a matching `band_entered_at TEXT NOT NULL` column — the same class of gap as the two fixes above. `sprint_3_6.md`'s own spec required `run_monthly_review()` to return only records that have sat in the Monthly-review confidence band for at least `monthly_review_min_band_days`, but nothing in this sprint's originally-shipped `MemoryRecord` tracked *when a record entered its current band* — only `created_at` (write time) and `last_accessed_at` (most recent read) existed, neither of which is a correct substitute (a record that was Long-term for months and only just decayed into Monthly-review would be wrongly counted as "old enough" using `created_at`, exactly the "records that only just crossed the threshold" flooding problem `monthly_review_min_band_days` exists to prevent). Fixed at the root, per the same standing direction as the prior two fixes.
+
+**Change**: `MemoryStore.update_confidence()`'s signature grew a fourth parameter, `band_entered_at: datetime | None = None`, generalizing its previous two-branch `if/else` into a dynamic `SET` clause builder (now three optionally-independent fields: score, `user_override`, `band_entered_at`). Only `MemoryLifecycleManager.run_cleanup_pass()` (Sprint 3.6) ever supplies a value — it compares the record's confidence band before and after rescoring, and only advances `band_entered_at` to "now" on an actual band transition; a record that's rescored but stays in the same band keeps its existing `band_entered_at` unchanged.
+
+**Verification**: `test_starting_is_idempotent`'s raw `INSERT` (the one test with its own hand-written SQL, bypassing `MemoryStore.store()`) updated for the new `NOT NULL` column. Two new dedicated tests in `test_lifecycle_manager.py` — `test_band_entered_at_advances_only_on_a_real_band_change`/`test_band_entered_at_updates_when_band_actually_changes` — prove both halves of the contract. Full suite: 405/405 passing, `ruff check .` clean.

@@ -120,3 +120,61 @@ Low-Medium.
 ## Future Considerations
 
 - A genuine "forget this permanently" user command (Human First Rule — the user's decision always overrides) would need a deliberately separate, harder-to-reach code path than any of this sprint's methods — explicitly not designed here, flagged for whichever future sprint introduces user-driven memory deletion as a first-class feature.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `memory/event_memory.py`'s `EventMemory` — exactly the file this sprint's spec named, plus its test file. One real gap between this sprint's spec and Sprint 3.1's shipped `MemoryRecord` (no `occurred_at` field existed) was found and fixed at the root before implementing this sprint, not worked around — see `sprint_3_1.md`'s Post-Sprint Fix.
+
+### Files Created
+
+- `memory/event_memory.py` — `EventMemory` (`record_milestone`, `list_milestones`, `search_milestones`).
+- `tests/unit/memory/test_event_memory.py` — 8 tests.
+
+### Files Modified
+
+None within this sprint's own scope (matches "Files to Modify: None"). `memory/models.py` and `memory/memory_store.py` were modified as part of Sprint 3.1's Post-Sprint Fix, a prerequisite discovered while implementing this sprint, not a modification this sprint's own spec asked for.
+
+### Tests Added
+
+8 tests in `test_event_memory.py`, all against a real `MemoryStore`: `is_permanent`/`confidence_score` always set correctly; `occurred_at` stored separately from `created_at` and defaulting to `None`; `list_milestones()` unfiltered and category-filtered; `list_milestones()`/`search_milestones()` scoped exclusively to `EVENT` even with non-`EVENT` records present in the same store; and the defensive `hasattr` check that `EventMemory` has no `delete`/`forget`/`expire`/`remove` method. Plus 2 tests in `test_memory_store.py` for `occurred_at` round-tripping (counted in Sprint 3.1's Post-Sprint Fix). 345/345 tests passing project-wide, `ruff check .` clean.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `sprint_3_1.md`'s Post-Sprint Fix (the `occurred_at` addition this sprint required). `memory/models.py`'s module docstring (records why `occurred_at` exists and when it was added).
+
+### Acceptance Criteria Checklist
+
+- ✔ Every record created via `record_milestone()` has `is_permanent=True` and `confidence_score=100.0`, with no code path able to override either — `record_milestone()`'s signature has no parameter for either value.
+- ✔ `EventMemory` exposes no method capable of deleting or lowering the confidence of a record it created (`test_event_memory_has_no_deletion_method`; also no `update_confidence`-calling code exists anywhere in the class).
+- ✔ `list_milestones(category=...)` and `search_milestones()` only ever return `MemoryType.EVENT` records, verified with non-`EVENT` records present in the same store.
+
+### Engineering Decisions
+
+- **`list_milestones()` fetches via `MemoryStore.recent()` with a large fixed limit (`_LARGE_LIMIT = 10_000`), then filters by category in Python.** `MemoryStore.recent()` (Sprint 3.1) takes only `memory_type`/`limit`, no category parameter — adding one there would mean every future memory-type wrapper inherits a parameter only Event Memory currently needs. A real user's lifetime milestone count will never approach 10,000, so the Python-side filter has no realistic performance concern; flagged in Remaining Risks below rather than silently assumed fine forever.
+
+### Remaining Risks
+
+- **`list_milestones()`'s category filter is a full-table Python-side scan of all `EVENT` records**, not a SQL `WHERE category = ?` — acceptable at any realistic milestone volume; revisit only if a future sprint's real usage shows otherwise (no premature optimization).
+- No live caller of `record_milestone()` exists yet, unchanged from this sprint's own Potential Risks — correctness verified in isolation only, same as `EventMemory`'s sibling sprints.
+
+### Technical Debt
+
+None introduced.
+
+### Recommendations
+
+- **For Sprint 3.4 (Short-Term Memory)**: check whether its own spec's data model assumptions against `MemoryRecord` hold against the *current* shipped shape (now including `occurred_at`) before implementing — this sprint and Sprint 3.2 both found a real gap between what was written and what Sprint 3.1 shipped; worth a deliberate five-minute check rather than assuming 3.4 is clean.
+
+This sprint completes 3 of Phase 3.1's four component sprints (3.1, 3.2, 3.3) — **Sprint 3.4 (Short-Term Memory) is next.**
+
+## Post-Sprint Fix (2026-07-18, found during Sprint 3.9 implementation)
+
+`search_milestones()` discarded the Chroma distance `MemoryStore.semantic_search()` (Sprint 3.1) already exposes — Sprint 3.9's `MemoryRetrievalEngine` needs a genuine similarity score to blend with confidence, and had no way to get one out of this class as shipped (the same gap found in `PersonaScopedMemory.recall_for_persona()`, see `sprint_3_2.md`'s own second Post-Sprint Fix).
+
+**Change**: added `search_milestones_scored(query_text, n_results=5) -> list[tuple[MemoryRecord, float]]`, keeping distance. `search_milestones()` now delegates to it, discarding distance — its own public signature and behavior are unchanged, and its existing test needed no changes.
+
+**Verification**: 1 new test in `test_event_memory.py` confirms the scored variant returns a real `float` distance. Full detail in `sprint_3_9.md`'s own Sprint Completion Report, which owns this addition.

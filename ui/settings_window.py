@@ -2,10 +2,17 @@
 
 Validation happens in AppConfig.validate() (Sprint 1.2), reused here
 rather than re-implemented in the UI layer — a single source of truth for
-what makes a config valid (Architecture Notes in sprint_1_8.md). Covers
-all six AppConfig sections, including UIConfig (added in Sprint 1.7, form
-section added here per the recommendation accepted after that sprint).
+what makes a config valid (Architecture Notes in sprint_1_8.md). Not every
+AppConfig field has a form widget (e.g. VoiceConfig's trigger phrases and
+timing/threshold settings, ModelConfig's Whisper tuning fields, all of
+MemoryConfig) — to_config() preserves every un-widgeted field from the
+config this dialog was constructed with (dataclasses.replace(), one
+section at a time) rather than reconstructing each section from scratch,
+so a save can never silently reset a field this dialog has no UI for back
+to its dataclass default. See backlog/technical_debt.md item 14.
 """
+
+from dataclasses import replace
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -22,16 +29,7 @@ from PySide6.QtWidgets import (
 
 from config.errors import ConfigError
 from config.loader import ConfigLoader
-from config.schema import (
-    VALID_LOG_LEVELS,
-    AppConfig,
-    DatabaseConfig,
-    LoggingConfig,
-    ModelConfig,
-    ResourceThresholds,
-    UIConfig,
-    VoiceConfig,
-)
+from config.schema import VALID_LOG_LEVELS, AppConfig
 from core.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -60,6 +58,7 @@ class SettingsWindow(QDialog):
     def __init__(self, config: AppConfig, config_loader: ConfigLoader) -> None:
         super().__init__()
         self._config_loader = config_loader
+        self._original_config = config
         self.setWindowTitle("JARMINEI Settings")
         self.resize(480, 600)
 
@@ -176,34 +175,49 @@ class SettingsWindow(QDialog):
         self._refresh_interval_spin.setValue(config.ui.status_refresh_interval_ms)
 
     def to_config(self) -> AppConfig:
-        """Build a candidate AppConfig from current form values (not yet validated)."""
+        """Build a candidate AppConfig from current form values (not yet
+        validated). Starts from self._original_config and overrides only
+        the fields this dialog actually has widgets for — every other
+        field (this section's own un-widgeted fields, and entire sections
+        with no form at all, e.g. MemoryConfig) passes through unchanged
+        rather than reverting to a dataclass default. See this module's
+        own docstring and backlog/technical_debt.md item 14."""
         wake_phrases = [
             phrase.strip() for phrase in self._wake_phrases_edit.text().split(",") if phrase.strip()
         ]
-        return AppConfig(
-            voice=VoiceConfig(
+        original = self._original_config
+        return replace(
+            original,
+            voice=replace(
+                original.voice,
                 wake_phrases=wake_phrases,
                 jarvis_voice_id=self._jarvis_voice_edit.text(),
                 minie_voice_id=self._minie_voice_edit.text(),
             ),
-            resources=ResourceThresholds(
-                **{name: spin.value() for name, spin in self._resource_fields.items()}
+            resources=replace(
+                original.resources,
+                **{name: spin.value() for name, spin in self._resource_fields.items()},
             ),
-            database=DatabaseConfig(
+            database=replace(
+                original.database,
                 sqlite_path=self._sqlite_path_edit.text(),
                 chroma_path=self._chroma_path_edit.text(),
             ),
-            models=ModelConfig(
+            models=replace(
+                original.models,
                 ollama_model=self._ollama_model_edit.text(),
                 whisper_model=self._whisper_model_edit.text(),
             ),
-            logging=LoggingConfig(
+            logging=replace(
+                original.logging,
                 level=self._log_level_combo.currentText(),
                 log_dir=self._log_dir_edit.text(),
                 max_bytes=self._max_bytes_spin.value(),
                 backup_count=self._backup_count_spin.value(),
             ),
-            ui=UIConfig(status_refresh_interval_ms=self._refresh_interval_spin.value()),
+            ui=replace(
+                original.ui, status_refresh_interval_ms=self._refresh_interval_spin.value()
+            ),
         )
 
     def on_save(self) -> None:

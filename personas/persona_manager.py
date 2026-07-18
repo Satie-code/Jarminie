@@ -40,6 +40,8 @@ from enum import Enum
 
 from config.schema import VoiceConfig
 from core.logging_setup import get_logger
+from decision.authority import DecisionTrace
+from decision.context_analyzer import ContextAnalysis
 from personas.base import Persona
 from voice.context_manager import ConversationContext
 
@@ -137,15 +139,20 @@ class PersonaManager:
     def active_persona(self) -> Persona:
         return self._personas[self._active_name]
 
-    def compose_reply_safely(self, transcript: str, context: ConversationContext) -> str:
+    def compose_reply_safely(
+        self,
+        transcript: str,
+        context: ConversationContext,
+        decision_trace: DecisionTrace | None,
+    ) -> str:
         """Compose a reply through the active persona, catching any
         failure so a bug in Persona.compose_reply() can never abort a
         live conversation turn (Fail Gracefully Rule) — see
         docs/sprint_book/sprint_2_13.md scenario (e). The caller
-        (CommunicationPipeline, Sprint 2.12) should call this instead of
-        active_persona().compose_reply() directly."""
+        (CommunicationPipeline, Sprint 2.12/3.12) should call this
+        instead of active_persona().compose_reply() directly."""
         try:
-            return self.active_persona().compose_reply(transcript, context)
+            return self.active_persona().compose_reply(transcript, context, decision_trace)
         except Exception:
             logger.exception("Persona.compose_reply() raised; using a safe fallback reply.")
             return _FALLBACK_REPLY
@@ -199,6 +206,29 @@ class PersonaManager:
         if any(phrase.lower() in lowered for phrase in self._voice_config.minie_trigger_phrases):
             return "minie"
         return None
+
+    def select_from_context(
+        self, context_analysis: ContextAnalysis | None, transcript: str
+    ) -> bool:
+        """Sprint 3.12: prefers ContextAnalysis.suggested_persona (Sprint
+        3.8's real Context Analysis) over detect_context_heuristic()'s
+        crude keyword placeholder — the real, intended replacement named
+        in this module's own docstring. Falls back to the heuristic only
+        if context_analysis itself is entirely unavailable (the Decision
+        Engine pipeline failed — Sprint 3.13 formalizes this
+        failure-triggered fallback specifically). If context_analysis is
+        present but has no clear suggested_persona, no switch is made at
+        all — Sprint 3.8's own spec makes it authoritative, not merely
+        advisory, so a lack of signal is not itself grounds to fall back
+        to the cruder heuristic."""
+        if context_analysis is not None:
+            if context_analysis.suggested_persona is None:
+                return False
+            return self.select(context_analysis.suggested_persona, SwitchReason.CONTEXT_DETECTION)
+        heuristic = self.detect_context_heuristic(transcript)
+        if heuristic is not None:
+            return self.select(heuristic, SwitchReason.CONTEXT_DETECTION)
+        return False
 
     def detect_context_heuristic(self, transcript: str) -> str | None:
         """Crude keyword-list placeholder — see this module's docstring.

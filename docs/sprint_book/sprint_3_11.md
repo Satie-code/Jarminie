@@ -142,3 +142,61 @@ High — the whitelist-gated authority logic and the engine-selection degrade pa
 - Persisting `DecisionTrace` history (for a real "what did you decide yesterday and why" query) is a plausible future `memory/` or `database/` extension — not built now, since nothing in Level 3's goal list requires trace *persistence*, only trace *existence* per-decision.
 - A real "why?" voice trigger surfacing `explain()` — flagged as a natural, low-risk addition once Sprint 3.12 wires the rest of the pipeline live; not required by this sprint's own Acceptance Criteria.
 - Level 4's Device Control sprint (4.1) should treat populating `approved_emergency_procedures` as a deliberate, reviewed act — per Part 2's own "those always require approval" language, this whitelist is exactly the enforcement point that promise depends on.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `decision/authority.py` (`AuthorityLevel`, `EngineSelection`, `DecisionTrace`, `AuthorityEvaluator`). No files modified. This closes **Phase 3.3 (Decision Engine)** and, combined with Sprints 3.1–3.6, **all of Level 3's individual-component sprints (3.1–3.11)**. 571/571 tests passing (512 prior + 59 new), `ruff check .` clean.
+
+### Files Created
+
+- `decision/authority.py` — `AuthorityLevel` (Enum), `EngineSelection` (Enum), `DecisionTrace` (dataclass), `AuthorityEvaluator`.
+- `tests/unit/decision/test_authority.py` — 59 tests (including an exhaustive `itertools.product(PriorityLevel, IntentCategory)` parametrization — 35 cases — for the whitelist-gate defensive test).
+
+### Files Modified
+
+- `docs/STATUS.md` — Phase 3.3 (Decision Engine) marked **Complete**.
+
+### Tests Added
+
+59 total, all against plain constructed `Intent`/`ContextAnalysis`/`RetrievedMemory` fixtures (no fakes needed — `AuthorityEvaluator` has no external I/O dependency at all). Covers: the exhaustive empty-whitelist-makes-`EMERGENCY_ASSIST`-unreachable test across every `PriorityLevel`×`IntentCategory` combination (35 cases); a non-empty whitelist *with* a matching procedure id correctly allowing `EMERGENCY_ASSIST`, and *without* a match still correctly falling back to `RECOMMEND`; `ACTION_REQUEST`→`RECOMMEND` and every other category→`INFORM`; the engine-selection degrade path proving `ACTION_REQUEST`/`EMOTIONAL_SUPPORT` never actually select their "ideal" reserved engine (`DEVICE_CONTROL`/`WELLNESS`) even though `reasoning_text` names the gap honestly; `INFORMATIONAL`→`INFORM_ONLY`; `reasoning_text` referencing both `intent.category` and `priority_level` by name across four representative cases, plus the retrieved-memory-count mention and the honest unapproved-emergency wording; `explain()` including every `retrieval_reason` verbatim and stating plainly when no memories were retrieved; `health_check()` returning `True` regardless of whitelist state, with a real `caplog`-verified warning only when non-empty; and `DecisionTrace` carrying every input it was constructed from unchanged.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `decision/authority.py`'s module docstring (full Authority Level / Engine Selection tables with wired/reserved status, the structural-unreachability rationale for `EMERGENCY_ASSIST`, and the procedure-id-derivation decision below). `docs/STATUS.md` as above.
+
+### Acceptance Criteria Checklist
+
+- ✔ No input combination produces `AuthorityLevel.EMERGENCY_ASSIST` while `approved_emergency_procedures` is empty — proven exhaustively, not just spot-checked.
+- ✔ `selected_engine` in the returned `DecisionTrace` is always `CONVERSATIONAL_RESPONSE` or `INFORM_ONLY` at Level 3, verified across every `IntentCategory`.
+- ✔ `reasoning_text` is non-empty and references both `intent.category` and `priority_level` by name, for every evaluated case checked.
+- ✔ `explain(trace)` includes every `retrieval_reason` from `trace.retrieved_memories`.
+- ✔ Combined with Sprints 3.7–3.10, Phase 3.3's Acceptance Criteria ("Correct subsystem selected. Explainability preserved.") are met — confirmed with a real, non-mocked run of the entire pipeline together (see Remaining Risks).
+
+### Engineering Decisions
+
+- **The emergency whitelist is checked against a normalized `ContextAnalysis.primary_topic`** (`.strip().lower()`), not a dedicated procedure-id parameter — `evaluate()`'s own spec'd signature (`intent, context_analysis, retrieved_memories, priority_level`) has no such parameter, and `primary_topic` is the only available description of what the request is about. This is a genuine implementation-time decision the spec's own prose ("a matching procedure id is found") didn't resolve concretely — harmless at Level 3 since the whitelist is always empty regardless of what string is checked, but Level 4 (Device Control) should be aware of this exact matching mechanism when it actually populates the whitelist with real procedure ids, so topic phrasing and procedure ids can be kept in agreement.
+- **`selected_engine` maps directly off `intent.category`, not `authority_level`**: `INFORMATIONAL` → `INFORM_ONLY`, every other category → `CONVERSATIONAL_RESPONSE` (including `CASUAL_CONVERSATION`/`EMOTIONAL_SUPPORT`/`MEMORY_RECALL`/`UNKNOWN`, which all resolve to `AuthorityLevel.INFORM` but clearly still want persona-flavored replies, not a bare fact). Tying `INFORM_ONLY` to `authority_level == INFORM` broadly would have wrongly stripped personality from a casual chat or an emotional-support reply.
+- **`_INFERRED_FUTURE_ENGINE` only names `ACTION_REQUEST`→`DEVICE_CONTROL` and `EMOTIONAL_SUPPORT`→`WELLNESS`** — every other category is already correctly served by `CONVERSATIONAL_RESPONSE`/`INFORM_ONLY` at Level 3, so naming a "future engine gap" for them would be dishonest (there is no gap to name). Kept as a small, explicit, easily-extended dict rather than inferring anything more elaborate from `context_analysis.primary_topic`, since only `intent.category` was actually needed to make the two real gaps explicit.
+- **`health_check()` always returns `True`**, per the spec's own explicit "logged as a warning, not a hard failure" instruction — a non-empty whitelist at Level 3 is unusual (nothing yet is meant to populate it) but not itself evidence of a broken system, since Level 4+ genuinely will populate this exact field.
+
+### Remaining Risks
+
+- **Confirmed via a real, non-mocked run of the ENTIRE Level 3 Decision Engine pipeline together** (Sprints 3.7–3.11 in one script, not just this sprint's own unit tests) — real `OllamaClient` (llama3) → real `IntentDetector`/`ContextAnalyzer` → real `MemoryRetrievalEngine` against a real SQLite+Chroma `MemoryStore` → real `PriorityQueueManager` → real `AuthorityEvaluator`, across three genuinely different real transcripts (a technical bug-fix request, a factual question, and an emergency phrase). All three produced correct, sensible results end-to-end: the bug-fix request classified `ACTION_REQUEST`→`RECOMMEND`→`CONVERSATIONAL_RESPONSE` with an honest "Device Control doesn't exist yet" note and a correctly-recalled relevant memory; the factual question classified `INFORMATIONAL`→`INFORM`→`INFORM_ONLY`; the emergency phrase classified `EMERGENCY`→`CRITICAL_EMERGENCY` priority→`RECOMMEND` authority (correctly NOT `EMERGENCY_ASSIST`, since the whitelist is empty) with the exact honest "no pre-approved emergency procedures" wording this sprint's own spec called for. This exceeds this sprint's own committed scope (a full real-pipeline run wasn't required by the Testing Checklist) but directly closes Phase 3.3's own combined acceptance criterion, which no single sprint's isolated tests could fully demonstrate alone.
+- This sprint's own flagged risks stand as expected and by design, not as open bugs: `EMERGENCY_ASSIST` is structurally unreachable at Level 3 (verified exhaustively above, matching the sprint's own acceptance criteria "testing *for* this unreachability, not around it"); the "inferred future engine" wording in `reasoning_text` was written carefully to state a capability gap honestly rather than imply real routing intelligence; `DecisionTrace` embeds full nested objects but is not persisted anywhere (no new table), acceptable at Level 3's in-memory, per-decision usage.
+- `backlog/technical_debt.md` item 16 (shipped `ollama_model` default vs. the actually-pulled local model) applies to this sprint's own real-pipeline verification the same way it applied to 3.7–3.9 — used `llama3` explicitly, not the shipped `"gemma3"` default.
+
+### Technical Debt
+
+None new.
+
+### Recommendations
+
+- **For Sprint 3.12 (Decision Engine Integration)**: wires `evaluate()` into the real turn-processing path and passes its `DecisionTrace` into `Persona.compose_reply()`'s new parameter — `personas/base.py`'s own docstring already anticipated this exact parameter. Also the first sprint to populate `main.py`'s composition root with real `IntentDetector`/`ContextAnalyzer`/`MemoryRetrievalEngine`/`PriorityQueueManager`/`AuthorityEvaluator` instances, mirroring how Sprint 2.12 was the first to wire Level 2's individually-built modules together.
+- **For Level 4's Device Control sprint (4.1)**: when populating `approved_emergency_procedures` for real, keep procedure ids in the same normalized form (`ContextAnalysis.primary_topic.strip().lower()`) that `AuthorityEvaluator._determine_authority()` checks against — see this sprint's own Engineering Decisions for why that specific matching mechanism was chosen.
+- **This closes all of Level 3's individual-component sprints (3.1–3.11)** — per this project's own established pattern (Sprint 2.14 mirroring Sprint 1.9's acceptance-pass discipline), Level 3 likely wants its own integration/hardening/freeze sequence next (Sprint 3.12 Decision Engine Integration is already named as such; 3.13/3.14 presumably mirror 2.13/2.14's hardening-then-freeze shape, per `sprint_book/INDEX.md`).
+
+**Sprint 3.11 (Authority Evaluation & Engine Selection) is complete — Phase 3.3 (Decision Engine) is now `Complete`.** **This also closes all of Level 3's individual-component sprints (3.1–3.11).** **Sprint 3.12 (Decision Engine Integration) is next.**

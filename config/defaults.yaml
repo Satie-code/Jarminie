@@ -54,8 +54,59 @@ database:
   # Sprint 2.7 — Conversation Session Store's rolling-log retention window.
   conversation_retention_days: 30
 
+memory:
+  # Sprint 3.1 — Memory Store Foundation. Namespaces every MemoryType's
+  # ChromaDB collection under database.chroma_path.
+  chroma_collection_prefix: "jarminei_memory"
+  # Sprint 3.4 — Short-Term Memory. Starting score for a promoted memory
+  # (mid-range of the Dynamic Memory Formula's 0-29 "Temporary" band);
+  # crude keyword heuristic for what's worth remembering, a placeholder
+  # until Sprint 3.8's real Context Analysis exists.
+  short_term_default_confidence: 15.0
+  short_term_salience_triggers:
+    - "remind me"
+    - "don't forget"
+    - "note that"
+    - "remember that"
+  # Sprint 3.5 — Confidence Scoring Engine. Dynamic Memory Formula weights
+  # (must sum to 1.0); importance_weight has no term in the normal scoring
+  # formula (Importance's only signal is the User Override short-circuit
+  # below) — see config/schema.py's MemoryConfig docstring.
+  frequency_weight: 0.25
+  recency_weight: 0.25
+  recency_half_life_days: 14.0
+  importance_weight: 0.2
+  category_weight: 0.15
+  category_importance:
+    project: 0.9
+    goal: 0.9
+    routine: 0.6
+    preference: 0.7
+  category_default_weight: 0.5
+  # Applied against a fixed neutral placeholder value until Sprint 5.2
+  # (Emotion Inference) exists.
+  emotional_weight: 0.15
+  # User Override Rule triggers — matched case-insensitively as plain
+  # substrings, no NLU.
+  override_trigger_phrases:
+    - "remember this"
+    - "never forget this"
+    - "this is important"
+  # Sprint 3.6 — Memory Lifecycle Manager.
+  cleanup_grace_period_days: 7
+  monthly_review_min_band_days: 30
+  # Sprint 3.9 — Memory Retrieval Engine. Must sum to 1.0.
+  retrieval_similarity_weight: 0.6
+  retrieval_confidence_weight: 0.4
+  max_retrieval_results: 5
+
 models:
   ollama_model: "gemma3"
+  ollama_host: "http://localhost:11434"
+  # Real-hardware latency is unverified (Sprint 3.7's own flagged risk) —
+  # 10s is a starting guess; IntentDetector always degrades to UNKNOWN
+  # rather than blocking a conversation turn if this is too short.
+  ollama_timeout_seconds: 10.0
   whisper_model: "base"
   # Whisper's own no-speech skip can be overridden by a confident-looking
   # hallucinated segment; WhisperSpeechToText applies this threshold

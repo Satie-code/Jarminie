@@ -30,6 +30,23 @@ class ResourceSnapshot:
     timestamp: datetime
 
 
+@dataclass
+class ResourceAlert:
+    """One resource at or beyond its CRITICAL threshold — added during
+    Sprint 3.10 (Priority Queue), which needs a real critical-severity
+    signal to feed PriorityQueueManager.classify_resource_alert(). Sprint
+    1.4 shipped the *_critical_percent config fields and their Settings
+    Window display, but nothing that actually checked a live sample
+    against them — only breached_resources() below, which checks warning
+    thresholds only and returns plain resource names, not alert objects.
+    """
+
+    resource: str
+    value: float
+    threshold: float
+    timestamp: datetime
+
+
 class ResourceMonitor:
     """Samples system resource usage and compares it against configured thresholds."""
 
@@ -88,3 +105,43 @@ class ResourceMonitor:
         if breached:
             logger.warning("Resource threshold(s) breached: %s", ", ".join(breached))
         return breached
+
+    def critical_alerts(self, snapshot: ResourceSnapshot) -> list[ResourceAlert]:
+        """ResourceAlerts for every resource at or beyond its CRITICAL
+        threshold — the critical-severity counterpart to
+        breached_resources() (warning-only, plain names). Added for
+        Sprint 3.10's PriorityQueueManager; additive, does not change
+        breached_resources()'s existing behavior/signature."""
+        alerts = []
+        checks = (
+            ("cpu", snapshot.cpu_percent, self._thresholds.cpu_critical_percent),
+            ("ram", snapshot.ram_percent, self._thresholds.ram_critical_percent),
+            ("disk", snapshot.disk_percent, self._thresholds.disk_critical_percent),
+        )
+        for name, value, threshold in checks:
+            if value >= threshold:
+                alerts.append(
+                    ResourceAlert(
+                        resource=name,
+                        value=value,
+                        threshold=threshold,
+                        timestamp=snapshot.timestamp,
+                    )
+                )
+        if (
+            snapshot.battery_percent is not None
+            and snapshot.battery_percent <= self._thresholds.battery_critical_percent
+        ):
+            alerts.append(
+                ResourceAlert(
+                    resource="battery",
+                    value=snapshot.battery_percent,
+                    threshold=self._thresholds.battery_critical_percent,
+                    timestamp=snapshot.timestamp,
+                )
+            )
+        if alerts:
+            logger.warning(
+                "Resource CRITICAL threshold(s) breached: %s", ", ".join(a.resource for a in alerts)
+            )
+        return alerts

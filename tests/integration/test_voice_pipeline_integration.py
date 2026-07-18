@@ -92,7 +92,7 @@ def test_persona_compose_reply_failure_uses_a_safe_fallback_reply(
         name = "jarvis"
         voice_id = "p340"
 
-        def compose_reply(self, transcript, context):
+        def compose_reply(self, transcript, context, decision_trace):
             raise RuntimeError("persona logic exploded")
 
         def describe(self):

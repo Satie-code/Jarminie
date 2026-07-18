@@ -1,21 +1,28 @@
 """Shared fixtures and fakes for tests/integration/ — the real,
-non-mocked exercise of Level 2's Communication Pipeline (Sprint 2.12) and
-its hardened failure paths (Sprint 2.13), reused by
-test_communication_pipeline.py (2.12/2.13's own file) and
-test_voice_pipeline_integration.py (Sprint 2.14's expansion covering the
-remaining hardened scenarios at integration level).
+non-mocked exercise of Level 2's Communication Pipeline (Sprint 2.12),
+its hardened failure paths (Sprint 2.13), and Level 3's Decision Engine
+Integration (Sprint 3.12), reused by test_communication_pipeline.py
+(2.12/2.13's own file), test_voice_pipeline_integration.py (Sprint
+2.14's expansion), and test_decision_engine_integration.py (3.12's own
+file).
 
 Fakes stand in only at the audio-hardware/ML boundary (AudioBackend,
-WakeWordEngine, SpeechToText, TextToSpeech) — the same "fake only at the
-seams that need real hardware/models" precedent every Level 2 unit-test
-file already established since Sprint 2.1. Everything else is real:
-MicrophoneManager, WakeWordDetector, VoiceSessionManager,
-QuietModeController, a real SQLite file under tmp_path via SqliteClient/
-ConversationSessionStore, ContextManager, JarvisPersona/MiniePersona,
-PersonaManager, and CommunicationPipeline itself. No physical hardware
-and no ML model downloads are required to run this suite — real Whisper/
-Coqui/openWakeWord verification is done separately via one-off,
-non-committed scratchpad smoke scripts (Sprint 2.12, 2.14).
+WakeWordEngine, SpeechToText, TextToSpeech, and now LanguageModelClient
+for the Ollama-backed IntentDetector/ContextAnalyzer) — the same "fake
+only at the seams that need real hardware/models" precedent every Level
+2 unit-test file already established since Sprint 2.1. Chroma/SQLite are
+NOT faked here, consistent with every Level 3 unit test's own
+established convention (tests/unit/memory/*) of using a real MemoryStore
+throughout — Chroma has no external-service dependency the way Ollama
+does. Everything else is real: MicrophoneManager, WakeWordDetector,
+VoiceSessionManager, QuietModeController, a real SQLite file under
+tmp_path via SqliteClient/ConversationSessionStore, ContextManager,
+JarvisPersona/MiniePersona, PersonaManager, MemoryStore and every Level 3
+memory/decision module, and CommunicationPipeline itself. No physical
+hardware, no ML model downloads, and no running Ollama service are
+required to run this suite — real Whisper/Coqui/openWakeWord/Ollama
+verification is done separately via one-off, non-committed scratchpad
+smoke scripts (Sprint 2.12, 2.14, 3.7-3.12).
 
 Plain helper functions/classes can't be imported across files here
 (tests/ has no __init__.py, by convention since Sprint 1.1), so shared
@@ -29,8 +36,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from config.schema import DatabaseConfig, VoiceConfig
+from config.schema import (
+    DatabaseConfig,
+    MemoryConfig,
+    ModelConfig,
+    ResourceThresholds,
+    VoiceConfig,
+)
+from core.resource_monitor import ResourceMonitor
 from database.sqlite_client import SqliteClient
+from decision.authority import AuthorityEvaluator
+from decision.context_analyzer import ContextAnalyzer
+from decision.intent_detector import IntentDetector
+from decision.priority_queue import PriorityQueueManager
+from memory.chroma_client import ChromaMemoryClient
+from memory.confidence_scorer import ConfidenceScorer
+from memory.event_memory import EventMemory
+from memory.lifecycle_manager import MemoryLifecycleManager
+from memory.memory_store import MemoryStore
+from memory.persona_scoped_memory import PersonaScopedMemory
+from memory.retrieval_engine import MemoryRetrievalEngine
+from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
@@ -135,29 +161,69 @@ class FakeTextToSpeech:
         self.spoken_event.set()
 
 
+class FakeLanguageModelClient:
+    """Fakes only the Ollama boundary IntentDetector/ContextAnalyzer
+    depend on (Sprint 3.7/3.8) — see this module's own docstring for why
+    Chroma/SQLite are real throughout instead. Dispatches on prompt
+    content: IntentDetector's own prompt always instructs a "CATEGORY:"
+    line; ContextAnalyzer's never does (it uses "TOPIC:"/"PERSONA:"
+    instead), so checking for that exact literal substring reliably
+    tells the two callers apart without either constructor needing to
+    know which stage is asking."""
+
+    def __init__(self) -> None:
+        self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
+        self.context_response = (
+            "TOPIC: general\nENTITIES: NONE\nREFERENCES_PAST: NO\n"
+            "PERSONA: NONE\nSENTIMENT: NEUTRAL"
+        )
+        self.calls: list[str] = []
+
+    def generate(self, prompt: str, timeout_seconds: float) -> str:
+        self.calls.append(prompt)
+        if "CATEGORY:" in prompt:
+            return self.intent_response
+        return self.context_response
+
+
 @pytest.fixture
 def voice_config() -> VoiceConfig:
+    """session_timeout_seconds=3.0/max_utterance_seconds=10.0 (Sprint
+    3.12, was 0.8/2.0): pipeline_harness starts wake_word_detector last,
+    so the background wake thread is already running the instant the
+    fixture yields — any real work a test does before its own first
+    wait_for_active_capture()/push_utterance() call (a real, first-use
+    Chroma embedding call is genuinely slow) narrows the effective
+    window before the session's own timeout/safety-cap clocks (which
+    started ticking as soon as the wake match fired) expire. Concretely
+    reproduced as a real, reliably-failing test once a Level 3 test
+    added a real MemoryStore write between activation and pushing an
+    utterance. Same margin reasoning as tests/system/conftest.py's own
+    voice_config fixture."""
     return VoiceConfig(
         mic_sample_rate_hz=16000,
         utterance_silence_ms=30,
         utterance_silence_threshold=0.02,
-        max_utterance_seconds=2.0,
-        session_timeout_seconds=0.8,
+        max_utterance_seconds=10.0,
+        session_timeout_seconds=3.0,
     )
 
 
 @pytest.fixture
 def pipeline_harness(tmp_path, voice_config):
     """Builds the real Communication Pipeline object graph, matching
-    main.py's own composition order exactly (_register_level2_modules) —
-    fakes only at the mic/wake-engine/STT/TTS boundary."""
+    main.py's own composition order exactly (_register_level2_modules
+    plus _register_level3_modules, Sprint 3.12) — fakes only at the
+    mic/wake-engine/STT/TTS/Ollama boundary."""
     audio_backend = FakeAudioBackend()
     mic = MicrophoneManager(voice_config, audio_backend)
 
     stt = FakeSpeechToText()
     tts = FakeTextToSpeech()
 
-    database_config = DatabaseConfig(sqlite_path=str(tmp_path / "conversations.db"))
+    database_config = DatabaseConfig(
+        sqlite_path=str(tmp_path / "conversations.db"), chroma_path=str(tmp_path / "chroma")
+    )
     sqlite_client = SqliteClient(database_config.sqlite_path)
     conversation_store = ConversationSessionStore(sqlite_client, database_config)
     context_manager = ContextManager(conversation_store)
@@ -178,6 +244,30 @@ def pipeline_harness(tmp_path, voice_config):
         mic, wake_engine, quiet_mode_controller._on_wake_word_detected
     )
 
+    memory_config = MemoryConfig(chroma_collection_prefix="pipeline_harness")
+    model_config = ModelConfig()
+    memory_sqlite_client = SqliteClient(database_config.sqlite_path)
+    chroma_client = ChromaMemoryClient(memory_config, database_config)
+    memory_store = MemoryStore(memory_sqlite_client, chroma_client)
+
+    persona_scoped_memory = PersonaScopedMemory(memory_store)
+    event_memory = EventMemory(memory_store)
+    short_term_memory = ShortTermMemory(memory_store, memory_config)
+    confidence_scorer = ConfidenceScorer(memory_config)
+    memory_lifecycle_manager = MemoryLifecycleManager(
+        memory_store, confidence_scorer, memory_config
+    )
+    memory_retrieval_engine = MemoryRetrievalEngine(
+        persona_scoped_memory, event_memory, short_term_memory, confidence_scorer, memory_config
+    )
+
+    llm_client = FakeLanguageModelClient()
+    intent_detector = IntentDetector(llm_client, model_config)
+    context_analyzer = ContextAnalyzer(llm_client, model_config)
+    resource_monitor = ResourceMonitor(ResourceThresholds())
+    priority_queue_manager = PriorityQueueManager(resource_monitor)
+    authority_evaluator = AuthorityEvaluator()
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -188,6 +278,14 @@ def pipeline_harness(tmp_path, voice_config):
         persona_manager=persona_manager,
         turn_complete_relay=turn_complete_relay,
         session_ended_relay=session_ended_relay,
+        intent_detector=intent_detector,
+        context_analyzer=context_analyzer,
+        memory_retrieval_engine=memory_retrieval_engine,
+        priority_queue_manager=priority_queue_manager,
+        authority_evaluator=authority_evaluator,
+        short_term_memory=short_term_memory,
+        confidence_scorer=confidence_scorer,
+        memory_lifecycle_manager=memory_lifecycle_manager,
     )
 
     mic.start()
@@ -195,6 +293,12 @@ def pipeline_harness(tmp_path, voice_config):
     persona_manager.start()
     session_manager.start()
     quiet_mode_controller.start()
+    memory_store.start()
+    memory_lifecycle_manager.start()
+    intent_detector.start()
+    context_analyzer.start()
+    priority_queue_manager.start()
+    authority_evaluator.start()
     pipeline.start()
     wake_word_detector.start()
 
@@ -210,12 +314,30 @@ def pipeline_harness(tmp_path, voice_config):
         session_manager=session_manager,
         quiet_mode_controller=quiet_mode_controller,
         pipeline=pipeline,
+        memory_store=memory_store,
+        persona_scoped_memory=persona_scoped_memory,
+        event_memory=event_memory,
+        short_term_memory=short_term_memory,
+        confidence_scorer=confidence_scorer,
+        memory_lifecycle_manager=memory_lifecycle_manager,
+        memory_retrieval_engine=memory_retrieval_engine,
+        llm_client=llm_client,
+        intent_detector=intent_detector,
+        context_analyzer=context_analyzer,
+        priority_queue_manager=priority_queue_manager,
+        authority_evaluator=authority_evaluator,
     )
     try:
         yield harness
     finally:
         wake_word_detector.stop()
         pipeline.stop()
+        authority_evaluator.stop()
+        priority_queue_manager.stop()
+        context_analyzer.stop()
+        intent_detector.stop()
+        memory_lifecycle_manager.stop()
+        memory_store.stop()
         quiet_mode_controller.stop()
         session_manager.stop()
         persona_manager.stop()

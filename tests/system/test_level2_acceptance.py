@@ -21,6 +21,20 @@ def test_full_level2_acceptance_scripted_conversation(
 ):
     h = app_harness
 
+    # Sprint 3.12: CoreManager.startup() now starts several more modules
+    # (Level 3's memory/decision graph) before returning, giving the
+    # wake-word background thread real, variable extra time to run
+    # during fixture setup itself — FakeWakeWordEngine's match_on_call=2
+    # could otherwise already be satisfied before this test body even
+    # starts, making the wake moment (and its downstream session/
+    # utterance timing) non-deterministic relative to what this test
+    # observes. Resetting the call counter here, right before this
+    # test's own polling begins, makes the match happen relative to a
+    # known baseline instead — the same reset technique already used by
+    # test_wake_word_thread_death_is_recoverable_via_restart
+    # (tests/integration/test_voice_pipeline_integration.py).
+    h.wake_engine.calls = 0
+
     # Phase 2.1: "Wake phrase activates JARMINEI."
     wait_for_active_capture(h.mic)
     assert h.quiet_mode_controller.current_mode().value == "active"
@@ -72,11 +86,12 @@ def test_full_level2_acceptance_scripted_conversation(
     assert h.mic.current_mode().value == "passive_listening"
     assert not h.session_manager.is_active()
 
-    # Every Level 2 module is registered, was actually running, and is
-    # visible via the same module_states() Status Panel already renders
-    # generically — zero ui/status_panel.py changes needed (Sprint 2.12's
-    # own Acceptance Criteria, re-confirmed here through a real
-    # CoreManager rather than assumed).
+    # Every Level 2 AND Level 3 module is registered, was actually
+    # running, and is visible via the same module_states() Status Panel
+    # already renders generically — zero ui/status_panel.py changes
+    # needed (Sprint 2.12's own Acceptance Criteria, re-confirmed here
+    # through a real CoreManager rather than assumed; the six Level 3
+    # additions are Sprint 3.12's own Decision Engine Integration).
     states = h.core_manager.module_states()
     assert set(states) == {
         "microphone",
@@ -88,5 +103,11 @@ def test_full_level2_acceptance_scripted_conversation(
         "quiet_mode_controller",
         "wake_word_detector",
         "communication_pipeline",
+        "memory_store",
+        "memory_lifecycle_manager",
+        "intent_detector",
+        "context_analyzer",
+        "priority_queue_manager",
+        "authority_evaluator",
     }
     assert all(state == "running" for state in states.values())

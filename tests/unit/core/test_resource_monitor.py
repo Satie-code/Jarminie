@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from config.schema import ResourceThresholds
-from core.resource_monitor import ResourceMonitor, ResourceSnapshot
+from core.resource_monitor import ResourceAlert, ResourceMonitor, ResourceSnapshot
 
 
 def _thresholds(**overrides):
@@ -109,3 +109,66 @@ def test_multiple_breaches_all_reported():
     snapshot = _snapshot(cpu_percent=90.0, ram_percent=95.0)
     breached = monitor.breached_resources(snapshot)
     assert set(breached) == {"cpu", "ram"}
+
+
+# --- critical_alerts() (Sprint 3.10 addition) --------------------------------
+
+
+def test_critical_alerts_empty_when_all_under_critical():
+    monitor = ResourceMonitor(_thresholds())
+    snapshot = _snapshot(cpu_percent=75.0, ram_percent=80.0)  # over warning, under critical
+    assert monitor.critical_alerts(snapshot) == []
+
+
+def test_cpu_critical_alert_detected():
+    monitor = ResourceMonitor(_thresholds(cpu_critical_percent=90.0))
+    snapshot = _snapshot(cpu_percent=95.0)
+    alerts = monitor.critical_alerts(snapshot)
+    assert len(alerts) == 1
+    assert alerts[0] == ResourceAlert(
+        resource="cpu", value=95.0, threshold=90.0, timestamp=snapshot.timestamp
+    )
+
+
+def test_ram_critical_alert_detected():
+    monitor = ResourceMonitor(_thresholds(ram_critical_percent=90.0))
+    snapshot = _snapshot(ram_percent=92.0)
+    alerts = monitor.critical_alerts(snapshot)
+    assert [a.resource for a in alerts] == ["ram"]
+
+
+def test_disk_critical_alert_detected():
+    monitor = ResourceMonitor(_thresholds(disk_critical_percent=95.0))
+    snapshot = _snapshot(disk_percent=99.0)
+    alerts = monitor.critical_alerts(snapshot)
+    assert [a.resource for a in alerts] == ["disk"]
+
+
+def test_battery_critical_alert_is_inverted_low_is_bad():
+    monitor = ResourceMonitor(_thresholds(battery_critical_percent=10.0))
+    snapshot = _snapshot(battery_percent=5.0)
+    alerts = monitor.critical_alerts(snapshot)
+    assert [a.resource for a in alerts] == ["battery"]
+
+
+def test_battery_none_does_not_trigger_critical_alert():
+    monitor = ResourceMonitor(_thresholds(battery_critical_percent=10.0))
+    snapshot = _snapshot(battery_percent=None)
+    assert monitor.critical_alerts(snapshot) == []
+
+
+def test_multiple_critical_alerts_all_reported():
+    monitor = ResourceMonitor(_thresholds(cpu_critical_percent=90.0, ram_critical_percent=90.0))
+    snapshot = _snapshot(cpu_percent=95.0, ram_percent=99.0)
+    alerts = monitor.critical_alerts(snapshot)
+    assert {a.resource for a in alerts} == {"cpu", "ram"}
+
+
+def test_warning_level_breach_alone_does_not_produce_a_critical_alert():
+    """A resource over its warning threshold but under critical must not
+    appear in critical_alerts() — the two methods check independent
+    thresholds, not a shared one."""
+    monitor = ResourceMonitor(_thresholds(cpu_warning_percent=70.0, cpu_critical_percent=90.0))
+    snapshot = _snapshot(cpu_percent=75.0)
+    assert monitor.breached_resources(snapshot) == ["cpu"]
+    assert monitor.critical_alerts(snapshot) == []

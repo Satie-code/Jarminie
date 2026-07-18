@@ -37,6 +37,33 @@ def test_to_config_round_trips_edited_values(qtbot):
     assert candidate.voice.wake_phrases == ["hello there", "hey jarminei"]
 
 
+def test_to_config_preserves_fields_with_no_form_widget(qtbot):
+    """Regression test for backlog/technical_debt.md item 14:
+    to_config() must not silently reset a field this dialog has no widget
+    for back to its dataclass default — database.conversation_retention_days,
+    models.whisper_no_speech_threshold/whisper_initial_prompt/tts_model,
+    voice's trigger phrases/mic/timing settings, and the entire memory
+    section all have no form widgets and must survive a save unchanged."""
+    config = AppConfig()
+    config.database.conversation_retention_days = 90
+    config.models.whisper_no_speech_threshold = 0.9
+    config.models.tts_model = "some/other/model"
+    config.voice.jarvis_trigger_phrases = ["yo jarvis"]
+    config.voice.wake_word_sensitivity = 0.8
+    config.memory.chroma_collection_prefix = "custom_prefix"
+    dialog = SettingsWindow(config, MagicMock())
+    qtbot.addWidget(dialog)
+
+    candidate = dialog.to_config()
+
+    assert candidate.database.conversation_retention_days == 90
+    assert candidate.models.whisper_no_speech_threshold == 0.9
+    assert candidate.models.tts_model == "some/other/model"
+    assert candidate.voice.jarvis_trigger_phrases == ["yo jarvis"]
+    assert candidate.voice.wake_word_sensitivity == 0.8
+    assert candidate.memory.chroma_collection_prefix == "custom_prefix"
+
+
 def test_ui_section_round_trips_refresh_interval(qtbot):
     config = AppConfig()
     dialog = SettingsWindow(config, MagicMock())

@@ -138,3 +138,69 @@ Medium-High.
 
 - If `combined_rank_score`'s single-scalar blend proves insufficient for real explainability needs during Sprint 3.14 or later real use, consider a richer, multi-field ranking explanation — not built speculatively now.
 - A retrieval result cache keyed by `(persona_name, session_id, query_text)` — only if Sprint 3.14's real-world verification shows retrieval latency is a genuine, measured problem.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `memory/retrieval_engine.py` (`RetrievedMemory`, `MemoryRetrievalEngine`) plus the three new `MemoryConfig` fields. Also added two small, additive (non-breaking) methods to Sprints 3.2/3.3's already-shipped classes — `PersonaScopedMemory.recall_for_persona_scored()` and `EventMemory.search_milestones_scored()` — a real, necessary gap found while implementing this sprint, not a deviation from it (see Engineering Decisions). 484/484 tests passing (460 prior + 24 new), `ruff check .` clean.
+
+### Files Created
+
+- `memory/retrieval_engine.py` — `RetrievedMemory` (dataclass), `MemoryRetrievalEngine`.
+- `tests/unit/memory/test_retrieval_engine.py` — 21 tests.
+
+### Files Modified
+
+- `config/schema.py` — `MemoryConfig.retrieval_similarity_weight: float = 0.6`, `retrieval_confidence_weight: float = 0.4` (validated to sum to 1.0, mirroring Sprint 3.5's five-weight pattern), `max_retrieval_results: int = 5` (validated positive).
+- `config/defaults.yaml` — `memory:` section extended to match.
+- `memory/persona_scoped_memory.py` — added `recall_for_persona_scored()` (keeps Chroma distance); `recall_for_persona()` now delegates to it, unchanged behavior/signature. Added `_merge_by_distance_scored()`; `_merge_by_distance()` now delegates to it, unchanged behavior/signature/tests.
+- `memory/event_memory.py` — added `search_milestones_scored()` (keeps Chroma distance); `search_milestones()` now delegates to it, unchanged behavior/signature.
+- `tests/unit/memory/test_persona_scoped_memory.py` — 2 new tests for the scored variant.
+- `tests/unit/memory/test_event_memory.py` — 1 new test for the scored variant.
+- `docs/STATUS.md` — Phase 3.3 (Decision Engine) row's descriptive text updated; status itself deliberately left at `Designing`, per this sprint's own Documentation Checklist.
+
+### Tests Added
+
+24 total. In `test_retrieval_engine.py` (fake `PersonaScopedMemory`/`EventMemory`/`ShortTermMemory`, but a REAL `ConfidenceScorer` — it's pure and cheap, same precedent `test_lifecycle_manager.py` established in Sprint 3.6): delegation/no-cross-persona-leak through the composition layer; the weight-blend ranking test proving `combined_rank_score` genuinely blends (a high-confidence/lower-similarity record outranks a low-confidence/higher-similarity one at one weight pair, flipping at another); `retrieval_reason` content correctness across all five `ConfidenceBand`s; `max_results` truncation from both the config default and an explicit override; an empty/whitespace-only query short-circuiting before querying anything; Event Memory results below `_MIN_EVENT_SIMILARITY` being excluded (and included above it); Short-Term Memory results with zero keyword overlap being excluded (and included with overlap); and `MemoryConfig`'s new weight-sum/positivity validation. In `test_persona_scoped_memory.py`/`test_event_memory.py`: the new scored variants return real distance values, and produce the same underlying records (by id — see Engineering Decisions) as their existing unscored counterparts.
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `memory/retrieval_engine.py`'s module docstring (pipeline-stage purpose, the similarity/confidence blend formula, and both implementation-time relevance-filtering decisions below). `memory/persona_scoped_memory.py`/`memory/event_memory.py` docstrings for the new scored methods. `docs/STATUS.md` as above.
+
+### Acceptance Criteria Checklist
+
+- ✔ `retrieve()` never returns a memory outside the calling persona's read-scope — delegates entirely to `recall_for_persona_scored()` (itself unchanged scoping logic from Sprint 3.2), verified by a test proving no result appears beyond what the fake `PersonaScopedMemory` itself returned.
+- ✔ Weight-blend ranking test proves the blend genuinely blends, in both directions (confidence-heavy weights rank the high-confidence record first; similarity-heavy weights flip it).
+- ✔ Every `RetrievedMemory.retrieval_reason` is a non-empty string containing both a similarity percentage and a confidence-band reference, verified across all five bands.
+- ✔ Results correctly truncate to `max_results` (config default and explicit override).
+- ✔ Event and Short-Term results only appear when relevant to `query_text` — verified for both inclusion and exclusion cases against real thresholds/heuristics (also confirmed against real embeddings, not just fakes; see Remaining Risks).
+
+### Engineering Decisions
+
+- **Added `recall_for_persona_scored()`/`search_milestones_scored()` to Sprints 3.2/3.3's already-shipped classes, purely additively.** `MemoryStore.semantic_search()`'s own docstring (written during Sprint 3.1's Post-Sprint Fix) explicitly names this exact need: "Distance is exposed... specifically so a caller combining results from more than one MemoryType/collection (`PersonaScopedMemory.recall_for_persona()`, Sprint 3.2; **the future `MemoryRetrievalEngine`, Sprint 3.9**) can genuinely rank the merged set by similarity" — but `recall_for_persona()`/`search_milestones()` as actually shipped both discard that distance before returning. Rather than changing either method's existing return type (which would have broken 7 existing tests across the two files and retroactively invalidated Sprint 3.2/3.3's own Acceptance Criteria Checklists), each gained a new sibling method that keeps distance, with the original method refactored to delegate to it — zero behavior change for any existing caller/test, full data available for this sprint. `_merge_by_distance()` (3.2) is preserved unchanged by the same pattern (delegates to a new `_merge_by_distance_scored()`), so its own dedicated direct unit test needed no changes either.
+- **Chroma distance -> similarity_score via `1/(1+distance)`**, not a linear min-max normalization, because Chroma's default distance metric has no fixed, documented upper bound to normalize against. Empirically measured against the real embedding model while implementing this sprint: related content scored roughly 0.58-0.67 similarity, unrelated content roughly 0.32-0.36 — informs `_MIN_EVENT_SIMILARITY = 0.4` below.
+- **Two relevance-filtering mechanisms not spelled out by the spec, both needed to satisfy "Event and Short-Term results only appear when actually relevant to query_text"**: (1) Event Memory results below `_MIN_EVENT_SIMILARITY` (0.4) are dropped — a semantic search always returns its nearest neighbors regardless of true relevance, so a cutoff is required for an unrelated query to ever yield an empty Event result set; (2) Short-Term Memory has no semantic search of its own at all (`active_context_memories()` is a plain per-session recency query), so relevance is approximated by a crude keyword-overlap fraction between `query_text` and each candidate's content — the same "keyword heuristic, real NLU not available at this point in the build order" discipline already established by `PersonaManager.detect_context_heuristic()` (2.11) and `ShortTermMemory.promote_from_turn()`'s own salience triggers (3.4).
+- **Persona-scoped (Shared/Jarvis/Minie) results are NOT filtered by either mechanism** — the Acceptance Criteria names only Event and Short-Term as needing to vanish for an unrelated query; Persona/Shared memory is treated as core conversational background that should still surface even at low relevance, not a "bonus" recall.
+- **Real bug found and fixed during real-model verification (not by any unit test)**: `_build_retrieval_reason()` initially used a Unicode middle-dot ("·") separator, matching this sprint's own spec example text verbatim — but printing it revealed the exact same Windows-console mojibake failure mode Sprint 1.6 already found and fixed for an em-dash (`docs/sprint_book/sprint_1_6.md`), which established sticking to ASCII in every runtime log/display string. Fixed by switching to a plain "-" before this sprint's own tests were finalized (no test asserted on the specific separator character, so no test needed updating). **Generalizable reminder**: this is the second time a spec's own prose example used a non-ASCII character that shouldn't be copied literally into runtime code — worth checking for on any future sprint whose spec includes a literal example string.
+
+### Remaining Risks
+
+- **Confirmed via real, non-mocked verification** against a real `MemoryStore` (temp SQLite + temp Chroma, real embeddings — no mocking of the embedding pipeline at all): stored a mix of Jarvis/Shared/Event/Short-Term records, then ran four real queries. A relevant technical query correctly ranked the matching Jarvis record highest; a degree-related query correctly surfaced the Event milestone (48% similarity, above the 0.4 threshold) while an unrelated query correctly excluded it; a hiking-related query correctly surfaced the Short-Term memory via keyword overlap while unrelated queries correctly excluded it; Persona/Shared results appeared even for a completely unrelated "pizza toppings" query, exactly as designed. This exceeds this sprint's own committed scope (Chroma/embedding realism wasn't required by the Testing Checklist, which is fakes-only) but was done given how central the similarity-normalization and relevance-threshold decisions are to this sprint's correctness.
+- **`_MIN_EVENT_SIMILARITY` (0.4) and the Short-Term keyword-overlap approach are both implementation-time tuning guesses**, same caveat class as the sprint's own flagged 0.6/0.4 blend weights — informed by one real empirical measurement (see Engineering Decisions) but not extensively tuned. Config-driven for the blend weights; the two relevance mechanisms themselves are NOT config-driven (no field was added for either), since the spec's own Files to Modify list only named the three weight/limit fields — worth revisiting if Sprint 3.14 finds either threshold wrong in practice.
+- This sprint's own flagged risks stand as expected: no caching (acceptable at current volume), and `combined_rank_score`'s single-scalar blend may prove insufficient for richer explainability later (both explicitly deferred, not built speculatively).
+- `backlog/technical_debt.md` item 16 (shipped `ollama_model` default) doesn't apply here — this sprint has no Ollama/LLM dependency at all.
+
+### Technical Debt
+
+None new. The `recall_for_persona_scored()`/`search_milestones_scored()` additions are documented as Engineering Decisions above rather than technical debt, since they're a clean, permanent, non-breaking design (not a shortcut requiring future resolution).
+
+### Recommendations
+
+- **For Sprint 3.10 (Priority Queue)**: consumes `list[RetrievedMemory]` — worth double-checking its actual spec's assumptions about this sprint's output shape before implementing, per the established "check the next sprint's assumptions against what actually shipped" pattern (see Sprint 3.6's own Recommendations for the precedent).
+- **For Sprint 3.11 (Authority Evaluation)**: `retrieval_reason` strings are ready to be included verbatim in a `DecisionTrace`, per this sprint's own Integration Considerations — no further formatting work anticipated.
+- **`_MIN_EVENT_SIMILARITY` and the Short-Term relevance heuristic** are reasonable candidates for `MemoryConfig` fields if Sprint 3.14's real-world verification shows either needs per-deployment tuning — not added speculatively now, consistent with this sprint's own "no premature optimization" Potential Risk.
+
+**Sprint 3.9 (Memory Retrieval Engine) is complete.** **Sprint 3.10 (Priority Queue) is next.**

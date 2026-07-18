@@ -142,3 +142,70 @@ High — the project's first LLM-integration sprint, with a genuinely new class 
 
 - If a second model runtime is ever needed (Part 3: "additional models can be integrated later without significant refactoring"), it implements `LanguageModelClient` directly — no change anticipated to `IntentDetector`'s own logic.
 - Prompt-engineering iteration (improving real classification accuracy against real conversations) is expected to continue well past this sprint's initial ship — flagged as ongoing tuning, not a one-time deliverable.
+
+---
+
+## Sprint Completion Report (2026-07-18)
+
+### Summary
+
+Implemented `decision/models.py` (`IntentCategory`, `Intent`), `decision/llm_client.py` (`LanguageModelClient`, `LlmError`, `OllamaClient`), and `decision/intent_detector.py` (`IntentDetector(ManagedModule)`), plus the two new `ModelConfig` fields. This is the project's first sprint to perform real LLM-based language understanding and the first real installation/verification of the `ollama` Python client (`0.6.2`) and a running Ollama service — closing `backlog/technical_debt.md` item 1's last remaining Level-1-through-3 entry. 439/439 tests passing (405 prior + 34 new), `ruff check .` clean.
+
+### Files Created
+
+- `decision/models.py` — `IntentCategory` (Enum, 7 values incl. `UNKNOWN`), `Intent` (dataclass).
+- `decision/llm_client.py` — `LlmError`, `LanguageModelClient` (Protocol), `OllamaClient`.
+- `decision/intent_detector.py` — `IntentDetector(ManagedModule)`, prompt construction, response parsing.
+- `tests/unit/decision/test_llm_client.py` — 7 tests.
+- `tests/unit/decision/test_intent_detector.py` — 24 tests (incl. 2 parametrized cases: 6 labeled classifications, 3 confidence-clamping bounds).
+
+### Files Modified
+
+- `config/schema.py` — `ModelConfig.ollama_host: str = "http://localhost:11434"`, `ollama_timeout_seconds: float = 10.0`; validation added to `_validate_models()`.
+- `config/defaults.yaml` — `models:` section extended to match.
+- `tests/unit/config/test_schema.py` — 3 new tests for the two fields' defaults and validation.
+- `docs/STATUS.md` — Phase 3.3 (Decision Engine) row updated to `Designing`.
+- `docs/backlog/technical_debt.md` — item 1 updated (`ollama` now installed); new item 16 (see Remaining Risks).
+- `requirements.txt` — unchanged; `ollama>=0.3` was already declared (reserved since an earlier sprint), only the venv install was outstanding.
+
+### Tests Added
+
+34 total, all against a fake `LanguageModelClient`/mocked `ollama.Client` — no real network call in the committed suite, per this sprint's own Testing Checklist. Covers: the full labeled classification set (6 categories, case-insensitive category names); `LlmError` and a simulated-timeout degradation to `UNKNOWN` (identical code path, both documented as such); an empty and a whitespace-only transcript short-circuiting without calling the client at all; a response missing `CATEGORY:`, an unrecognized category name, and unparseable/out-of-range confidence values (clamped to `[0, 1]`); the configured timeout being passed through; `health_check()`/`start()`/`stop()` including recovery-after-failure and degradation-after-failure of the `_healthy` flag; and `OllamaClient.generate()` wrapping an unpulled-model `ResponseError`-equivalent, a `ConnectionError`, and a timeout into `LlmError`, plus confirming a fresh `ollama.Client` is constructed per call with the given `timeout_seconds` (`ollama.Client.generate()` has no per-call timeout of its own).
+
+### Documentation Updated
+
+This file (Sprint Completion Report). `decision/intent_detector.py`'s module docstring (the fail-safe contract, prompt-design rationale). `decision/llm_client.py`'s module docstring (Interface First rationale, and why `is_reachable()` is deliberately NOT part of the `LanguageModelClient` Protocol). `docs/STATUS.md`, `docs/backlog/technical_debt.md` as above.
+
+### Acceptance Criteria Checklist
+
+- ✔ `detect()` correctly classifies a fixed labeled test set into the expected `IntentCategory`, against a fake client (6/6 in the parametrized fixture set; additionally confirmed against the real, running Ollama instance — see Remaining Risks/Recommendations).
+- ✔ A simulated `LlmError` (connection failure) results in `Intent(UNKNOWN, 0.0)`, logged via `logger.warning(..., exc_info=True)`, never raised.
+- ✔ A simulated timeout behaves identically — confirmed both at `IntentDetector` level (same `LlmError` path) and at `OllamaClient` level (a real timeout exception is wrapped into `LlmError`).
+- ✔ `IntentDetector.detect()` never raises for any input, including an empty transcript (verified to short-circuit before any client call) and a malformed/unparseable LLM response.
+
+### Engineering Decisions
+
+- **`is_reachable()` kept off the `LanguageModelClient` Protocol.** The spec asks `start()` to perform "a lightweight readiness check (not a full generation call)," but the Protocol is explicitly "deliberately minimal (one method)." Resolved by adding `is_reachable()` only to the concrete `OllamaClient` (wraps a cheap `ollama.Client.list()` call, confirmed for real to not load any model), with `IntentDetector.start()` looking it up defensively via `getattr(..., None)` — a fake client implementing only `generate()` is still fully usable and defaults to "assumed reachable." This keeps the shared Protocol's shape exactly as specified while still giving `start()` a real network-based check.
+- **`IntentDetector.start()` does not raise on an unreachable Ollama host**, unlike `WhisperSpeechToText`/`CoquiTextToSpeech`'s precedent of raising on a real load failure. Reasoning: those components genuinely cannot function without their loaded model; `IntentDetector.detect()` recovers per-call regardless of `start()`'s outcome (the `_healthy` flag flips back on the next successful call, same as Whisper's own recovery pattern) — marking the module `FAILED` at startup would only block `CoreManager`'s automatic recovery for a transient outage, since nothing currently calls `restart_module()` automatically (a known, still-open gap from `backlog/technical_debt.md`'s discussion in `sprint_2_13.md`).
+- **Prompt format is plain two-line text** (`CATEGORY: ...` / `CONFIDENCE: ...`), not Ollama's JSON-schema-forcing `format=` parameter, specifically because using it would require widening `LanguageModelClient.generate()`'s signature beyond the Sprint Book's specified `(prompt, timeout_seconds) -> str` shape. Parsing is regex-based and defensive (missing category, unknown category name, and unparseable/out-of-range confidence all resolve to a safe default rather than raising).
+- **Empty/whitespace-only transcripts short-circuit before any LLM call** — an efficiency improvement within the sprint's own scope (avoids a real, non-trivial-latency network call for a degenerate input that can only ever be `UNKNOWN` anyway), not a spec deviation.
+
+### Remaining Risks
+
+- **Confirmed via real, non-mocked verification** against an actually-running local Ollama instance (not just the fakes-based committed suite, which this sprint's own Testing Checklist explicitly scoped to fakes only): `IntentDetector` correctly classified all 6 of the same labeled sample categories used in the unit tests when run for real against `llama3:latest` (the model actually pulled on this machine), and correctly degraded to `UNKNOWN` with `health_check() == False` when pointed at an unreachable host, recovering to `UNKNOWN`-but-logged rather than raising. This exceeds this sprint's own committed scope (real verification was named as Sprint 3.14's job) but was done as an extra confidence check given how consequential this component is.
+- **`ollama_timeout_seconds`'s 10-second default is confirmed too short for a cold model load** — real measurement during this sprint's own verification showed a cold `llama3:latest` load-and-generate taking ~53 seconds, dropping to ~2.8 seconds once warm. This matches the sprint's own flagged risk exactly ("an untested guess... real latency depends entirely on hardware and model size"); no code change made since Sprint 3.14 is the named place to correct it with real data, which this sprint's finding now supplies.
+- **New: the shipped `ollama_model` default (`"gemma3"`) does not match what's actually pulled on this development machine (`llama3:latest`)** — `backlog/technical_debt.md` item 16. Does not block this sprint (fakes-only committed tests; real verification above used `llama3` explicitly, not the shipped default) but must be resolved — either by pulling `gemma3` or changing the default — before Sprint 3.14's real-model verification pass, which will otherwise fail immediately on a 404 model-not-found.
+- This sprint's own flagged non-determinism risk stands as expected: the same transcript can plausibly classify differently across LLM calls. No downstream sprint (3.8+) exists yet to confirm tolerance of this in practice.
+
+### Technical Debt
+
+- **Item 1 updated**: `ollama` now installed (`0.6.2`), matching the version constraint (`>=0.3`) already declared in `requirements.txt`.
+- **New item 16**: `ModelConfig.ollama_model` default (`"gemma3"`) vs. the actually-pulled local model (`llama3:latest`) — a user decision, not silently changed, per the same pattern as items 5 and 7 (wake-phrase and TTS-voice-ID gaps).
+
+### Recommendations
+
+- **Resolve `backlog/technical_debt.md` item 16 before Sprint 3.14** — pull `gemma3` (`ollama pull gemma3`) or change the default to `llama3`, whichever the user prefers; either is a one-line config change once decided.
+- **For Sprint 3.8 (Context Analysis)**: reuses `LanguageModelClient`/`OllamaClient` as-is per this sprint's own design intent — no changes anticipated to either.
+- **`ollama_timeout_seconds` should be revisited with the real cold/warm latency numbers above** once Sprint 3.14 (or any earlier real-model exercise) is ready to tune it; 10s comfortably covers a warm call but not a cold one.
+
+**Sprint 3.7 (Intent Detection) is complete — Phase 3.3 (Decision Engine) is now `Designing`.** **Sprint 3.8 (Context Analysis) is next.**

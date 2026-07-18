@@ -7,6 +7,7 @@ from config.schema import (
     AppConfig,
     DatabaseConfig,
     LoggingConfig,
+    MemoryConfig,
     ModelConfig,
     ResourceThresholds,
     UIConfig,
@@ -134,6 +135,24 @@ def test_whisper_no_speech_threshold_above_one_raises():
         config.validate()
 
 
+def test_default_ollama_host_and_timeout():
+    config = ModelConfig()
+    assert config.ollama_host == "http://localhost:11434"
+    assert config.ollama_timeout_seconds == 10.0
+
+
+def test_empty_ollama_host_raises():
+    config = AppConfig(models=ModelConfig(ollama_host="  "))
+    with pytest.raises(ConfigError, match="ollama_host"):
+        config.validate()
+
+
+def test_non_positive_ollama_timeout_seconds_raises():
+    config = AppConfig(models=ModelConfig(ollama_timeout_seconds=0))
+    with pytest.raises(ConfigError, match="ollama_timeout_seconds"):
+        config.validate()
+
+
 def test_invalid_log_level_raises():
     config = AppConfig(logging=LoggingConfig(level="VERBOSE"))
     with pytest.raises(ConfigError, match="logging.level"):
@@ -174,6 +193,45 @@ def test_status_refresh_interval_too_low_raises():
 def test_status_refresh_interval_too_high_raises():
     config = AppConfig(ui=UIConfig(status_refresh_interval_ms=120_000))
     with pytest.raises(ConfigError, match="status_refresh_interval_ms"):
+        config.validate()
+
+
+def test_default_memory_config_has_expected_prefix():
+    assert AppConfig().memory.chroma_collection_prefix == "jarminei_memory"
+
+
+def test_empty_chroma_collection_prefix_raises():
+    config = AppConfig(memory=MemoryConfig(chroma_collection_prefix=""))
+    with pytest.raises(ConfigError, match="chroma_collection_prefix"):
+        config.validate()
+
+
+def test_default_short_term_memory_settings():
+    config = MemoryConfig()
+    assert config.short_term_default_confidence == 15.0
+    assert config.short_term_salience_triggers == [
+        "remind me",
+        "don't forget",
+        "note that",
+        "remember that",
+    ]
+
+
+def test_short_term_default_confidence_out_of_range_raises():
+    config = AppConfig(memory=MemoryConfig(short_term_default_confidence=150.0))
+    with pytest.raises(ConfigError, match="short_term_default_confidence"):
+        config.validate()
+
+
+def test_empty_short_term_salience_triggers_raises():
+    config = AppConfig(memory=MemoryConfig(short_term_salience_triggers=[]))
+    with pytest.raises(ConfigError, match="short_term_salience_triggers"):
+        config.validate()
+
+
+def test_blank_short_term_salience_trigger_raises():
+    config = AppConfig(memory=MemoryConfig(short_term_salience_triggers=["remind me", "  "]))
+    with pytest.raises(ConfigError, match="short_term_salience_triggers"):
         config.validate()
 
 

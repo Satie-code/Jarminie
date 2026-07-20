@@ -76,7 +76,21 @@ class ConfidenceScorer:
         (category_importance lookup, falling back to
         category_default_weight), plus the fixed emotional placeholder —
         see this module's own docstring for why importance contributes no
-        term here."""
+        term here.
+
+        Sprint 3.13 (Error Handling & Recovery Hardening) reviewed this
+        method against two named edge cases — a record with
+        last_accessed_at == created_at (zero elapsed time) and
+        access_count == 0 (freshly-created, never-yet-read) — and found
+        both already handled correctly with no code change needed:
+        frequency_factor's denominator is access_count + 1 (never zero),
+        and elapsed_days only ever appears in recency_factor's numerator,
+        not its denominator (recency_half_life_days, the denominator, is
+        a config value already validated > 0 at the config layer, not a
+        per-record field). See
+        tests/unit/memory/test_confidence_scorer.py's own
+        test_zero_elapsed_time_since_last_accessed_does_not_raise and
+        test_access_count_zero_produces_a_valid_low_frequency_term."""
         if record.user_override:
             return 100.0
 

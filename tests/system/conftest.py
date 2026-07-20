@@ -120,7 +120,11 @@ class FakeLanguageModelClient:
     """Fakes only the Ollama boundary IntentDetector/ContextAnalyzer
     depend on — see this module's own docstring. Dispatches on prompt
     content: IntentDetector's own prompt always instructs a "CATEGORY:"
-    line; ContextAnalyzer's never does."""
+    line; ContextAnalyzer's never does.
+
+    should_raise (Sprint 3.14, re-confirming Sprint 3.13's scenario (a)
+    at the system level) simulates Ollama being entirely unreachable —
+    same convention as tests/integration/conftest.py's own fake."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -128,8 +132,13 @@ class FakeLanguageModelClient:
             "TOPIC: general\nENTITIES: NONE\nREFERENCES_PAST: NO\n"
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
+        self.should_raise = False
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
+        if self.should_raise:
+            from decision.llm_client import LlmError
+
+            raise LlmError("simulated Ollama connection failure")
         if "CATEGORY:" in prompt:
             return self.intent_response
         return self.context_response
@@ -328,6 +337,24 @@ def app_harness(tmp_path, voice_config):
         persona_manager=persona_manager,
         session_manager=session_manager,
         quiet_mode_controller=quiet_mode_controller,
+        # Sprint 3.14 (Level 3 Acceptance Pass) additions — every Level 3
+        # collaborator already constructed above, now exposed so the new
+        # system test can exercise memory/confidence/lifecycle/priority
+        # behavior directly, not just observe it indirectly through a
+        # spoken reply.
+        memory_store=memory_store,
+        persona_scoped_memory=persona_scoped_memory,
+        event_memory=event_memory,
+        short_term_memory=short_term_memory,
+        confidence_scorer=confidence_scorer,
+        memory_lifecycle_manager=memory_lifecycle_manager,
+        memory_retrieval_engine=memory_retrieval_engine,
+        llm_client=llm_client,
+        intent_detector=intent_detector,
+        context_analyzer=context_analyzer,
+        priority_queue_manager=priority_queue_manager,
+        authority_evaluator=authority_evaluator,
+        resource_monitor=resource_monitor,
     )
     try:
         yield harness

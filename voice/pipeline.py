@@ -7,8 +7,11 @@ back to Quiet Mode.
 
 This class owns *only* wiring — no new business logic, no new state
 beyond what wiring requires (Single Responsibility, matching every prior
-Level 2/3 sprint's own discipline). See docs/sprint_book/sprint_2_12.md
-and sprint_3_12.md (Decision Engine Integration).
+Level 2/3 sprint's own discipline). See docs/sprint_book/sprint_2_12.md,
+sprint_3_12.md (Decision Engine Integration), and sprint_3_13.md (Error
+Handling & Recovery Hardening — the Decision Engine pipeline call inside
+_handle_turn_complete() now has its own narrower exception boundary, see
+that method's own docstring).
 
 Wiring diagram (matches sprint_3_12.md's own Data Flow):
 
@@ -241,20 +244,48 @@ class CommunicationPipeline:
         c) — deliberately still wrapped here as defense in depth. Sprint
         3.12 adds the Decision Engine pipeline and memory promotion/
         override calls inside this same try/except, so a failure in any
-        of them degrades the same way rather than needing its own catch."""
+        of them degrades the same way rather than needing its own catch.
+
+        Sprint 3.13 hardening (scenario f): _run_decision_pipeline() gets
+        its OWN, narrower try/except, distinct from the outer one above.
+        Every individual stage already fails safe internally (Intent/
+        Context degrade to UNKNOWN/neutral, Chroma failures degrade to
+        empty retrieval, Authority Evaluator itself now fails safe-down
+        per scenario e) — this inner catch is for whatever isn't already
+        covered by one of those (an unexpected bug in any stage). Before
+        this hardening, such a failure fell through to the outer catch,
+        which ends the whole session (SessionEndReason.ERROR) — coarser
+        than necessary, since the rest of a turn (persona reply,
+        persistence, spoken response) can still proceed just fine without
+        a DecisionTrace. Catching it here instead degrades to
+        decision_trace=None and lets the turn finish normally — exactly
+        the case Persona.compose_reply()'s decision_trace: DecisionTrace
+        | None signature (Sprint 3.12) was designed to tolerate, and the
+        same failure-triggered fallback PersonaManager.select_from_
+        context() already documented (Sprint 3.12) for a missing
+        ContextAnalysis."""
         try:
             persona_before = self._persona_manager.active_persona()
             context = self._context_manager.current_context(session_id, persona_before.name)
 
-            decision_trace = self._run_decision_pipeline(transcript, context, session_id)
+            try:
+                decision_trace = self._run_decision_pipeline(transcript, context, session_id)
+            except Exception:
+                logger.exception(
+                    "Decision Engine pipeline failed for this turn; continuing with "
+                    "decision_trace=None (a degraded, Level-2-quality reply) rather "
+                    "than ending the session."
+                )
+                decision_trace = None
 
             explicit = self._persona_manager.detect_explicit_selection(transcript)
             if explicit is not None:
                 self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
             else:
-                self._persona_manager.select_from_context(
-                    decision_trace.context_analysis, transcript
+                context_analysis = (
+                    decision_trace.context_analysis if decision_trace is not None else None
                 )
+                self._persona_manager.select_from_context(context_analysis, transcript)
 
             persona = self._persona_manager.active_persona()
             reply = self._persona_manager.compose_reply_safely(transcript, context, decision_trace)

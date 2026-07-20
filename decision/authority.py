@@ -47,6 +47,13 @@ ACTION_REQUEST intent "really" belongs to Device Control) — that
 inference is recorded only in reasoning_text, worded as an honest
 capability gap ("this looks like X, which doesn't exist yet"), never as
 if the request were actually routed there.
+
+Sprint 3.13 hardening (scenario e): evaluate()'s own body is wrapped in
+a try/except — any internal exception (a malformed input, a bug in
+_determine_authority()/_determine_engine()/_build_reasoning()) resolves
+to AuthorityLevel.INFORM/EngineSelection.INFORM_ONLY, never anything
+more permissive than clean inputs would have produced. Fail
+safe-DOWN, never safe-up.
 """
 
 from dataclasses import dataclass
@@ -157,13 +164,33 @@ class AuthorityEvaluator:
         retrieved_memories: list[RetrievedMemory],
         priority_level: PriorityLevel,
     ) -> DecisionTrace:
-        authority_level, emergency_approved = self._determine_authority(
-            intent, context_analysis, priority_level
-        )
-        selected_engine = self._determine_engine(intent)
-        reasoning_text = _build_reasoning(
-            intent, priority_level, authority_level, emergency_approved, retrieved_memories
-        )
+        """Sprint 3.13 hardening (scenario e): must fail safe-down, never
+        safe-up — any exception raised anywhere in this method's own body
+        (a malformed input, a bug in a helper) resolves to the lowest,
+        safest AuthorityLevel/EngineSelection pair (INFORM/INFORM_ONLY)
+        rather than propagating or defaulting to anything more
+        permissive. This is Human First + Reliability over Intelligence
+        applied mechanically: a broken decision engine must become more
+        cautious, not less."""
+        try:
+            authority_level, emergency_approved = self._determine_authority(
+                intent, context_analysis, priority_level
+            )
+            selected_engine = self._determine_engine(intent)
+            reasoning_text = _build_reasoning(
+                intent, priority_level, authority_level, emergency_approved, retrieved_memories
+            )
+        except Exception:
+            logger.exception(
+                "AuthorityEvaluator.evaluate() failed internally; defaulting to the "
+                "safest response."
+            )
+            authority_level = AuthorityLevel.INFORM
+            selected_engine = EngineSelection.INFORM_ONLY
+            reasoning_text = (
+                "Decision Engine encountered an internal error; defaulting to the "
+                "safest response."
+            )
         return DecisionTrace(
             intent=intent,
             context_analysis=context_analysis,

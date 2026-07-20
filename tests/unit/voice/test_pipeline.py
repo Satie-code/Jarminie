@@ -10,6 +10,7 @@ tests/integration/test_decision_engine_integration.py for the Sprint
 3.12 Decision Engine wiring specifically.
 """
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -287,14 +288,27 @@ def test_handle_turn_complete_contains_an_unexpected_speak_reply_failure(pipelin
     collaborators["session_manager"].end_session.assert_called_once_with(SessionEndReason.ERROR)
 
 
-def test_handle_turn_complete_contains_a_decision_pipeline_failure(pipeline, collaborators):
-    """New failure surface Sprint 3.12 introduces: an unexpected exception
-    anywhere in the Decision Engine pipeline itself must degrade the same
-    way as every other unexpected failure in this method (hardening the
-    specific, graceful degrade of an individual stage is Sprint 3.13's
-    job — this only confirms the outer containment still catches it)."""
+def test_decision_pipeline_failure_degrades_gracefully_without_ending_the_session(
+    pipeline, collaborators, caplog
+):
+    """Sprint 3.13 hardening (scenario f): an unexpected exception
+    anywhere in the Decision Engine pipeline no longer ends the whole
+    session (as it did before this sprint, when it fell through to the
+    outer catch below) — it degrades to decision_trace=None and the turn
+    still completes with a spoken, Level-2-quality reply, exactly the
+    case Persona.compose_reply()'s decision_trace: DecisionTrace | None
+    signature (Sprint 3.12) was designed to tolerate."""
     collaborators["intent_detector"].detect.side_effect = RuntimeError("ollama exploded")
 
-    pipeline._handle_turn_complete("hello there", "session-1")  # must not raise
+    with caplog.at_level(logging.WARNING):
+        pipeline._handle_turn_complete("hello there", "session-1")  # must not raise
 
-    collaborators["session_manager"].end_session.assert_called_once_with(SessionEndReason.ERROR)
+    collaborators["session_manager"].end_session.assert_not_called()
+    collaborators["persona_manager"].select_from_context.assert_called_once_with(
+        None, "hello there"
+    )
+    collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
+        "hello there", collaborators["context"], None
+    )
+    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+    assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)

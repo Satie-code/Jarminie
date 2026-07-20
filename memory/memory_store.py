@@ -16,6 +16,17 @@ This module knows nothing about which MemoryType means what (Shared vs.
 Jarvis vs. Event, permanence, confidence scoring) — that is Sprints
 3.2-3.6's job. It only stores and retrieves whatever MemoryRecord it is
 given.
+
+Sprint 3.14 (Integration Testing & Level Freeze) adversarial re-read
+finding: every SQLite operation below now has explicit failure handling,
+matching the Chroma-failure handling this class already had since Sprint
+3.1/3.13 and its Level 2 sibling ConversationSessionStore's own SQLite
+handling (Sprint 2.13). A write whose caller needs to know it didn't
+happen (store()) raises a typed MemoryStoreError; a read that can
+reasonably degrade to "nothing found" (get_by_id(), recent()) does so;
+a best-effort update whose failure only means "stays stale until the
+next pass" (update_confidence(), delete()) is logged and swallowed. See
+sprint_3_14.md's own completion report for the full reasoning.
 """
 
 from datetime import UTC, datetime
@@ -97,26 +108,40 @@ class MemoryStore:
     def store(self, record: MemoryRecord) -> str:
         """Persist record to SQLite (source of truth), then attempt its
         Chroma embedding. A Chroma failure is logged and does not raise —
-        see this module's own docstring."""
-        self._sqlite_client.execute(
-            f"INSERT INTO memory_records ({_SELECT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                record.id,
-                record.memory_type.value,
-                record.content,
-                record.category,
-                record.confidence_score,
-                int(record.is_permanent),
-                int(record.user_override),
-                record.source_session_id,
-                record.occurred_at.isoformat() if record.occurred_at else None,
-                record.created_at.isoformat(),
-                record.last_accessed_at.isoformat(),
-                record.band_entered_at.isoformat(),
-                record.access_count,
-            ),
-        )
+        see this module's own docstring.
+
+        Sprint 3.14 (Integration Testing & Level Freeze) adversarial
+        re-read finding: the SQLite INSERT itself previously had no
+        failure handling at all, unlike ConversationSessionStore.
+        record_turn() (its Level 2 sibling, Sprint 2.13) — a caller
+        receiving back a record.id for a row that was never actually
+        persisted would be silently working with a fake reference, worse
+        than raising. A write failure here now raises MemoryStoreError
+        (never a raw sqlite3 exception, per Interface First Design) rather
+        than either silently swallowing it or leaking an implementation-
+        specific error type."""
+        try:
+            self._sqlite_client.execute(
+                f"INSERT INTO memory_records ({_SELECT_COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.id,
+                    record.memory_type.value,
+                    record.content,
+                    record.category,
+                    record.confidence_score,
+                    int(record.is_permanent),
+                    int(record.user_override),
+                    record.source_session_id,
+                    record.occurred_at.isoformat() if record.occurred_at else None,
+                    record.created_at.isoformat(),
+                    record.last_accessed_at.isoformat(),
+                    record.band_entered_at.isoformat(),
+                    record.access_count,
+                ),
+            )
+        except Exception as exc:
+            raise MemoryStoreError(f"Failed to store memory record {record.id}: {exc}") from exc
         try:
             self._chroma_client.add_embedding(record.memory_type, record.id, record.content)
         except Exception:
@@ -129,29 +154,52 @@ class MemoryStore:
     def get_by_id(self, record_id: str) -> MemoryRecord | None:
         """Return the record, or None if it doesn't exist. Also bumps
         access_count and last_accessed_at — every read is itself a signal
-        Sprint 3.5's Dynamic Memory Formula consumes."""
-        rows = self._sqlite_client.query(
-            f"SELECT {_SELECT_COLUMNS} FROM memory_records WHERE id = ?",
-            (record_id,),
-        )
-        if not rows:
+        Sprint 3.5's Dynamic Memory Formula consumes.
+
+        Sprint 3.14 hardening: a SQLite failure (either the SELECT or the
+        access_count/last_accessed_at UPDATE) is logged and degrades to
+        None — the same "nothing found" outcome as a genuinely-missing
+        record, per this module's own established Fail Gracefully
+        convention (semantic_search()'s Chroma-failure handling, Sprint
+        3.13). Callers throughout memory/ already treat None as a normal,
+        expected outcome (e.g. MemoryLifecycleManager.apply_user_
+        override()), so no caller needed to change for this."""
+        try:
+            rows = self._sqlite_client.query(
+                f"SELECT {_SELECT_COLUMNS} FROM memory_records WHERE id = ?",
+                (record_id,),
+            )
+            if not rows:
+                return None
+            record = _row_to_record(rows[0])
+            record.access_count += 1
+            record.last_accessed_at = datetime.now(UTC)
+            self._sqlite_client.execute(
+                "UPDATE memory_records SET access_count = ?, last_accessed_at = ? WHERE id = ?",
+                (record.access_count, record.last_accessed_at.isoformat(), record.id),
+            )
+        except Exception:
+            logger.exception("Failed to read memory record %s; treating as not found.", record_id)
             return None
-        record = _row_to_record(rows[0])
-        record.access_count += 1
-        record.last_accessed_at = datetime.now(UTC)
-        self._sqlite_client.execute(
-            "UPDATE memory_records SET access_count = ?, last_accessed_at = ? WHERE id = ?",
-            (record.access_count, record.last_accessed_at.isoformat(), record.id),
-        )
         return record
 
     def recent(self, memory_type: MemoryType, limit: int) -> list[MemoryRecord]:
-        """Plain recency query, no embedding involved. Newest first."""
-        rows = self._sqlite_client.query(
-            f"SELECT {_SELECT_COLUMNS} FROM memory_records "
-            "WHERE memory_type = ? ORDER BY created_at DESC LIMIT ?",
-            (memory_type.value, limit),
-        )
+        """Plain recency query, no embedding involved. Newest first.
+
+        Sprint 3.14 hardening: a SQLite failure degrades to an empty
+        list rather than raising — every caller of this method (Event
+        Memory's list_milestones(), Short-Term Memory's active_context_
+        memories(), MemoryLifecycleManager's own cleanup/review passes)
+        already treats "no records" as a normal, valid outcome."""
+        try:
+            rows = self._sqlite_client.query(
+                f"SELECT {_SELECT_COLUMNS} FROM memory_records "
+                "WHERE memory_type = ? ORDER BY created_at DESC LIMIT ?",
+                (memory_type.value, limit),
+            )
+        except Exception:
+            logger.exception("Failed to read recent memory records for type=%s.", memory_type.value)
+            return []
         return [_row_to_record(row) for row in rows]
 
     def semantic_search(
@@ -172,9 +220,18 @@ class MemoryStore:
         already-separately-ordered lists.
 
         A degraded/unavailable Chroma backend returns an empty list
-        (Sprint 3.13 hardens this explicitly) rather than raising — an
-        empty result is a normal "nothing relevant found" outcome to every
-        caller of this method."""
+        rather than raising — an empty result is a normal "nothing
+        relevant found" outcome to every caller of this method. Sprint
+        3.13 (Error Handling & Recovery Hardening) reviewed and confirmed
+        this behavior under a real induced failure (a local double whose
+        query() genuinely raises, not just a pre-built exception
+        asserted against) — see
+        tests/unit/memory/test_memory_store.py's own
+        test_semantic_search_returns_empty_list_on_a_chroma_query_failure
+        and tests/integration/test_decision_engine_hardening.py's
+        full-turn-level confirmation. store()'s own Chroma-failure
+        handling below (Sprint 3.1) was reviewed the same way and found
+        already correct — no code change was needed for either method."""
         try:
             hits = self._chroma_client.query(memory_type, query_text, n_results)
         except Exception:
@@ -201,7 +258,15 @@ class MemoryStore:
         optionally, a new user_override flag and/or band_entered_at
         (Sprint 3.6, on an actual band transition — see MemoryRecord's
         own docstring). Leaves whichever of the two isn't supplied
-        unchanged."""
+        unchanged.
+
+        Sprint 3.14 hardening: a SQLite failure is logged and swallowed
+        rather than raised — a best-effort write, the same convention
+        ConversationSessionStore.record_turn() established (Sprint 2.7):
+        a record simply keeps its previous score/band until the next
+        successful rescoring pass, rather than aborting the caller
+        (MemoryLifecycleManager's own per-record try/except already adds
+        a second layer of isolation on top of this one)."""
         set_clauses = ["confidence_score = ?"]
         params: list[object] = [new_score]
         if user_override is not None:
@@ -211,19 +276,34 @@ class MemoryStore:
             set_clauses.append("band_entered_at = ?")
             params.append(band_entered_at.isoformat())
         params.append(record_id)
-        self._sqlite_client.execute(
-            f"UPDATE memory_records SET {', '.join(set_clauses)} WHERE id = ?",
-            tuple(params),
-        )
+        try:
+            self._sqlite_client.execute(
+                f"UPDATE memory_records SET {', '.join(set_clauses)} WHERE id = ?",
+                tuple(params),
+            )
+        except Exception:
+            logger.exception("Failed to update confidence for memory record %s.", record_id)
 
     def delete(self, record_id: str) -> None:
         """Remove from both SQLite and Chroma. Looks up the record's
         MemoryType via a plain read (not get_by_id(), which would bump
-        access_count/last_accessed_at on a record about to be deleted)."""
-        rows = self._sqlite_client.query(
-            "SELECT memory_type FROM memory_records WHERE id = ?", (record_id,)
-        )
-        self._sqlite_client.execute("DELETE FROM memory_records WHERE id = ?", (record_id,))
+        access_count/last_accessed_at on a record about to be deleted).
+
+        Sprint 3.14 hardening: a SQLite failure (the lookup or the
+        DELETE itself) is logged and swallowed rather than raised — a
+        record that fails to delete now simply remains and is
+        reconsidered on the next cleanup pass (MemoryLifecycleManager's
+        run_cleanup_pass(), Sprint 3.6), the same "stays around, tried
+        again later" degrade already accepted for the grace-period
+        design generally."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT memory_type FROM memory_records WHERE id = ?", (record_id,)
+            )
+            self._sqlite_client.execute("DELETE FROM memory_records WHERE id = ?", (record_id,))
+        except Exception:
+            logger.exception("Failed to delete memory record %s from SQLite.", record_id)
+            return
         if rows:
             memory_type = MemoryType(rows[0][0])
             try:

@@ -15,6 +15,7 @@ import pytest
 from config.schema import DatabaseConfig, MemoryConfig
 from database.sqlite_client import SqliteClient
 from memory.chroma_client import ChromaMemoryClient
+from memory.errors import MemoryStoreError
 from memory.memory_store import MemoryStore
 from memory.models import MemoryRecord, MemoryType
 
@@ -25,6 +26,41 @@ class _EmbeddingFailingChromaClient(ChromaMemoryClient):
 
     def add_embedding(self, memory_type, record_id, content) -> None:
         raise RuntimeError("chroma exploded")
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Sprint 3.14 hardening: a real SqliteClient whose execute()/query()
+    can be switched to fail on demand, after connect()/start() have
+    already succeeded — matching the project's established "_Raising*-
+    style local test double" pattern (per sprint_3_13.md's own Potential
+    Risks). Flags are plain mutable attributes rather than constructor
+    args specifically so a test can call store.start() (which itself
+    calls execute() for CREATE TABLE) before switching failure on."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_execute = False
+        self.raise_on_query = False
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        if self.raise_on_execute:
+            raise RuntimeError("sqlite execute exploded")
+        super().execute(sql, params)
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+class _QueryFailingChromaClient(ChromaMemoryClient):
+    """Sprint 3.13 hardening (scenario b): a real ChromaMemoryClient whose
+    query() always fails — simulates ChromaDB being entirely unreachable
+    or corrupted for the read/search path specifically, distinct from
+    _EmbeddingFailingChromaClient's write-path failure above."""
+
+    def query(self, memory_type, query_text, n_results):
+        raise RuntimeError("chroma query exploded")
 
 
 @pytest.fixture
@@ -324,3 +360,99 @@ def test_store_swallows_and_logs_a_chroma_embedding_failure(database_config, mem
 
     assert fetched is not None
     assert fetched.content == "the user's favorite project is JARMINEI"
+
+
+def test_semantic_search_returns_empty_list_on_a_chroma_query_failure(
+    database_config, memory_config
+):
+    """Sprint 3.13 hardening (scenario b): a degraded/unreachable Chroma
+    backend must not raise out of semantic_search() — an empty result is
+    a normal "nothing relevant found" outcome to every caller (Persona
+    ScopedMemory, EventMemory, MemoryRetrievalEngine), not a
+    distinguishable error state, per the Fail Gracefully Rule."""
+    store = make_store(database_config, memory_config, chroma_client_cls=_QueryFailingChromaClient)
+    store.start()
+    try:
+        store.store(make_record())  # SQLite write still succeeds
+
+        results = store.semantic_search(MemoryType.SHARED, "anything", n_results=5)
+    finally:
+        store.stop()
+
+    assert results == []
+
+
+# --- Sprint 3.14 hardening: SQLite failure handling (adversarial re-read) ---
+# Every SQLite operation below previously had no failure handling at all,
+# unlike this class's own Chroma-failure handling (Sprint 3.1/3.13) and its
+# Level 2 sibling ConversationSessionStore's SQLite handling (Sprint 2.13).
+
+
+def _make_raising_store(database_config, memory_config):
+    sqlite_client = _RaisingSqliteClient(database_config.sqlite_path)
+    chroma_client = ChromaMemoryClient(memory_config, database_config)
+    store = MemoryStore(sqlite_client, chroma_client)
+    store.start()  # succeeds — failure is switched on only afterward
+    return store, sqlite_client
+
+
+def test_store_raises_memory_store_error_on_a_sqlite_write_failure(
+    database_config, memory_config
+):
+    store, sqlite_client = _make_raising_store(database_config, memory_config)
+    try:
+        sqlite_client.raise_on_execute = True
+
+        with pytest.raises(MemoryStoreError, match="Failed to store"):
+            store.store(make_record())
+    finally:
+        sqlite_client.raise_on_execute = False
+        store.stop()
+
+
+def test_get_by_id_returns_none_on_a_sqlite_read_failure(database_config, memory_config):
+    store, sqlite_client = _make_raising_store(database_config, memory_config)
+    try:
+        record_id = store.store(make_record())
+        sqlite_client.raise_on_query = True
+
+        assert store.get_by_id(record_id) is None
+    finally:
+        sqlite_client.raise_on_query = False
+        store.stop()
+
+
+def test_recent_returns_empty_list_on_a_sqlite_read_failure(database_config, memory_config):
+    store, sqlite_client = _make_raising_store(database_config, memory_config)
+    try:
+        store.store(make_record(memory_type=MemoryType.EVENT))
+        sqlite_client.raise_on_query = True
+
+        assert store.recent(MemoryType.EVENT, limit=10) == []
+    finally:
+        sqlite_client.raise_on_query = False
+        store.stop()
+
+
+def test_update_confidence_swallows_a_sqlite_write_failure(database_config, memory_config):
+    store, sqlite_client = _make_raising_store(database_config, memory_config)
+    try:
+        record_id = store.store(make_record())
+        sqlite_client.raise_on_execute = True
+
+        store.update_confidence(record_id, 90.0)  # must not raise
+    finally:
+        sqlite_client.raise_on_execute = False
+        store.stop()
+
+
+def test_delete_swallows_a_sqlite_failure(database_config, memory_config):
+    store, sqlite_client = _make_raising_store(database_config, memory_config)
+    try:
+        record_id = store.store(make_record())
+        sqlite_client.raise_on_query = True
+
+        store.delete(record_id)  # must not raise
+    finally:
+        sqlite_client.raise_on_query = False
+        store.stop()

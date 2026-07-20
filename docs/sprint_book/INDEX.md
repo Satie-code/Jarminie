@@ -78,20 +78,20 @@ See the "Level 3 breakdown changes (2026-07-18)" note above for how this table d
 
 | Sprint | Name                                                | Phase       | Depends On          | Complexity  | Detail                           |
 | ------ | ---------------------------------------------------- | ----------- | -------------------- | ----------- | --------------------------------- |
-| 3.1    | Memory Store Foundation (SQLite + ChromaDB)          | 3.1         | 1.2, 1.5, 2.7        | Medium–High | [sprint_3_1.md](sprint_3_1.md)   |
-| 3.2    | Shared Memory & Persona Memory                       | 3.1         | 3.1                  | Medium      | [sprint_3_2.md](sprint_3_2.md)   |
-| 3.3    | Event Memory                                         | 3.1         | 3.1                  | Low–Medium  | [sprint_3_3.md](sprint_3_3.md)   |
-| 3.4    | Short-Term Memory                                    | 3.1         | 3.1, 2.7             | Low–Medium  | [sprint_3_4.md](sprint_3_4.md)   |
-| 3.5    | Confidence Scoring Engine                            | 3.2         | 3.2, 3.3, 3.4        | Medium–High | [sprint_3_5.md](sprint_3_5.md)   |
-| 3.6    | Memory Lifecycle Manager (cleanup/review/override)   | 3.2         | 3.5                  | Medium      | [sprint_3_6.md](sprint_3_6.md)   |
-| 3.7    | Intent Detection                                     | 3.3         | 2.8, Ollama runtime  | High        | [sprint_3_7.md](sprint_3_7.md)   |
-| 3.8    | Context Analysis                                     | 3.3         | 3.7, 2.8             | Medium–High | [sprint_3_8.md](sprint_3_8.md)   |
-| 3.9    | Memory Retrieval Engine                              | 3.3         | 3.1–3.6              | Medium–High | [sprint_3_9.md](sprint_3_9.md)   |
-| 3.10   | Priority Queue                                       | 3.3         | 1.5, 3.9             | Medium      | [sprint_3_10.md](sprint_3_10.md) |
-| 3.11   | Authority Evaluation & Engine Selection              | 3.3         | 3.7, 3.8, 3.9, 3.10  | High        | [sprint_3_11.md](sprint_3_11.md) |
-| 3.12   | Decision Engine Integration                          | integration | 3.1–3.11, 2.12       | Medium–High | [sprint_3_12.md](sprint_3_12.md) |
-| 3.13   | Error Handling & Recovery Hardening                  | reliability | 3.12                 | Medium      | [sprint_3_13.md](sprint_3_13.md) |
-| 3.14   | Integration Testing & Level Freeze                   | level gate  | 3.13                 | Medium–High | [sprint_3_14.md](sprint_3_14.md) |
+| 3.1    | Memory Store Foundation (SQLite + ChromaDB)          | 3.1         | 1.2, 1.5, 2.7        | Medium–High | [sprint_3_1.md](sprint_3_1.md) — **Complete**   |
+| 3.2    | Shared Memory & Persona Memory                       | 3.1         | 3.1                  | Medium      | [sprint_3_2.md](sprint_3_2.md) — **Complete**   |
+| 3.3    | Event Memory                                         | 3.1         | 3.1                  | Low–Medium  | [sprint_3_3.md](sprint_3_3.md) — **Complete**   |
+| 3.4    | Short-Term Memory                                    | 3.1         | 3.1, 2.7             | Low–Medium  | [sprint_3_4.md](sprint_3_4.md) — **Complete**   |
+| 3.5    | Confidence Scoring Engine                            | 3.2         | 3.2, 3.3, 3.4        | Medium–High | [sprint_3_5.md](sprint_3_5.md) — **Complete**   |
+| 3.6    | Memory Lifecycle Manager (cleanup/review/override)   | 3.2         | 3.5                  | Medium      | [sprint_3_6.md](sprint_3_6.md) — **Complete**   |
+| 3.7    | Intent Detection                                     | 3.3         | 2.8, Ollama runtime  | High        | [sprint_3_7.md](sprint_3_7.md) — **Complete**   |
+| 3.8    | Context Analysis                                     | 3.3         | 3.7, 2.8             | Medium–High | [sprint_3_8.md](sprint_3_8.md) — **Complete**   |
+| 3.9    | Memory Retrieval Engine                              | 3.3         | 3.1–3.6              | Medium–High | [sprint_3_9.md](sprint_3_9.md) — **Complete**   |
+| 3.10   | Priority Queue                                       | 3.3         | 1.5, 3.9             | Medium      | [sprint_3_10.md](sprint_3_10.md) — **Complete** |
+| 3.11   | Authority Evaluation & Engine Selection              | 3.3         | 3.7, 3.8, 3.9, 3.10  | High        | [sprint_3_11.md](sprint_3_11.md) — **Complete** |
+| 3.12   | Decision Engine Integration                          | integration | 3.1–3.11, 2.12       | Medium–High | [sprint_3_12.md](sprint_3_12.md) — **Complete** |
+| 3.13   | Error Handling & Recovery Hardening                  | reliability | 3.12                 | Medium      | [sprint_3_13.md](sprint_3_13.md) — **Complete** |
+| 3.14   | Integration Testing & Level Freeze                   | level gate  | 3.13                 | Medium–High | [sprint_3_14.md](sprint_3_14.md) — **Complete** |
 
 ## LEVEL 4 — Productivity → Release v0.4
 
@@ -143,8 +143,8 @@ See the "Level 3 breakdown changes (2026-07-18)" note above for how this table d
 | Version | After Sprint | Theme                                                 |
 | ------- | ------------ | ----------------------------------------------------- |
 | 0.1     | 1.9          | Stable project foundation — ✔ **Released 2026-07-11** |
-| 0.2     | 2.11         | Voice interaction operational                         |
-| 0.3     | 3.14         | Intelligent memory and decision system                |
+| 0.2     | 2.14         | Voice interaction operational — ✔ **Released 2026-07-17** |
+| 0.3     | 3.14         | Intelligent memory and decision system — ✔ **Released 2026-07-20** |
 | 0.4     | 4.11         | Complete productivity assistant                       |
 | 0.5     | 5.9          | Complete personal AI companion                        |
 | 1.0     | 6.8          | Official JARMINEI Release                             |

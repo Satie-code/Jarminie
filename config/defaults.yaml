@@ -101,7 +101,13 @@ memory:
   max_retrieval_results: 5
 
 models:
-  ollama_model: "gemma3"
+  # Changed from "gemma3" to "llama3" during Sprint 3.14 — "gemma3" was
+  # never actually pulled on this project's own development machine, only
+  # "llama3:latest" was; user-confirmed after Sprint 3.14's real-model
+  # verification pass confirmed llama3 classifies correctly. See
+  # docs/backlog/technical_debt.md item 16 and config/schema.py's
+  # ModelConfig docstring.
+  ollama_model: "llama3"
   ollama_host: "http://localhost:11434"
   # Real-hardware latency is unverified (Sprint 3.7's own flagged risk) —
   # 10s is a starting guess; IntentDetector always degrades to UNKNOWN

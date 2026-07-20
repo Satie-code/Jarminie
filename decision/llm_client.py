@@ -27,6 +27,17 @@ start() perform a real "lightweight readiness check... not a full
 generation call" (the Sprint Book's own wording) without widening the
 shared interface every future LanguageModelClient implementation would
 otherwise have to satisfy.
+
+Sprint 3.13 (Error Handling & Recovery Hardening) named its own expected
+new function `OllamaClient.check_readiness() -> bool` — by the time 3.13
+was implemented, is_reachable() above already existed (built in Sprint
+3.7, for exactly this same "cheap connectivity probe used at startup,
+not on every generate() call" purpose) and IntentDetector.start()/
+ContextAnalyzer.start() were already calling it defensively. Adding a
+second, differently-named method with identical behavior would be pure
+duplication, not hardening, so 3.13 reused is_reachable() as-is rather
+than introducing a redundant check_readiness(). See sprint_3_13.md's own
+completion report for the full reasoning.
 """
 
 from typing import Protocol

@@ -169,7 +169,11 @@ class FakeLanguageModelClient:
     line; ContextAnalyzer's never does (it uses "TOPIC:"/"PERSONA:"
     instead), so checking for that exact literal substring reliably
     tells the two callers apart without either constructor needing to
-    know which stage is asking."""
+    know which stage is asking.
+
+    should_raise (Sprint 3.13 hardening, scenario a) simulates Ollama
+    being entirely unreachable — same should_raise convention already
+    established on FakeSpeechToText/FakeTextToSpeech above."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -178,9 +182,14 @@ class FakeLanguageModelClient:
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
         self.calls: list[str] = []
+        self.should_raise = False
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
         self.calls.append(prompt)
+        if self.should_raise:
+            from decision.llm_client import LlmError
+
+            raise LlmError("simulated Ollama connection failure")
         if "CATEGORY:" in prompt:
             return self.intent_response
         return self.context_response

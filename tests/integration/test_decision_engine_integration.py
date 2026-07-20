@@ -43,10 +43,23 @@ def test_full_turn_reply_measurably_differs_with_a_matching_stored_memory(
     proving the Decision Engine's DecisionTrace actually reaches and
     influences compose_reply(), not just exists unused."""
     h = pipeline_harness
+    # remember() (a real Chroma embedding call, genuinely CPU/GIL-bound)
+    # happens BEFORE wake activation, deliberately — once a session is
+    # active, VoiceSessionManager._capture_one_utterance() busy-spins
+    # reading frames with no sleep at all against the fake, instantly-
+    # returning audio backend (fine against real hardware, which
+    # naturally rate-limits the loop; not fine here). Real CPU-bound
+    # Python work sharing the GIL with that spin loop can run
+    # significantly slower in wall-clock terms than in isolation,
+    # concretely reproduced as a real, reliably-failing test (the
+    # session's own session_timeout_seconds elapsed before the delayed
+    # remember() call ever finished) when this call sat between
+    # activation and push_utterance().
+    h.persona_scoped_memory.remember(MemoryType.JARVIS, "the project deadline is Friday")
+
     _reset_wake_detection(h)
     wait_for_active_capture(h.mic)
 
-    h.persona_scoped_memory.remember(MemoryType.JARVIS, "the project deadline is Friday")
     h.stt.pending_transcripts.append("what's my project deadline")
     push_utterance(h.audio_backend)
     assert h.tts.spoken_event.wait(timeout=5.0)

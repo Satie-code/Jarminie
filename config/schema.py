@@ -222,9 +222,20 @@ class ModelConfig:
     Passed as Whisper's own initial_prompt parameter, a standard technique
     for biasing transcription toward specific vocabulary the model
     wouldn't otherwise favor.
+
+    ollama_model changed from "gemma3" (its original Sprint 1.2 value) to
+    "llama3" during Sprint 3.14 — "gemma3" was never actually pulled on
+    this project's own development machine, only "llama3:latest" was;
+    every real-Ollama verification since Sprint 3.7 had to pass
+    ollama_model="llama3" explicitly to work at all. Changed only after
+    explicit user confirmation (the same "ask before changing a config
+    default that later sprints assume" pattern as the wake-phrase and
+    TTS-voice-ID defaults) once Sprint 3.14's real-model verification
+    pass confirmed llama3 classifies real conversational input
+    correctly. See docs/backlog/technical_debt.md item 16.
     """
 
-    ollama_model: str = "gemma3"
+    ollama_model: str = "llama3"
     ollama_host: str = "http://localhost:11434"
     ollama_timeout_seconds: float = 10.0
     whisper_model: str = "base"

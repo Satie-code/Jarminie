@@ -121,7 +121,16 @@ class MemoryLifecycleManager:
         cleanup_grace_period_days. A single record's failure is caught,
         logged, and recorded in errors — the pass continues (Fail
         Gracefully at the per-record level, mirroring
-        CoreManager.restart_module()'s isolation, Sprint 1.5)."""
+        CoreManager.restart_module()'s isolation, Sprint 1.5).
+
+        Sprint 3.13 (Error Handling & Recovery Hardening) scenario (d)
+        asked for the regression test proving this per-record isolation
+        under a real induced failure — tests/unit/memory/test_lifecycle_
+        manager.py's test_one_record_scoring_failure_does_not_abort_the_
+        rest_of_the_pass (using a real _ScoreRaisingConfidenceScorer local
+        double) already covers this exactly, added during this class's
+        own Sprint 3.6 implementation rather than deferred. No new test
+        or code change was needed for this scenario."""
         report = CleanupReport()
         now = datetime.now(UTC)
         for memory_type in _ALL_MEMORY_TYPES:

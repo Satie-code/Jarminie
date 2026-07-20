@@ -128,6 +128,41 @@ def test_none_category_falls_back_to_default_weight(memory_config):
     scorer.score(with_category)
 
 
+# --- Sprint 3.13 hardening (scenario c): edge cases --------------------------
+
+
+def test_zero_elapsed_time_since_last_accessed_does_not_raise(scorer):
+    """last_accessed_at == now (effectively created_at == last_accessed_at
+    for a freshly-created record) must not divide by zero in the recency
+    decay curve — elapsed_days == 0 should just mean "no decay yet"
+    (recency_factor == 1.0), not an error."""
+    now = datetime.now(UTC)
+    record = make_record(created_at=now, last_accessed_at=now, access_count=0)
+
+    score = scorer.score(record)
+
+    assert score == score  # not NaN
+    assert 0.0 <= score <= 100.0
+
+
+def test_access_count_zero_produces_a_valid_low_frequency_term(scorer):
+    """A freshly-created, never-yet-read record (access_count=0) must
+    score without error, with frequency_factor == 0/(0+1) == 0 — the
+    lowest possible frequency contribution, not a crash."""
+    record = make_record(access_count=0)
+
+    score = scorer.score(record)
+
+    assert score == score  # not NaN
+    assert 0.0 <= score <= 100.0
+
+
+# recency_half_life_days appears only in score()'s denominator — the real
+# zero-division risk this scenario guards against lives at the config
+# layer, already covered by test_non_positive_recency_half_life_raises()
+# further below, not by a MemoryRecord's own fields.
+
+
 # --- User override short-circuit -----------------------------------------
 
 

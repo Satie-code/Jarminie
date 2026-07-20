@@ -3,6 +3,7 @@
 import itertools
 import logging
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -253,6 +254,69 @@ def test_health_check_warns_but_still_true_with_non_empty_whitelist(caplog):
 def test_start_and_stop_do_not_raise(evaluator):
     evaluator.start()
     evaluator.stop()
+
+
+# --- Sprint 3.13 hardening (scenario e): fail safe-down, never safe-up -------------
+
+
+def test_internal_exception_degrades_to_safe_default_inform(evaluator, caplog):
+    """An unexpected internal failure (simulated here via a raising
+    _determine_engine(), the same "patch one internal method to raise"
+    technique already established for AuthorityEvaluator's own
+    collaborators elsewhere in this project) must resolve to the lowest,
+    safest AuthorityLevel/EngineSelection pair — never propagate, and
+    never default to anything more permissive."""
+    with patch.object(
+        AuthorityEvaluator, "_determine_engine", side_effect=RuntimeError("boom")
+    ), caplog.at_level(logging.ERROR):
+        trace = evaluator.evaluate(
+            make_intent(IntentCategory.EMERGENCY),
+            make_context_analysis(),
+            [],
+            PriorityLevel.CRITICAL_EMERGENCY,
+        )
+
+    assert trace.authority_level is AuthorityLevel.INFORM
+    assert trace.selected_engine is EngineSelection.INFORM_ONLY
+    assert "internal error" in trace.reasoning_text
+    assert any("failed internally" in record.message for record in caplog.records)
+
+
+def test_internal_exception_still_returns_every_other_trace_field(evaluator):
+    """The safe-default path must not silently drop the rest of the
+    DecisionTrace's contract — callers downstream (CommunicationPipeline,
+    Persona.compose_reply()) still need intent/context_analysis/
+    retrieved_memories/priority_level/decided_at populated."""
+    intent = make_intent(IntentCategory.MEMORY_RECALL)
+    context = make_context_analysis(primary_topic="a topic")
+    memories = [make_retrieved_memory()]
+
+    with patch.object(AuthorityEvaluator, "_determine_authority", side_effect=RuntimeError("x")):
+        trace = evaluator.evaluate(intent, context, memories, PriorityLevel.WELLNESS)
+
+    assert trace.intent is intent
+    assert trace.context_analysis is context
+    assert trace.retrieved_memories is memories
+    assert trace.priority_level is PriorityLevel.WELLNESS
+    assert trace.decided_at is not None
+
+
+def test_internal_exception_in_reasoning_builder_also_degrades_safely(evaluator):
+    """A failure in the reasoning-text builder (called last, after
+    authority/engine are already determined) must still discard whatever
+    authority_level/selected_engine were computed and fall back to the
+    safe default — a partial success must not leak a more permissive
+    level than the safe default allows."""
+    with patch("decision.authority._build_reasoning", side_effect=RuntimeError("boom")):
+        trace = evaluator.evaluate(
+            make_intent(IntentCategory.ACTION_REQUEST),
+            make_context_analysis(),
+            [],
+            PriorityLevel.GENERAL_SUGGESTION,
+        )
+
+    assert trace.authority_level is AuthorityLevel.INFORM
+    assert trace.selected_engine is EngineSelection.INFORM_ONLY
 
 
 # --- DecisionTrace shape -----------------------------------------------------------

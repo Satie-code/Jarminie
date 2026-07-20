@@ -13,13 +13,18 @@ voice:
   # user-confirmed by ear 2026-07-17 — see backlog/technical_debt.md item 7.
   jarvis_voice_id: "p340"
   minie_voice_id: "p243"
-  # Sprint 2.11 — Persona Switching's Explicit Selection input.
+  # Sprint 2.11 — Persona Switching's Explicit Selection input. Each
+  # list includes the bare persona name itself ("jarvis"/"minie") as a
+  # short-form trigger, not just full phrases like "talk to jarvis" —
+  # added 2026-07-20 at the user's explicit request.
   jarvis_trigger_phrases:
+    - "jarvis"
     - "talk to jarvis"
     - "switch to jarvis"
   # Includes "my knee"/"minnie" mishearing variants — see
   # backlog/technical_debt.md item 12.
   minie_trigger_phrases:
+    - "minie"
     - "talk to minie"
     - "switch to minie"
     - "talk to minnie"
@@ -132,3 +137,27 @@ logging:
 
 ui:
   status_refresh_interval_ms: 3000
+
+device_control:
+  # Sprint 4.2 — Application Manager. null means no allowlist
+  # restriction — present but NOT YET ENFORCED, see config/schema.py's
+  # DeviceControlConfig docstring; Sprint 4.7 (Permission & Confirmation
+  # System) is what makes this a real, enforced policy.
+  application_allowlist: null
+  max_tracked_applications: 50
+  # Sprint 4.3 — File & Folder Operations. allowed_file_roots is
+  # deliberately NOT set here: this file is checked into git and shared
+  # across every installation, so a real per-machine default (the
+  # current user's Documents/Desktop/Downloads via Path.home()) is
+  # computed instead — see config/schema.py's
+  # DeviceControlConfig._default_allowed_file_roots. Override in
+  # config/local.yaml (gitignored) to restrict further.
+  use_recycle_bin_for_delete: true
+  # Sprint 4.4 — Window Management.
+  window_operation_timeout_seconds: 5.0
+  # Sprint 4.5 — Command Execution Engine. Default-deny allowlist,
+  # deliberately empty: this executor is fully inert until deliberately
+  # populated — see config/schema.py's DeviceControlConfig docstring.
+  # Sprint 4.7 owns actually populating this for real.
+  approved_commands: []
+  command_timeout_seconds: 30.0

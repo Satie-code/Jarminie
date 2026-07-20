@@ -6,6 +6,7 @@ from config.errors import ConfigError
 from config.schema import (
     AppConfig,
     DatabaseConfig,
+    DeviceControlConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
@@ -237,3 +238,42 @@ def test_blank_short_term_salience_trigger_raises():
 
 def test_status_refresh_interval_within_range_is_valid():
     AppConfig(ui=UIConfig(status_refresh_interval_ms=3000)).validate()
+
+
+def test_non_positive_max_tracked_applications_raises():
+    config = AppConfig(device_control=DeviceControlConfig(max_tracked_applications=0))
+    with pytest.raises(ConfigError, match="max_tracked_applications"):
+        config.validate()
+
+
+def test_none_application_allowlist_is_valid():
+    AppConfig(device_control=DeviceControlConfig(application_allowlist=None)).validate()
+
+
+def test_blank_application_allowlist_entry_raises():
+    config = AppConfig(
+        device_control=DeviceControlConfig(application_allowlist=["notepad.exe", "  "])
+    )
+    with pytest.raises(ConfigError, match="application_allowlist"):
+        config.validate()
+
+
+def test_default_allowed_file_roots_is_non_empty_and_valid():
+    """The computed default (Path.home()-based) must itself pass
+    validation -- not just a hand-constructed override."""
+    AppConfig().validate()
+    assert AppConfig().device_control.allowed_file_roots
+
+
+def test_empty_allowed_file_roots_raises():
+    config = AppConfig(device_control=DeviceControlConfig(allowed_file_roots=[]))
+    with pytest.raises(ConfigError, match="allowed_file_roots"):
+        config.validate()
+
+
+def test_blank_allowed_file_roots_entry_raises():
+    config = AppConfig(
+        device_control=DeviceControlConfig(allowed_file_roots=["C:/Users/test/Documents", "  "])
+    )
+    with pytest.raises(ConfigError, match="allowed_file_roots"):
+        config.validate()

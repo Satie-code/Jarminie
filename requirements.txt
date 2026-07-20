@@ -38,3 +38,9 @@ APScheduler>=3.10
 # Phase 4.1 — Device Control (full Resource Protection throttling; psutil itself moved up to Sprint 1.4)
 pyautogui>=0.9
 pywin32>=306; sys_platform == "win32"
+
+# Sprint 4.3 — File & Folder Operations. Recycle-bin-based delete (never a
+# permanent os.remove/shutil.rmtree call) — not in Part 3's original stack
+# list, added here per docs/backlog/technical_debt.md's tracked-dependency
+# convention (same treatment as item 3's coqui-tts naming correction).
+Send2Trash>=1.8

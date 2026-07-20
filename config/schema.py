@@ -6,6 +6,7 @@ growth in later sprints/levels stays scoped to whichever subsystem owns it
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from config.errors import ConfigError
 
@@ -53,6 +54,9 @@ class VoiceConfig:
     minie_voice_id: str = "p243"
     # Sprint 2.11 — Persona Switching's Explicit Selection input (matched
     # case-insensitively as plain substrings by PersonaManager; no NLU).
+    # Each list includes the bare persona name itself ("jarvis"/"minie")
+    # as a short-form trigger, not just full phrases like "talk to
+    # jarvis" — added 2026-07-20 at the user's explicit request.
     # minie_trigger_phrases includes "my knee"/"minnie" variants — a
     # post-release fix (backlog/technical_debt.md item 12): Whisper's
     # "base" model, even with whisper_initial_prompt's vocabulary hint,
@@ -61,10 +65,11 @@ class VoiceConfig:
     # knee". This is a pragmatic safety net, not NLU — still exact
     # substring matching against known mishearings, no fuzzy logic.
     jarvis_trigger_phrases: list[str] = field(
-        default_factory=lambda: ["talk to jarvis", "switch to jarvis"]
+        default_factory=lambda: ["jarvis", "talk to jarvis", "switch to jarvis"]
     )
     minie_trigger_phrases: list[str] = field(
         default_factory=lambda: [
+            "minie",
             "talk to minie",
             "switch to minie",
             "talk to minnie",
@@ -267,6 +272,80 @@ class UIConfig:
     status_refresh_interval_ms: int = 3000
 
 
+def _default_allowed_file_roots() -> list[str]:
+    """Computed per-machine at construction time via Path.home() —
+    never hardcoded into defaults.yaml, which is checked into git and
+    shared across every installation (a specific developer's
+    C:\\Users\\<name>\\... path has no business being a shipped
+    default). The current user's Documents/Desktop/Downloads folders —
+    a real, usable default rather than an empty allowlist that would
+    leave FileOperationsManager (Sprint 4.3) permanently non-functional
+    out of the box."""
+    home = Path.home()
+    return [str(home / "Documents"), str(home / "Desktop"), str(home / "Downloads")]
+
+
+@dataclass
+class DeviceControlConfig:
+    """Device Control Engine settings (Sprint 4.1+).
+
+    Sprint 4.1 (Action Engine Foundation) registered this section as an
+    empty placeholder. Sprint 4.2 (Application Manager) added
+    application_allowlist/max_tracked_applications. Sprint 4.3 (File &
+    Folder Operations) adds allowed_file_roots/use_recycle_bin_for_delete.
+    Sprint 4.4 (Window Management) adds window_operation_timeout_seconds.
+    Sprint 4.5 (Command Execution Engine) adds
+    approved_commands/command_timeout_seconds, below. Still ahead:
+    Sprint 4.6 (System Monitoring, Action-Aware)
+    resource_gate_action_types — see each sprint's own Files to Modify.
+
+    application_allowlist is present but NOT YET ENFORCED —
+    security/permission_gate.py's PermissionGate.check() is still
+    Sprint 4.1's own unconditional-ALLOW stub and does not consult this
+    field at all. Sprint 4.7 (Permission & Confirmation System) is what
+    makes it a real, enforced policy — the same "field present, policy
+    arrives later" discipline this project already uses for
+    AuthorityEvaluator.approved_emergency_procedures (Sprint 3.11).
+    None (the default) means no allowlist restriction.
+
+    allowed_file_roots IS enforced from Sprint 4.3 onward —
+    FileOperationsManager refuses to touch any path that doesn't
+    resolve inside one of these roots, structurally, with no override.
+    use_recycle_bin_for_delete is present for transparency, not as a
+    safe way to disable recycle-bin recovery: FileOperationsManager.delete()
+    has no permanent-delete fallback — setting this False makes delete()
+    refuse to run at all, loudly, rather than silently downgrading
+    safety. See device_control/file_operations.py's own docstring.
+
+    window_operation_timeout_seconds bounds every WindowManager (Sprint
+    4.4) native call — a real Windows API call (SetForegroundWindow,
+    MoveWindow, ShowWindow) can block on an unresponsive window's own
+    message queue; this is the ceiling WindowManager waits before
+    treating that call as failed rather than blocking indefinitely.
+
+    approved_commands is a default-deny allowlist for
+    CommandExecutionEngine (Sprint 4.5), matched against a command's
+    executable name (basename only, case-insensitive) — never the full
+    command line. Ships empty: this executor can construct and
+    validate a request but can never actually run a real command until
+    the list is deliberately populated, mirroring
+    AuthorityEvaluator.approved_emergency_procedures's own
+    "structurally unreachable by design, not an oversight" treatment
+    (Sprint 3.11). Populating it for real is Sprint 4.7's job.
+    command_timeout_seconds bounds every subprocess CommandExecutionEngine
+    runs — a command that exceeds it is terminated and reported with
+    CommandResult.timed_out=True, never left to hang the calling thread.
+    """
+
+    application_allowlist: list[str] | None = None
+    max_tracked_applications: int = 50
+    allowed_file_roots: list[str] = field(default_factory=_default_allowed_file_roots)
+    use_recycle_bin_for_delete: bool = True
+    window_operation_timeout_seconds: float = 5.0
+    approved_commands: list[str] = field(default_factory=list)
+    command_timeout_seconds: float = 30.0
+
+
 @dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
@@ -279,6 +358,7 @@ class AppConfig:
     models: ModelConfig = field(default_factory=ModelConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
+    device_control: DeviceControlConfig = field(default_factory=DeviceControlConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -289,6 +369,7 @@ class AppConfig:
         self._validate_ui()
         self._validate_paths()
         self._validate_memory()
+        self._validate_device_control()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -479,4 +560,37 @@ class AppConfig:
             raise ConfigError(
                 "memory.max_retrieval_results must be positive, "
                 f"got {self.memory.max_retrieval_results}"
+            )
+
+    def _validate_device_control(self) -> None:
+        if self.device_control.max_tracked_applications <= 0:
+            raise ConfigError(
+                "device_control.max_tracked_applications must be positive, "
+                f"got {self.device_control.max_tracked_applications}"
+            )
+        if self.device_control.application_allowlist is not None:
+            for name in self.device_control.application_allowlist:
+                if not name or not name.strip():
+                    raise ConfigError(
+                        "device_control.application_allowlist must not contain empty strings"
+                    )
+        if not self.device_control.allowed_file_roots:
+            raise ConfigError("device_control.allowed_file_roots must not be empty")
+        for root in self.device_control.allowed_file_roots:
+            if not root or not root.strip():
+                raise ConfigError(
+                    "device_control.allowed_file_roots must not contain empty strings"
+                )
+        if self.device_control.window_operation_timeout_seconds <= 0:
+            raise ConfigError(
+                "device_control.window_operation_timeout_seconds must be positive, "
+                f"got {self.device_control.window_operation_timeout_seconds}"
+            )
+        for name in self.device_control.approved_commands:
+            if not name or not name.strip():
+                raise ConfigError("device_control.approved_commands must not contain empty strings")
+        if self.device_control.command_timeout_seconds <= 0:
+            raise ConfigError(
+                "device_control.command_timeout_seconds must be positive, "
+                f"got {self.device_control.command_timeout_seconds}"
             )

@@ -5,7 +5,7 @@ import yaml
 
 from config.errors import ConfigError
 from config.loader import ConfigLoader
-from config.schema import AppConfig
+from config.schema import AppConfig, DeviceControlConfig
 
 
 @pytest.fixture
@@ -166,3 +166,23 @@ def test_ui_env_override_applies(defaults_file, tmp_path):
     config = loader.load()
 
     assert config.ui.status_refresh_interval_ms == 9000
+
+
+def test_device_control_section_loads_with_no_errors(defaults_file, tmp_path):
+    """Sprint 4.1 — Action Engine Foundation. device_control: is absent
+    from this test's own minimal defaults_file fixture (like memory/
+    models/database above), proving the section still resolves to a
+    valid, empty DeviceControlConfig by default rather than raising."""
+    loader = ConfigLoader(
+        defaults_path=defaults_file, local_path=tmp_path / "missing.yaml", env={}
+    )
+    config = loader.load()
+    assert config.device_control == DeviceControlConfig()
+
+
+def test_real_shipped_defaults_yaml_loads_device_control_section():
+    """Loads the actual, checked-in config/defaults.yaml (not a test
+    fixture) — proves the real shipped file's device_control: section
+    parses and validates, not just a synthetic minimal one."""
+    config = ConfigLoader().load()
+    assert isinstance(config.device_control, DeviceControlConfig)

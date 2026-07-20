@@ -40,12 +40,21 @@ Tracks progress against the roadmap in [04_Master_Implementation_Plan.md](04_Mas
 
 ## Level 4 — Productivity (target: v0.4)
 
-| Phase | Status |
-|---|---|
-| 4.1 Device Control | Planned |
-| 4.2 Workflow Engine | Planned |
-| 4.3 Scheduler | Planned |
-| 4.4 Internet Agent | Planned |
+Delivered as two Sprint Books — see [sprint_book/INDEX.md](sprint_book/INDEX.md)'s "Level 4 breakdown changes (2026-07-20)" note. **`v0.4` ("Complete productivity assistant," per [04_Master_Implementation_Plan.md](04_Master_Implementation_Plan.md)) is not tagged until both parts below reach `Complete`** — this is not a redefinition of what `v0.4` means, only a two-stage delivery of it.
+
+### Part A — Device Control & Workflow Automation
+
+| Phase | Status | Notes |
+|---|---|---|
+| 4.1 Device Control | Developing | Full Sprint Book written 2026-07-20 (sprints 4.1–4.8: Action Engine Foundation, Application Manager, File & Folder Operations, Window Management, Command Execution Engine, System Monitoring & Resource Protection (Action-Aware), Permission & Confirmation System, Action Logging & Recovery) — see [sprint_book/INDEX.md](sprint_book/INDEX.md). **Sprint 4.1 (Action Engine Foundation) implemented 2026-07-20** — `device_control/action_engine.py`'s `ActionRegistry`/`ActionExecutor`/`ActionRequest`/`ActionResult`/`ActionContext` and `security/permission_gate.py`'s `PermissionGate` (a real, honestly-thin, always-`ALLOW` stub per this sprint's own design) are in place, config-wired (`DeviceControlConfig`), and unit-tested. **Sprint 4.2 (Application Manager) implemented 2026-07-20** — `device_control/application_manager.py`'s `ApplicationManager` is Level 4's first real `ActionExecutor`: launch/close/focus/list for applications this manager itself tracked, with a hard "never touch a process it didn't launch" boundary; `pywin32` installed for real window-focus support. **Sprint 4.3 (File & Folder Operations) implemented 2026-07-20** — `device_control/file_operations.py`'s `FileOperationsManager` handles create/move/copy/rename/delete for files and folders, with two hard structural invariants: every target path must resolve inside a configured `allowed_file_roots` entry (verified against real symlink/junction escape attempts, not just prose), and `delete()` always routes through the OS recycle bin (`Send2Trash`) with no permanent-delete fallback — a disabled safety net makes `delete()` refuse to run at all rather than silently downgrading. **Sprint 4.4 (Window Management) implemented 2026-07-20** — `device_control/window_manager.py`'s `WindowManager` is Level 4's third real `ActionExecutor`: enumerate/focus/move/resize/minimize/maximize/close for any visible window, always resolved to a real, stable `HWND` before an operation runs (never fragile title-only matching), bounded by a new `window_operation_timeout_seconds` config field since a native call can otherwise block on an unresponsive window's own message queue. Every native call is honestly reported — `SetForegroundWindow`'s "success" is re-verified via `GetForegroundWindow()` (Windows' own focus-stealing restriction can silently no-op it) and `WINDOW_CLOSE`'s `SUCCEEDED` means "the close message was sent," not "the window is confirmed gone." **Sprint 4.5 (Command Execution Engine) implemented 2026-07-20** — `device_control/command_executor.py`'s `CommandExecutionEngine` is Level 4's fourth real `ActionExecutor` and the highest-risk one in Part A: runs an approved system command as a subprocess with a bounded timeout and captured stdout/stderr/exit code. Ships with a default-deny allowlist (`DeviceControlConfig.approved_commands`, empty by default — this executor is fully inert until Sprint 4.7 deliberately populates it, mirroring `AuthorityEvaluator.approved_emergency_procedures`'s own treatment) checked against the executable's basename only, and `shell=False`/argv-list-only as a hard, non-configurable invariant closing the standard shell-injection vector by construction — verified against a real subprocess with a shell-metacharacter-laden argument, not just asserted in prose. 729/729 full-suite tests passing (one pre-existing, timing-sensitive `test_full_level3_acceptance_scripted_conversation` flake under full-suite system load, confirmed passing standalone — same known flake class as the Level 2 acceptance test), `ruff check .` clean. Neither Sprint 4.1–4.4 nor 4.5 is yet wired into `main.py`/`CoreManager` — no live caller exists until Sprint 4.11. Sprints 4.6–4.8 remain not yet implemented. |
+| 4.2 Workflow Engine | Designing | Full Sprint Book written 2026-07-20 (sprints 4.9–4.10: Workflow Builder, Workflow Executor), plus cross-cutting integration/hardening/freeze sprints (4.11–4.13) closing Part A as a whole. Not yet implemented. |
+
+### Part B — Scheduler & Internet Agent (deferred)
+
+| Phase | Status | Notes |
+|---|---|---|
+| 4.3 Scheduler | Planned | Roadmap granularity only (sprints 4.14–4.15 in [sprint_book/INDEX.md](sprint_book/INDEX.md)) — full detail deferred to a future Sprint Book, per this project's established "expand when current" practice. |
+| 4.4 Internet Agent | Planned | Roadmap granularity only (sprints 4.16–4.17), same deferral. |
 
 ## Level 5 — Companion (target: v0.5)
 

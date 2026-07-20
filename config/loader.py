@@ -17,6 +17,7 @@ from config.errors import ConfigError
 from config.schema import (
     AppConfig,
     DatabaseConfig,
+    DeviceControlConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
@@ -43,6 +44,7 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "models": ModelConfig,
     "logging": LoggingConfig,
     "ui": UIConfig,
+    "device_control": DeviceControlConfig,
 }
 
 

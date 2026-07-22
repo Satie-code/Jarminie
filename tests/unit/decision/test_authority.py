@@ -15,16 +15,23 @@ from memory.models import MemoryRecord, MemoryType
 from memory.retrieval_engine import RetrievedMemory
 
 
-def make_intent(category: IntentCategory = IntentCategory.INFORMATIONAL) -> Intent:
+def make_intent(
+    category: IntentCategory = IntentCategory.INFORMATIONAL, raw_transcript: str = "x"
+) -> Intent:
     return Intent(
-        category=category, confidence=0.9, raw_transcript="x", detected_at=datetime.now(UTC)
+        category=category,
+        confidence=0.9,
+        raw_transcript=raw_transcript,
+        detected_at=datetime.now(UTC),
     )
 
 
-def make_context_analysis(primary_topic: str = "") -> ContextAnalysis:
+def make_context_analysis(
+    primary_topic: str = "", mentioned_entities: list[str] | None = None
+) -> ContextAnalysis:
     return ContextAnalysis(
         primary_topic=primary_topic,
-        mentioned_entities=[],
+        mentioned_entities=mentioned_entities if mentioned_entities is not None else [],
         references_past_memory=False,
         suggested_persona=None,
         sentiment_hint=SentimentHint.NEUTRAL,
@@ -124,6 +131,11 @@ def test_other_categories_are_inform(evaluator, category):
 
 
 def test_selected_engine_is_always_conversational_or_inform_only(evaluator):
+    """True given make_context_analysis()'s default empty
+    mentioned_entities — an ACTION_REQUEST with a real, named target now
+    genuinely selects DEVICE_CONTROL/WORKFLOW instead (Sprint 4.11), see
+    the dedicated tests below; this test only covers the "no resolvable
+    target" case, across every category."""
     for category in IntentCategory:
         trace = evaluator.evaluate(
             make_intent(category), make_context_analysis(), [], PriorityLevel.GENERAL_SUGGESTION
@@ -164,6 +176,55 @@ def test_informational_intent_selects_inform_only(evaluator):
         PriorityLevel.GENERAL_SUGGESTION,
     )
     assert trace.selected_engine is EngineSelection.INFORM_ONLY
+
+
+# --- Sprint 4.11: real DEVICE_CONTROL/WORKFLOW routing -------------------------
+
+
+def test_action_request_with_a_named_entity_selects_device_control(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="open notepad"),
+        make_context_analysis(mentioned_entities=["notepad"]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.DEVICE_CONTROL
+    assert "device control" in trace.reasoning_text.lower()
+
+
+def test_action_request_with_workflow_keyword_selects_workflow(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="run my morning routine"),
+        make_context_analysis(mentioned_entities=["morning routine"]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.WORKFLOW
+    assert "workflow" in trace.reasoning_text.lower()
+
+
+def test_action_request_with_entity_and_explicit_workflow_word_selects_workflow(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="run the backup workflow"),
+        make_context_analysis(mentioned_entities=["backup"]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.WORKFLOW
+
+
+def test_action_request_with_no_entities_still_falls_back_conversationally(evaluator):
+    """No concrete target (empty mentioned_entities) must never guess —
+    same fallback as before this sprint, just with updated wording since
+    Device Control is now real rather than merely inferred-future."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="do the thing"),
+        make_context_analysis(mentioned_entities=[]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.CONVERSATIONAL_RESPONSE
+    assert "couldn't identify a specific target" in trace.reasoning_text
 
 
 # --- reasoning_text -------------------------------------------------------------

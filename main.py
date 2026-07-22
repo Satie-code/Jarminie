@@ -3,8 +3,9 @@
 Constructs concrete subsystem instances and wires them together via
 dependency injection; no other file in the codebase should construct
 these directly. See docs/sprint_book/sprint_1_5.md, sprint_1_6.md,
-sprint_2_12.md (Level 2's Communication Pipeline Integration), and
-sprint_3_12.md (Level 3's Decision Engine Integration).
+sprint_2_12.md (Level 2's Communication Pipeline Integration),
+sprint_3_12.md (Level 3's Decision Engine Integration), and
+sprint_4_11.md (Level 4 Part A's Workflow & Device Control Integration).
 
 Startup happens inside ui.app.run_app(); shutdown happens inside
 MainWindow.closeEvent() when the user closes the window — the Qt event
@@ -25,6 +26,13 @@ from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.llm_client import OllamaClient
 from decision.priority_queue import PriorityQueueManager
+from device_control.action_engine import ActionRegistry
+from device_control.action_log import ActionAuditLog, ActionRecoveryManager
+from device_control.application_manager import ApplicationManager
+from device_control.command_executor import CommandExecutionEngine
+from device_control.file_operations import FileOperationsManager
+from device_control.resource_gate import ActionResourceGate
+from device_control.window_manager import WindowManager
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -36,6 +44,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from security.confirmation_service import VoiceConfirmationService
+from security.permission_gate import PermissionGate
+from security.policy_engine import PermissionPolicyEngine
 from ui.app import run_app
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
@@ -46,6 +57,34 @@ from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import WhisperSpeechToText
 from voice.text_to_speech import CoquiTextToSpeech, SoundDeviceAudioOutput
 from voice.wake_word import OpenWakeWordEngine, WakeWordDetector
+from workflow.workflow_executor import WorkflowExecutor
+from workflow.workflow_store import WorkflowStore
+
+
+@dataclass
+class _Level2Modules:
+    """Bundles every Level 2 (Communication) object except
+    CommunicationPipeline itself — CommunicationPipeline additionally
+    needs level3_modules/level4_modules (both constructed after this
+    bundle), so it's built separately by _construct_pipeline() once all
+    three levels' prerequisite objects exist. session_manager/
+    persona_manager are the two objects Level 4's VoiceConfirmationService
+    (Sprint 4.7/4.11) needs — the first Level 4 dependency on already-
+    built Level 2 objects, which is why level4_modules is constructed
+    after this bundle, not before it (the reverse of Level 3's own
+    construct-before-Level-2 ordering)."""
+
+    mic: MicrophoneManager
+    stt: WhisperSpeechToText
+    tts: CoquiTextToSpeech
+    conversation_store: ConversationSessionStore
+    context_manager: ContextManager
+    persona_manager: PersonaManager
+    session_manager: VoiceSessionManager
+    quiet_mode_controller: QuietModeController
+    wake_word_detector: WakeWordDetector
+    turn_complete_relay: CallbackRelay
+    session_ended_relay: CallbackRelay
 
 
 @dataclass
@@ -67,6 +106,28 @@ class _Level3Modules:
     memory_store: MemoryStore
 
 
+@dataclass
+class _Level4Modules:
+    """Bundles every Level 4 Part A (Device Control & Workflow
+    Automation) object CommunicationPipeline or CoreManager registration
+    needs. permission_gate/policy_engine/confirmation_service/
+    resource_gate and all four executors are constructed inside
+    _construct_level4_modules() but not returned here — nothing outside
+    that function references them directly; they're reached only through
+    action_registry.dispatch(). action_recovery_manager IS kept here even
+    though nothing calls it yet (backlog/technical_debt.md item 24: a
+    voice-triggered "undo that" surface is real, wanted functionality,
+    explicitly out of this Sprint Book's own scope until a future sprint
+    names it) — constructed per this sprint's own Files to Modify, ready
+    for that future caller."""
+
+    action_registry: ActionRegistry
+    action_audit_log: ActionAuditLog
+    action_recovery_manager: ActionRecoveryManager
+    workflow_store: WorkflowStore
+    workflow_executor: WorkflowExecutor
+
+
 def main() -> int:
     config_loader = ConfigLoader()
     config = config_loader.load()
@@ -75,43 +136,38 @@ def main() -> int:
     resource_monitor = ResourceMonitor(config.resources)
     core_manager = CoreManager(config, resource_monitor, config_loader)
 
-    # Level 3 objects are CONSTRUCTED before Level 2's registration (so
-    # CommunicationPipeline's constructor can receive them), but Level 3's
-    # own ManagedModules are not REGISTERED (and therefore not started)
-    # until after every Level 2 module is registered — see
-    # _register_level3_modules()'s own docstring for why this ordering,
-    # not just construction order, matters.
+    # Construction order: Level 3 first (no dependency on Level 2/4),
+    # then Level 2 (VoiceConfirmationService, built inside Level 4,
+    # needs its session_manager/persona_manager), then Level 4 (needs
+    # both Level 2 and Level 3 objects), then the pipeline itself (needs
+    # all three). Registration order is intentionally different — see
+    # _register_level3_modules()'s and _register_level4_modules()'s own
+    # docstrings for why Level 3 and Level 4 are both registered AFTER
+    # communication_pipeline, keeping the wake_word_detector-to-pipeline
+    # relay-wiring gap as tight as it was before either existed.
     level3_modules = _construct_level3_modules(config, resource_monitor)
-    _register_level2_modules(core_manager, config, level3_modules)
+    level2_modules = _construct_level2_modules(config)
+    level4_modules = _construct_level4_modules(
+        config, resource_monitor, level3_modules, level2_modules
+    )
+    pipeline = _construct_pipeline(level2_modules, level3_modules, level4_modules)
+
+    _register_level2_modules(core_manager, level2_modules, pipeline)
     _register_level3_modules(core_manager, level3_modules)
+    _register_level4_modules(core_manager, level4_modules)
 
     return run_app(core_manager)
 
 
-def _register_level2_modules(
-    core_manager: CoreManager, config: AppConfig, level3_modules: _Level3Modules
-) -> None:
-    """Construct every Level 2 (Communication) subsystem via DI and
-    register each ManagedModule with core_manager, in an order that
-    satisfies two kinds of dependency: real object-graph construction
-    order (a class needs its dependencies to already exist), and
-    CoreManager's own start()-in-registration-order contract (mic must be
-    registered, and therefore started, before wake_word_detector — the
-    only real start()-time ordering constraint across all of Level 2; see
-    docs/sprint_book/sprint_2_12.md's Sprint Completion Report for why the
-    rest of the graph has none).
-
-    VoiceSessionManager.on_turn_complete/on_session_ended cannot yet point
-    at their real targets when VoiceSessionManager itself is constructed
-    (QuietModeController and CommunicationPipeline, which own those
-    targets, are built later in this same function) — CallbackRelay
-    (voice/pipeline.py) stands in for both until CommunicationPipeline's
-    own start() aims them at the real methods.
-
-    level3_modules (Sprint 3.12) is built by _register_level3_modules()
-    first (see main()) and threaded through here purely because
-    CommunicationPipeline — constructed in this function — is the one
-    object that needs both Level 2 and Level 3 collaborators at once.
+def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
+    """Construct every Level 2 (Communication) subsystem via DI except
+    CommunicationPipeline itself — see _Level2Modules' own docstring for
+    why. VoiceSessionManager.on_turn_complete/on_session_ended cannot yet
+    point at their real targets when VoiceSessionManager itself is
+    constructed (QuietModeController and CommunicationPipeline, which own
+    those targets, are built later) — CallbackRelay (voice/pipeline.py)
+    stands in for both until CommunicationPipeline's own start() aims
+    them at the real methods.
     """
     voice_config = config.voice
     model_config = config.models
@@ -141,35 +197,19 @@ def _register_level2_modules(
         mic, wake_word_engine, quiet_mode_controller._on_wake_word_detected
     )
 
-    pipeline = CommunicationPipeline(
+    return _Level2Modules(
         mic=mic,
-        wake_word_detector=wake_word_detector,
-        session_manager=session_manager,
-        quiet_mode_controller=quiet_mode_controller,
+        stt=stt,
+        tts=tts,
         conversation_store=conversation_store,
         context_manager=context_manager,
         persona_manager=persona_manager,
+        session_manager=session_manager,
+        quiet_mode_controller=quiet_mode_controller,
+        wake_word_detector=wake_word_detector,
         turn_complete_relay=turn_complete_relay,
         session_ended_relay=session_ended_relay,
-        intent_detector=level3_modules.intent_detector,
-        context_analyzer=level3_modules.context_analyzer,
-        memory_retrieval_engine=level3_modules.memory_retrieval_engine,
-        priority_queue_manager=level3_modules.priority_queue_manager,
-        authority_evaluator=level3_modules.authority_evaluator,
-        short_term_memory=level3_modules.short_term_memory,
-        confidence_scorer=level3_modules.confidence_scorer,
-        memory_lifecycle_manager=level3_modules.memory_lifecycle_manager,
     )
-
-    core_manager.register_module("microphone", mic)
-    core_manager.register_module("speech_to_text", stt)
-    core_manager.register_module("text_to_speech", tts)
-    core_manager.register_module("conversation_store", conversation_store)
-    core_manager.register_module("persona_manager", persona_manager)
-    core_manager.register_module("voice_session_manager", session_manager)
-    core_manager.register_module("quiet_mode_controller", quiet_mode_controller)
-    core_manager.register_module("wake_word_detector", wake_word_detector)
-    core_manager.register_module("communication_pipeline", pipeline)
 
 
 def _construct_level3_modules(
@@ -179,9 +219,15 @@ def _construct_level3_modules(
     Engine) subsystem via DI — construction only, no CoreManager
     registration (see _register_level3_modules() below for why the two
     are deliberately separate calls, made at different points in
-    main()). Called before _register_level2_modules() so
-    CommunicationPipeline — built inside that function — can receive the
-    Level 3 objects it needs to hold a reference to.
+    main()). Has no dependency on Level 2 or Level 4, so it's
+    constructed first, before either — CommunicationPipeline (built last,
+    by _construct_pipeline(), once every level's objects exist) is what
+    actually holds the reference to what this function returns.
+    approved_emergency_procedures stays at AuthorityEvaluator's own empty
+    default here — Sprint 4.7 reviewed and deliberately left it empty
+    (see decision/authority.py's own docstring); this sprint does not
+    itself decide the whitelist's contents, per sprint_4_11.md's own
+    Integration Considerations.
     """
     database_config = config.database
     memory_config = config.memory
@@ -220,6 +266,147 @@ def _construct_level3_modules(
         memory_lifecycle_manager=memory_lifecycle_manager,
         memory_store=memory_store,
     )
+
+
+def _construct_level4_modules(
+    config: AppConfig,
+    resource_monitor: ResourceMonitor,
+    level3_modules: _Level3Modules,
+    level2_modules: _Level2Modules,
+) -> _Level4Modules:
+    """Construct every Level 4 Part A (Device Control & Workflow
+    Automation) subsystem via DI — construction only, no CoreManager
+    registration (see _register_level4_modules() below, the same
+    construct/register split _construct_level3_modules()/
+    _register_level3_modules() already established). Needs
+    level2_modules (VoiceConfirmationService depends on session_manager/
+    persona_manager — the first Level 4 dependency on already-built
+    Level 2 objects) and level3_modules (PermissionGate depends on
+    authority_evaluator; ActionResourceGate depends on
+    priority_queue_manager) already constructed, so this runs after
+    both — unlike Level 3, which is constructed before Level 2.
+
+    Every ActionExecutor (ApplicationManager, FileOperationsManager,
+    WindowManager, CommandExecutionEngine) and every non-ManagedModule
+    collaborator (PermissionGate, PermissionPolicyEngine,
+    ConfirmationService, ActionResourceGate, ActionRecoveryManager) is
+    plain and lifecycle-free, per each one's own originating sprint —
+    only ActionAuditLog and WorkflowStore are real ManagedModules among
+    everything constructed here.
+    """
+    device_control_config = config.device_control
+    security_config = config.security
+    workflow_config = config.workflow
+    database_config = config.database
+
+    policy_engine = PermissionPolicyEngine(security_config)
+    confirmation_service = VoiceConfirmationService(
+        level2_modules.session_manager,
+        level2_modules.persona_manager,
+        security_config.confirmation_timeout_seconds,
+    )
+    permission_gate = PermissionGate(
+        level3_modules.authority_evaluator,
+        policy_engine,
+        confirmation_service,
+        device_control_config,
+    )
+    resource_gate = ActionResourceGate(
+        resource_monitor, level3_modules.priority_queue_manager, device_control_config
+    )
+
+    audit_sqlite_client = SqliteClient(database_config.sqlite_path)
+    audit_log = ActionAuditLog(audit_sqlite_client, device_control_config)
+
+    action_registry = ActionRegistry(
+        permission_gate,
+        resource_gate,
+        audit_log,
+        max_retry_attempts=device_control_config.max_retry_attempts,
+    )
+
+    application_manager = ApplicationManager(device_control_config)
+    file_operations_manager = FileOperationsManager(device_control_config)
+    window_manager = WindowManager(device_control_config)
+    command_executor = CommandExecutionEngine(device_control_config)
+    for executor in (
+        application_manager,
+        file_operations_manager,
+        window_manager,
+        command_executor,
+    ):
+        action_registry.register(executor)
+
+    action_recovery_manager = ActionRecoveryManager(
+        audit_log, file_operations_manager, application_manager
+    )
+
+    workflow_sqlite_client = SqliteClient(database_config.sqlite_path)
+    workflow_store = WorkflowStore(workflow_sqlite_client, workflow_config)
+    workflow_executor = WorkflowExecutor(
+        workflow_store, action_registry, policy_engine, confirmation_service, workflow_config
+    )
+
+    return _Level4Modules(
+        action_registry=action_registry,
+        action_audit_log=audit_log,
+        action_recovery_manager=action_recovery_manager,
+        workflow_store=workflow_store,
+        workflow_executor=workflow_executor,
+    )
+
+
+def _construct_pipeline(
+    level2_modules: _Level2Modules,
+    level3_modules: _Level3Modules,
+    level4_modules: _Level4Modules,
+) -> CommunicationPipeline:
+    """Built last, once every level's prerequisite objects exist —
+    CommunicationPipeline is the one object that needs Level 2, 3, AND 4
+    collaborators at once."""
+    return CommunicationPipeline(
+        mic=level2_modules.mic,
+        wake_word_detector=level2_modules.wake_word_detector,
+        session_manager=level2_modules.session_manager,
+        quiet_mode_controller=level2_modules.quiet_mode_controller,
+        conversation_store=level2_modules.conversation_store,
+        context_manager=level2_modules.context_manager,
+        persona_manager=level2_modules.persona_manager,
+        turn_complete_relay=level2_modules.turn_complete_relay,
+        session_ended_relay=level2_modules.session_ended_relay,
+        intent_detector=level3_modules.intent_detector,
+        context_analyzer=level3_modules.context_analyzer,
+        memory_retrieval_engine=level3_modules.memory_retrieval_engine,
+        priority_queue_manager=level3_modules.priority_queue_manager,
+        authority_evaluator=level3_modules.authority_evaluator,
+        short_term_memory=level3_modules.short_term_memory,
+        confidence_scorer=level3_modules.confidence_scorer,
+        memory_lifecycle_manager=level3_modules.memory_lifecycle_manager,
+        action_registry=level4_modules.action_registry,
+        workflow_store=level4_modules.workflow_store,
+        workflow_executor=level4_modules.workflow_executor,
+    )
+
+
+def _register_level2_modules(
+    core_manager: CoreManager, level2_modules: _Level2Modules, pipeline: CommunicationPipeline
+) -> None:
+    """Register every Level 2 ManagedModule plus the pipeline itself, in
+    an order that satisfies CoreManager's own start()-in-registration-
+    order contract (mic must be registered, and therefore started,
+    before wake_word_detector — the only real start()-time ordering
+    constraint across all of Level 2; see
+    docs/sprint_book/sprint_2_12.md's Sprint Completion Report for why
+    the rest of the graph has none)."""
+    core_manager.register_module("microphone", level2_modules.mic)
+    core_manager.register_module("speech_to_text", level2_modules.stt)
+    core_manager.register_module("text_to_speech", level2_modules.tts)
+    core_manager.register_module("conversation_store", level2_modules.conversation_store)
+    core_manager.register_module("persona_manager", level2_modules.persona_manager)
+    core_manager.register_module("voice_session_manager", level2_modules.session_manager)
+    core_manager.register_module("quiet_mode_controller", level2_modules.quiet_mode_controller)
+    core_manager.register_module("wake_word_detector", level2_modules.wake_word_detector)
+    core_manager.register_module("communication_pipeline", pipeline)
 
 
 def _register_level3_modules(core_manager: CoreManager, level3_modules: _Level3Modules) -> None:
@@ -262,6 +449,27 @@ def _register_level3_modules(core_manager: CoreManager, level3_modules: _Level3M
         "priority_queue_manager", level3_modules.priority_queue_manager
     )
     core_manager.register_module("authority_evaluator", level3_modules.authority_evaluator)
+
+
+def _register_level4_modules(core_manager: CoreManager, level4_modules: _Level4Modules) -> None:
+    """Registered after every Level 2/3 module (see main()'s own
+    ordering comment) to keep the wake_word_detector-to-
+    communication_pipeline relay-wiring gap as tight as Level 3's own
+    registration already keeps it — neither ActionAuditLog's nor
+    WorkflowStore's own start() does anything as slow as Level 3's
+    Chroma embedding-model load, but matching the established ordering
+    exactly is the safer, most consistent choice.
+
+    Only ActionAuditLog and WorkflowStore are real ManagedModules among
+    everything Level 4 Part A constructs — ActionRegistry/PermissionGate/
+    PermissionPolicyEngine/ConfirmationService/ActionResourceGate/
+    ActionRecoveryManager and all four executors are plain, lifecycle-
+    free classes (each one's own sprint documented this explicitly), so
+    they are never registered, the same "only register what has a real
+    lifecycle" discipline _register_level3_modules() already
+    established."""
+    core_manager.register_module("action_audit_log", level4_modules.action_audit_log)
+    core_manager.register_module("workflow_store", level4_modules.workflow_store)
 
 
 if __name__ == "__main__":

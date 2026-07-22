@@ -38,10 +38,13 @@ import pytest
 
 from config.schema import (
     DatabaseConfig,
+    DeviceControlConfig,
     MemoryConfig,
     ModelConfig,
     ResourceThresholds,
+    SecurityConfig,
     VoiceConfig,
+    WorkflowConfig,
 )
 from core.resource_monitor import ResourceMonitor
 from database.sqlite_client import SqliteClient
@@ -49,6 +52,13 @@ from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
+from device_control.action_engine import ActionRegistry
+from device_control.action_log import ActionAuditLog
+from device_control.application_manager import ApplicationManager
+from device_control.command_executor import CommandExecutionEngine
+from device_control.file_operations import FileOperationsManager
+from device_control.resource_gate import ActionResourceGate
+from device_control.window_manager import WindowManager
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -60,6 +70,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from security.confirmation_service import VoiceConfirmationService
+from security.permission_gate import PermissionGate
+from security.policy_engine import PermissionPolicyEngine
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, MicrophoneMode
@@ -68,6 +81,8 @@ from voice.quiet_mode import OperatingMode, QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import TranscriptionResult
 from voice.wake_word import WakeWordDetector
+from workflow.workflow_executor import WorkflowExecutor
+from workflow.workflow_store import WorkflowStore
 
 WAIT_TIMEOUT = 5.0
 
@@ -221,9 +236,27 @@ def voice_config() -> VoiceConfig:
 @pytest.fixture
 def pipeline_harness(tmp_path, voice_config):
     """Builds the real Communication Pipeline object graph, matching
-    main.py's own composition order exactly (_register_level2_modules
-    plus _register_level3_modules, Sprint 3.12) — fakes only at the
-    mic/wake-engine/STT/TTS/Ollama boundary."""
+    main.py's own composition order exactly (_register_level2_modules,
+    _register_level3_modules, and — Sprint 4.11 — _register_level4_modules)
+    — fakes only at the mic/wake-engine/STT/TTS/Ollama boundary.
+
+    Level 4's device_control_config is deliberately scoped for safety,
+    per sprint_4_11.md's own Potential Risks ("every destructive-shaped
+    integration test must operate exclusively within a tmp_path-scoped
+    allowed_file_roots and against test-only, disposable applications"):
+    allowed_file_roots is tmp_path itself, and application_allowlist
+    names only hostname.exe — a real Windows binary present on every
+    Windows machine that takes no arguments, prints one line, and exits
+    in well under a second, with no window and no side effects. Chosen
+    specifically because a real device-control-shaped voice turn (see
+    voice/pipeline.py's own _handle_device_control_turn()) has no way to
+    pass extra argv beyond a bare executable name — sys.executable with
+    zero arguments would instead drop into a real, indefinitely-blocking
+    Python REPL, the wrong kind of "disposable" for an automated test.
+    confirmation_timeout_seconds is shortened from SecurityConfig's own
+    20s default so a deliberately undriven confirmation prompt times out
+    within a normal test's own patience, matching voice_config's own
+    already-established "tuned short for tests" precedent above."""
     audio_backend = FakeAudioBackend()
     mic = MicrophoneManager(voice_config, audio_backend)
 
@@ -277,6 +310,49 @@ def pipeline_harness(tmp_path, voice_config):
     priority_queue_manager = PriorityQueueManager(resource_monitor)
     authority_evaluator = AuthorityEvaluator()
 
+    device_control_config = DeviceControlConfig(
+        allowed_file_roots=[str(tmp_path)],
+        application_allowlist=["hostname.exe"],
+    )
+    security_config = SecurityConfig(confirmation_timeout_seconds=2.0)
+    workflow_config = WorkflowConfig()
+
+    policy_engine = PermissionPolicyEngine(security_config)
+    confirmation_service = VoiceConfirmationService(
+        session_manager, persona_manager, security_config.confirmation_timeout_seconds
+    )
+    permission_gate = PermissionGate(
+        authority_evaluator, policy_engine, confirmation_service, device_control_config
+    )
+    resource_gate = ActionResourceGate(
+        resource_monitor, priority_queue_manager, device_control_config
+    )
+    audit_sqlite_client = SqliteClient(database_config.sqlite_path)
+    audit_log = ActionAuditLog(audit_sqlite_client, device_control_config)
+    action_registry = ActionRegistry(
+        permission_gate,
+        resource_gate,
+        audit_log,
+        max_retry_attempts=device_control_config.max_retry_attempts,
+    )
+    application_manager = ApplicationManager(device_control_config)
+    file_operations_manager = FileOperationsManager(device_control_config)
+    window_manager = WindowManager(device_control_config)
+    command_executor = CommandExecutionEngine(device_control_config)
+    for executor in (
+        application_manager,
+        file_operations_manager,
+        window_manager,
+        command_executor,
+    ):
+        action_registry.register(executor)
+
+    workflow_sqlite_client = SqliteClient(database_config.sqlite_path)
+    workflow_store = WorkflowStore(workflow_sqlite_client, workflow_config)
+    workflow_executor = WorkflowExecutor(
+        workflow_store, action_registry, policy_engine, confirmation_service, workflow_config
+    )
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -295,6 +371,9 @@ def pipeline_harness(tmp_path, voice_config):
         short_term_memory=short_term_memory,
         confidence_scorer=confidence_scorer,
         memory_lifecycle_manager=memory_lifecycle_manager,
+        action_registry=action_registry,
+        workflow_store=workflow_store,
+        workflow_executor=workflow_executor,
     )
 
     mic.start()
@@ -308,6 +387,8 @@ def pipeline_harness(tmp_path, voice_config):
     context_analyzer.start()
     priority_queue_manager.start()
     authority_evaluator.start()
+    audit_log.start()
+    workflow_store.start()
     pipeline.start()
     wake_word_detector.start()
 
@@ -335,12 +416,20 @@ def pipeline_harness(tmp_path, voice_config):
         context_analyzer=context_analyzer,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
+        action_registry=action_registry,
+        application_manager=application_manager,
+        audit_log=audit_log,
+        workflow_store=workflow_store,
+        workflow_executor=workflow_executor,
+        device_control_config=device_control_config,
     )
     try:
         yield harness
     finally:
         wake_word_detector.stop()
         pipeline.stop()
+        workflow_store.stop()
+        audit_log.stop()
         authority_evaluator.stop()
         priority_queue_manager.stop()
         context_analyzer.stop()

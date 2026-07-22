@@ -138,6 +138,15 @@ class VoiceSessionManager:
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_stop = threading.Event()
 
+        # Sprint 4.7 (Permission & Confirmation System): lets
+        # capture_and_transcribe_reply() intercept the next utterance
+        # this session's own _session_loop() thread captures, routing it
+        # to a waiting caller instead of the normal on_turn_complete
+        # callback — see that method's own docstring.
+        self._pending_reply_event = threading.Event()
+        self._pending_reply_text: str | None = None
+        self._awaiting_external_reply = False
+
     def start(self) -> None:
         """Launch the inter-turn timeout watchdog. Does not itself start
         a session — that's begin_session()'s job, called by Quiet Mode
@@ -207,6 +216,11 @@ class VoiceSessionManager:
 
         self._stop_listening.set()
         self._reply_ready.set()
+        # Unblocks anyone currently waiting inside
+        # capture_and_transcribe_reply() immediately, rather than
+        # leaving them to discover the session ended only once their
+        # own timeout eventually expires.
+        self._pending_reply_event.set()
         try:
             self._mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
         except MicrophoneError:
@@ -216,6 +230,43 @@ class VoiceSessionManager:
         self._session = None
         logger.info("Voice session ended: %s (%s)", session_id, reason.value)
         self._on_session_ended(reason)
+
+    def capture_and_transcribe_reply(self, timeout_seconds: float) -> str | None:
+        """Synchronously waits for the next utterance this session's own
+        background loop (_session_loop()) captures and transcribes,
+        returning its text instead of routing it to on_turn_complete —
+        added for security.confirmation_service.VoiceConfirmationService
+        (Sprint 4.7) to intercept a yes/no confirmation reply using the
+        exact same capture machinery a normal turn uses, without a
+        second, concurrent mic-reading path (which would risk
+        reintroducing the exact class of frame-stealing bug Sprint
+        2.12's own wake-word/session fix resolved once already).
+
+        Returns None if no session is active, or if no utterance is
+        transcribed within timeout_seconds (including because the
+        session ended while waiting) — never raises, never hangs past
+        the given timeout.
+
+        Intended call sequence: speak_reply(prompt, voice_id) — which
+        itself re-arms the session's own loop to start capturing the
+        next utterance — immediately followed by this method. The tiny
+        window between speak_reply() re-arming the loop and this method
+        setting its own "a caller is waiting" flag is a real but
+        practically negligible race: _capture_one_utterance() itself
+        cannot complete faster than genuine mic silence/speech timing
+        allows, which is far slower than the handful of Python bytecode
+        instructions between the two calls.
+        """
+        if self._session is None:
+            return None
+        self._pending_reply_event.clear()
+        self._pending_reply_text = None
+        self._awaiting_external_reply = True
+        try:
+            received = self._pending_reply_event.wait(timeout=timeout_seconds)
+            return self._pending_reply_text if received else None
+        finally:
+            self._awaiting_external_reply = False
 
     def speak_reply(self, text: str, voice_id: str) -> None:
         """Speak a composed reply, then re-arm listening for the next
@@ -308,6 +359,15 @@ class VoiceSessionManager:
             self.end_session(SessionEndReason.ERROR)
             return
 
-        session.turn_count += 1
         session.last_activity_at = datetime.now(UTC)
+        if self._awaiting_external_reply:
+            # A confirmation reply, not a normal conversation turn —
+            # doesn't count toward turn_count, and is routed to
+            # capture_and_transcribe_reply()'s own waiting caller
+            # instead of on_turn_complete. See that method's docstring.
+            self._pending_reply_text = result.text
+            self._pending_reply_event.set()
+            return
+
+        session.turn_count += 1
         self._on_turn_complete(result.text, session.session_id)

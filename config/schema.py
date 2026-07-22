@@ -295,18 +295,14 @@ class DeviceControlConfig:
     Folder Operations) adds allowed_file_roots/use_recycle_bin_for_delete.
     Sprint 4.4 (Window Management) adds window_operation_timeout_seconds.
     Sprint 4.5 (Command Execution Engine) adds
-    approved_commands/command_timeout_seconds, below. Still ahead:
-    Sprint 4.6 (System Monitoring, Action-Aware)
-    resource_gate_action_types — see each sprint's own Files to Modify.
+    approved_commands/command_timeout_seconds. Sprint 4.6 (System
+    Monitoring, Action-Aware) adds resource_gate_action_types, below.
 
-    application_allowlist is present but NOT YET ENFORCED —
-    security/permission_gate.py's PermissionGate.check() is still
-    Sprint 4.1's own unconditional-ALLOW stub and does not consult this
-    field at all. Sprint 4.7 (Permission & Confirmation System) is what
-    makes it a real, enforced policy — the same "field present, policy
-    arrives later" discipline this project already uses for
-    AuthorityEvaluator.approved_emergency_procedures (Sprint 3.11).
-    None (the default) means no allowlist restriction.
+    application_allowlist IS enforced from Sprint 4.7 onward —
+    security/permission_gate.py's PermissionGate.check() denies any
+    LAUNCH_APPLICATION request whose executable isn't listed, before
+    confirmation is even offered. None (the default) means no allowlist
+    restriction.
 
     allowed_file_roots IS enforced from Sprint 4.3 onward —
     FileOperationsManager refuses to touch any path that doesn't
@@ -324,17 +320,39 @@ class DeviceControlConfig:
     treating that call as failed rather than blocking indefinitely.
 
     approved_commands is a default-deny allowlist for
-    CommandExecutionEngine (Sprint 4.5), matched against a command's
-    executable name (basename only, case-insensitive) — never the full
-    command line. Ships empty: this executor can construct and
-    validate a request but can never actually run a real command until
-    the list is deliberately populated, mirroring
-    AuthorityEvaluator.approved_emergency_procedures's own
-    "structurally unreachable by design, not an oversight" treatment
-    (Sprint 3.11). Populating it for real is Sprint 4.7's job.
+    CommandExecutionEngine (Sprint 4.5) AND, from Sprint 4.7 onward,
+    for PermissionGate itself (a second, earlier enforcement point —
+    deliberate defense-in-depth, not redundant dead code): matched
+    against a command's executable name (basename only,
+    case-insensitive) — never the full command line. Ships empty: this
+    executor can construct and validate a request but can never
+    actually run a real command until the list is deliberately
+    populated, mirroring AuthorityEvaluator.approved_emergency_procedures's
+    own "structurally unreachable by design, not an oversight" treatment
+    (Sprint 3.11) — still deliberately empty as of Sprint 4.7 too (see
+    decision/authority.py's own docstring for why).
     command_timeout_seconds bounds every subprocess CommandExecutionEngine
     runs — a command that exceeds it is terminated and reported with
     CommandResult.timed_out=True, never left to hang the calling thread.
+
+    resource_gate_action_types names which ActionType.value strings
+    ActionResourceGate (Sprint 4.6) actually samples ResourceMonitor
+    for — file and window operations are cheap enough to exempt by
+    default (consistent with Sprint 4.4's own Integration Considerations
+    already noting window operations don't need this gate); only
+    launching an application or running a command carries genuine
+    resource-consumption risk. Config-driven specifically so this list
+    can be corrected without a code change if real use proves the
+    default wrong.
+
+    audit_log_retention_days bounds ActionAuditLog's (Sprint 4.8) rolling
+    retention window — purge_older_than() is called for real once, at
+    ActionAuditLog.start(), the same one-time-at-startup compromise
+    Sprint 3.12 already established for MemoryLifecycleManager. max_retry_attempts
+    bounds ActionRegistry.dispatch()'s own retry of a transient-shaped
+    failure (a timeout, or a Sprint 4.6 resource-gate block) — 0 disables
+    retry entirely, a valid, honest configuration, not a special-cased
+    "off" flag.
     """
 
     application_allowlist: list[str] | None = None
@@ -344,6 +362,77 @@ class DeviceControlConfig:
     window_operation_timeout_seconds: float = 5.0
     approved_commands: list[str] = field(default_factory=list)
     command_timeout_seconds: float = 30.0
+    resource_gate_action_types: list[str] = field(
+        default_factory=lambda: ["launch_application", "system_command"]
+    )
+    audit_log_retention_days: int = 90
+    max_retry_attempts: int = 2
+
+
+_VALID_RISK_LEVEL_VALUES: frozenset[str] = frozenset({"low", "medium", "high"})
+
+
+@dataclass
+class SecurityConfig:
+    """Security Layer settings (Sprint 4.7 — Permission & Confirmation
+    System). Deliberately has no knowledge of ActionType/RiskLevel as
+    real types (this module is a dependency-direction leaf — nothing in
+    config/ imports device_control/ or security/) — action types and
+    risk levels are both referenced here only as plain strings, matched
+    against the real enums by security/policy_engine.py itself.
+
+    risk_policies overrides security.policy_engine.PermissionPolicyEngine's
+    built-in per-ActionType RiskLevel defaults, keyed by ActionType.value
+    (e.g. "file_delete") -> RiskLevel.value ("low"/"medium"/"high"). An
+    unrecognized ActionType key is silently ignored (never matched
+    against anything); an invalid RiskLevel value is validated here at
+    config-load time so a typo surfaces as a clear ConfigError rather
+    than a confusing runtime KeyError deep inside PermissionPolicyEngine.
+
+    confirmation_timeout_seconds bounds how long ConfirmationService
+    waits for a reply — it controls only the wait duration; what happens
+    on timeout (always DENY, never ALLOW) is a hard, non-configurable
+    rule enforced in code, not something this field can weaken.
+
+    hard_denylist names ActionType.value strings that are always DENY,
+    with no confirmation ever offered — empty by default, present for
+    future use (no real entry exists yet; a real one would be as
+    consequential a content decision as approved_emergency_procedures
+    itself and deserves the same explicit review before shipping).
+    """
+
+    risk_policies: dict[str, str] = field(default_factory=dict)
+    confirmation_timeout_seconds: float = 20.0
+    hard_denylist: list[str] = field(default_factory=list)
+
+
+@dataclass
+class WorkflowConfig:
+    """Workflow Engine settings (Sprint 4.9 — Workflow Builder).
+
+    max_steps_per_workflow is a defensive bound, not a validated
+    real-world figure — Part 2's own "if many actions are about to
+    execute, request confirmation" language implies workflows are meant
+    to be a bounded, human-reviewable sequence, not an unbounded script.
+    Config-driven so it can be corrected without a code change if real
+    use proves the default wrong.
+
+    large_workflow_step_threshold/large_workflow_confirmation_prompt_template
+    (Sprint 4.10 — Workflow Executor) implement Part 2's own "large
+    workflow rule": a workflow at or above this many steps, or containing
+    any HIGH-risk step regardless of count, triggers one whole-workflow
+    confirmation prompt before any step runs — see
+    workflow/workflow_executor.py's own docstring for why this is a
+    distinct question from Sprint 4.7's per-step confirmation, not a
+    duplicate of it.
+    """
+
+    max_steps_per_workflow: int = 20
+    large_workflow_step_threshold: int = 5
+    large_workflow_confirmation_prompt_template: str = (
+        "This workflow '{name}' will run {step_count} actions, including "
+        "{high_risk_count} higher-risk steps. Should I proceed?"
+    )
 
 
 @dataclass
@@ -359,6 +448,8 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     device_control: DeviceControlConfig = field(default_factory=DeviceControlConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -370,6 +461,8 @@ class AppConfig:
         self._validate_paths()
         self._validate_memory()
         self._validate_device_control()
+        self._validate_security()
+        self._validate_workflow()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -593,4 +686,53 @@ class AppConfig:
             raise ConfigError(
                 "device_control.command_timeout_seconds must be positive, "
                 f"got {self.device_control.command_timeout_seconds}"
+            )
+        for action_type_value in self.device_control.resource_gate_action_types:
+            if not action_type_value or not action_type_value.strip():
+                raise ConfigError(
+                    "device_control.resource_gate_action_types must not contain empty strings"
+                )
+        if self.device_control.audit_log_retention_days <= 0:
+            raise ConfigError(
+                "device_control.audit_log_retention_days must be positive, "
+                f"got {self.device_control.audit_log_retention_days}"
+            )
+        if self.device_control.max_retry_attempts < 0:
+            raise ConfigError(
+                "device_control.max_retry_attempts must not be negative, "
+                f"got {self.device_control.max_retry_attempts}"
+            )
+
+    def _validate_security(self) -> None:
+        for action_type_key, risk_level_value in self.security.risk_policies.items():
+            if not action_type_key or not action_type_key.strip():
+                raise ConfigError("security.risk_policies must not contain empty-string keys")
+            if risk_level_value not in _VALID_RISK_LEVEL_VALUES:
+                raise ConfigError(
+                    f"security.risk_policies[{action_type_key!r}] must be one of "
+                    f"{sorted(_VALID_RISK_LEVEL_VALUES)}, got {risk_level_value!r}"
+                )
+        if self.security.confirmation_timeout_seconds <= 0:
+            raise ConfigError(
+                "security.confirmation_timeout_seconds must be positive, "
+                f"got {self.security.confirmation_timeout_seconds}"
+            )
+        for action_type_value in self.security.hard_denylist:
+            if not action_type_value or not action_type_value.strip():
+                raise ConfigError("security.hard_denylist must not contain empty strings")
+
+    def _validate_workflow(self) -> None:
+        if self.workflow.max_steps_per_workflow <= 0:
+            raise ConfigError(
+                "workflow.max_steps_per_workflow must be positive, "
+                f"got {self.workflow.max_steps_per_workflow}"
+            )
+        if self.workflow.large_workflow_step_threshold <= 0:
+            raise ConfigError(
+                "workflow.large_workflow_step_threshold must be positive, "
+                f"got {self.workflow.large_workflow_step_threshold}"
+            )
+        if not self.workflow.large_workflow_confirmation_prompt_template.strip():
+            raise ConfigError(
+                "workflow.large_workflow_confirmation_prompt_template must not be blank"
             )

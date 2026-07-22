@@ -126,11 +126,11 @@ See the "Level 4 breakdown changes (2026-07-20)" note above for why this table i
 | 4.3    | File & Folder Operations                                  | 4.1         | 4.1                       | Medium      | [sprint_4_3.md](sprint_4_3.md) — **Complete** |
 | 4.4    | Window Management                                         | 4.1         | 4.1 (soft: 4.2)           | Low–Medium  | [sprint_4_4.md](sprint_4_4.md) — **Complete** |
 | 4.5    | Command Execution Engine                                  | 4.1         | 4.1                       | Medium      | [sprint_4_5.md](sprint_4_5.md) — **Complete** |
-| 4.6    | System Monitoring & Resource Protection (Action-Aware)    | 4.1         | 4.1, 1.4, 3.10            | Medium      | [sprint_4_6.md](sprint_4_6.md)       |
-| 4.7    | Permission & Confirmation System                          | 4.1/4.2     | 4.1–4.6, 3.11             | High        | [sprint_4_7.md](sprint_4_7.md)       |
-| 4.8    | Action Logging & Recovery                                  | 4.1/4.2     | 4.1, 4.2, 4.3, 4.6, 4.7   | Medium      | [sprint_4_8.md](sprint_4_8.md)       |
-| 4.9    | Workflow Builder                                           | 4.2         | 4.1, 3.11                 | Medium      | [sprint_4_9.md](sprint_4_9.md)       |
-| 4.10   | Workflow Executor                                          | 4.2         | 4.1, 4.7, 4.8, 4.9        | Medium–High | [sprint_4_10.md](sprint_4_10.md)     |
+| 4.6    | System Monitoring & Resource Protection (Action-Aware)    | 4.1         | 4.1, 1.4, 3.10            | Medium      | [sprint_4_6.md](sprint_4_6.md) — **Complete** |
+| 4.7    | Permission & Confirmation System                          | 4.1/4.2     | 4.1–4.6, 3.11             | High        | [sprint_4_7.md](sprint_4_7.md) — **Complete** |
+| 4.8    | Action Logging & Recovery                                  | 4.1/4.2     | 4.1, 4.2, 4.3, 4.6, 4.7   | Medium      | [sprint_4_8.md](sprint_4_8.md) — **Complete** |
+| 4.9    | Workflow Builder                                           | 4.2         | 4.1, 3.11                 | Medium      | [sprint_4_9.md](sprint_4_9.md) — **Complete** |
+| 4.10   | Workflow Executor                                          | 4.2         | 4.1, 4.7, 4.8, 4.9        | Medium–High | [sprint_4_10.md](sprint_4_10.md) — **Complete** |
 | 4.11   | Workflow & Device Control Integration                      | integration | 4.1–4.10, 2.12, 3.12      | High        | [sprint_4_11.md](sprint_4_11.md)     |
 | 4.12   | Error Handling & Recovery Hardening                        | reliability | 4.11                      | Medium      | [sprint_4_12.md](sprint_4_12.md)     |
 | 4.13   | Integration Testing & Level Freeze (Part A)                | level gate  | 4.12                      | Medium–High | [sprint_4_13.md](sprint_4_13.md)     |

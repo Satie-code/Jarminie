@@ -140,9 +140,8 @@ ui:
 
 device_control:
   # Sprint 4.2 — Application Manager. null means no allowlist
-  # restriction — present but NOT YET ENFORCED, see config/schema.py's
-  # DeviceControlConfig docstring; Sprint 4.7 (Permission & Confirmation
-  # System) is what makes this a real, enforced policy.
+  # restriction. Enforced by security/permission_gate.py from Sprint
+  # 4.7 onward — see config/schema.py's DeviceControlConfig docstring.
   application_allowlist: null
   max_tracked_applications: 50
   # Sprint 4.3 — File & Folder Operations. allowed_file_roots is
@@ -156,8 +155,43 @@ device_control:
   # Sprint 4.4 — Window Management.
   window_operation_timeout_seconds: 5.0
   # Sprint 4.5 — Command Execution Engine. Default-deny allowlist,
-  # deliberately empty: this executor is fully inert until deliberately
-  # populated — see config/schema.py's DeviceControlConfig docstring.
-  # Sprint 4.7 owns actually populating this for real.
+  # deliberately empty: this executor (and, from Sprint 4.7 onward,
+  # PermissionGate itself) is fully inert until deliberately populated
+  # — see config/schema.py's DeviceControlConfig docstring. Still
+  # deliberately empty as of Sprint 4.7.
   approved_commands: []
   command_timeout_seconds: 30.0
+  # Sprint 4.6 — System Monitoring & Resource Protection (Action-Aware).
+  # Only executors with genuine resource-consumption risk are gated by
+  # default; file/window operations are cheap enough to exempt.
+  resource_gate_action_types:
+    - "launch_application"
+    - "system_command"
+  # Sprint 4.8 — Action Logging & Recovery.
+  audit_log_retention_days: 90
+  max_retry_attempts: 2
+
+security:
+  # Sprint 4.7 — Permission & Confirmation System. Empty: every
+  # ActionType uses PermissionPolicyEngine's own built-in RiskLevel
+  # defaults (see security/policy_engine.py) unless overridden here,
+  # keyed by ActionType.value -> "low"/"medium"/"high".
+  risk_policies: {}
+  confirmation_timeout_seconds: 20.0
+  # Always DENY, no confirmation offered at all — empty by default, same
+  # "present for future use, no real entry without explicit review"
+  # discipline as AuthorityEvaluator.approved_emergency_procedures.
+  hard_denylist: []
+
+workflow:
+  # Sprint 4.9 — Workflow Builder. A defensive, unvalidated bound — see
+  # config/schema.py's WorkflowConfig docstring.
+  max_steps_per_workflow: 20
+  # Sprint 4.10 — Workflow Executor. Part 2's own "large workflow rule":
+  # a workflow at or above this step count, or containing any HIGH-risk
+  # step, triggers one whole-workflow confirmation prompt before any
+  # step runs.
+  large_workflow_step_threshold: 5
+  large_workflow_confirmation_prompt_template: >-
+    This workflow '{name}' will run {step_count} actions, including
+    {high_risk_count} higher-risk steps. Should I proceed?

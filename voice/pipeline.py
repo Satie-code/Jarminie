@@ -32,8 +32,15 @@ Wiring diagram (matches sprint_3_12.md's own Data Flow):
     PersonaManager.detect_explicit_selection(), else
     PersonaManager.select_from_context(decision_trace.context_analysis, transcript)
           |
-    PersonaManager.compose_reply_safely(transcript, context, decision_trace)
-        -> active_persona.compose_reply(...) -> reply text
+    decision_trace.selected_engine ?
+        DEVICE_CONTROL -> _handle_device_control_turn(trace, session_id, persona.name)
+            -> ActionRequest(LAUNCH_APPLICATION) -> ActionRegistry.dispatch()
+            -> ActionResult -> reply text (Sprint 4.11)
+        WORKFLOW -> _handle_workflow_turn(trace, session_id, persona.name)
+            -> WorkflowStore lookup by name -> WorkflowExecutor.run()
+            -> WorkflowRunResult -> reply text (Sprint 4.11)
+        else -> PersonaManager.compose_reply_safely(transcript, context, decision_trace)
+            -> active_persona.compose_reply(...) -> reply text
           |
     ConversationSessionStore.record_turn(...)
           |
@@ -80,6 +87,28 @@ independent and can disagree), there is honestly nothing to override;
 this is logged, not silently ignored, and not treated as a bug to
 resolve here (widening either trigger-phrase list beyond a real caller
 is a hardening/tuning concern, not this sprint's own scope).
+
+Sprint 4.11 (Workflow & Device Control Integration) adds two new
+terminal branches after the Decision Engine pipeline produces a
+DecisionTrace, without restructuring the pipeline itself: when
+decision_trace.selected_engine is DEVICE_CONTROL, _handle_device_control_
+turn() builds an ActionRequest from the trace's own ContextAnalysis
+entities and dispatches it through action_registry — the same
+ActionRegistry.dispatch() any other caller uses, never a privileged
+bypass; when it is WORKFLOW, _handle_workflow_turn() resolves the named
+workflow by name against workflow_store and runs it via
+workflow_executor. Both return a plain reply string describing the real
+outcome ("Done — I've opened notepad.exe.", "I couldn't find a workflow
+named 'X'.", etc.) that flows into the exact same downstream steps every
+other reply does — record_turn(), promote_from_turn()/apply_user_
+override(), speak_reply() — so persistence and memory promotion behave
+identically regardless of which branch produced the reply. This composes
+the confirmation text directly in this class rather than through
+Persona.compose_reply() (personas/base.py's own signature has no
+ActionResult/WorkflowRunResult parameter, and extending it is outside
+this sprint's own Files to Modify) — "via the active persona" therefore
+means spoken through persona.voice_id (VoiceSessionManager.speak_reply()),
+not literally through Persona.compose_reply().
 """
 
 from collections.abc import Callable
@@ -87,23 +116,43 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.logging_setup import get_logger
-from decision.authority import AuthorityEvaluator, DecisionTrace
+from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
+from device_control.action_engine import (
+    ActionContext,
+    ActionRegistry,
+    ActionRequest,
+    ActionResult,
+    ActionStatus,
+    ActionType,
+)
 from memory.confidence_scorer import ConfidenceScorer
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.retrieval_engine import MemoryRetrievalEngine
 from memory.short_term_memory import ShortTermMemory
 from personas.persona_manager import PersonaManager, SwitchReason
+from security.confirmation_service import ConfirmationOutcome
 from voice.context_manager import ContextManager, ConversationContext
 from voice.conversation_store import ConversationSessionStore, ConversationTurn
 from voice.microphone import MicrophoneManager
 from voice.quiet_mode import QuietModeController
 from voice.session_manager import SessionEndReason, VoiceSessionManager
 from voice.wake_word import WakeWordDetector
+from workflow.workflow_executor import WorkflowExecutor, WorkflowRunResult
+from workflow.workflow_store import WorkflowStore
 
 logger = get_logger(__name__)
+
+_DEVICE_CONTROL_REQUESTED_BY = "voice_turn"
+_DEFAULT_EXECUTABLE_EXTENSION = ".exe"
+"""Windows-only normalization: a bare application name spoken by the
+user ("open notepad") is treated as an executable name with the
+platform's own default extension appended when the entity itself has
+none — matching this project's Windows-locked tech stack (Part 3). A
+name that already looks like a path/filename (contains a dot) is passed
+through unchanged."""
 
 
 class CallbackRelay:
@@ -150,6 +199,9 @@ class CommunicationPipeline:
         short_term_memory: ShortTermMemory,
         confidence_scorer: ConfidenceScorer,
         memory_lifecycle_manager: MemoryLifecycleManager,
+        action_registry: ActionRegistry,
+        workflow_store: WorkflowStore,
+        workflow_executor: WorkflowExecutor,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -166,6 +218,9 @@ class CommunicationPipeline:
         self._short_term_memory = short_term_memory
         self._confidence_scorer = confidence_scorer
         self._memory_lifecycle_manager = memory_lifecycle_manager
+        self._action_registry = action_registry
+        self._workflow_store = workflow_store
+        self._workflow_executor = workflow_executor
         self._turn_complete_relay = turn_complete_relay
         self._session_ended_relay = session_ended_relay
         self._wired = False
@@ -288,7 +343,18 @@ class CommunicationPipeline:
                 self._persona_manager.select_from_context(context_analysis, transcript)
 
             persona = self._persona_manager.active_persona()
-            reply = self._persona_manager.compose_reply_safely(transcript, context, decision_trace)
+            selected_engine = (
+                decision_trace.selected_engine if decision_trace is not None else None
+            )
+
+            if selected_engine is EngineSelection.DEVICE_CONTROL:
+                reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
+            elif selected_engine is EngineSelection.WORKFLOW:
+                reply = self._handle_workflow_turn(decision_trace, session_id, persona.name)
+            else:
+                reply = self._persona_manager.compose_reply_safely(
+                    transcript, context, decision_trace
+                )
 
             turn = ConversationTurn(
                 session_id=session_id,
@@ -312,3 +378,117 @@ class CommunicationPipeline:
                 "rather than leaving it stuck."
             )
             self._session_manager.end_session(SessionEndReason.ERROR)
+
+    def _handle_device_control_turn(
+        self, trace: DecisionTrace, session_id: str, persona_name: str
+    ) -> str:
+        """Builds a LAUNCH_APPLICATION ActionRequest from trace's own
+        ContextAnalysis (the first mentioned entity is the target — the
+        same first-entity tie-break AuthorityEvaluator._resolve_action_
+        engine() already used to route here) and dispatches it through
+        action_registry.dispatch() exactly as any other caller would —
+        the full PermissionGate/ActionResourceGate/ActionAuditLog stack
+        still applies, no bypass. Deliberately narrow to application
+        launch only for this sprint (matching sprint_4_11.md's own
+        Acceptance Criteria, which names only "application launch" as
+        the concrete verified case) — file/folder/window/command
+        routing would need real parameter extraction (source/
+        destination, which operation) that a bare entities list cannot
+        honestly provide without real NLU, explicitly out of scope per
+        this sprint's own Architecture Notes."""
+        entities = trace.context_analysis.mentioned_entities
+        target = entities[0] if entities else None
+        if not target:
+            return "I couldn't tell what application to open."
+
+        executable_path = (
+            target if "." in target else f"{target}{_DEFAULT_EXECUTABLE_EXTENSION}"
+        )
+        request = ActionRequest(
+            action_type=ActionType.LAUNCH_APPLICATION,
+            parameters={"operation": "launch", "executable_path": executable_path},
+            context=ActionContext(
+                requested_by=_DEVICE_CONTROL_REQUESTED_BY,
+                persona_name=persona_name,
+                session_id=session_id,
+                decision_trace=trace,
+            ),
+            requested_at=datetime.now(UTC),
+        )
+        result = self._action_registry.dispatch(request)
+        return _describe_action_result(result, executable_path)
+
+    def _handle_workflow_turn(
+        self, trace: DecisionTrace, session_id: str, persona_name: str
+    ) -> str:
+        """Resolves the named workflow (the first mentioned entity) by
+        name against workflow_store — real existence/enabled-state
+        checking happens here, for real, not in AuthorityEvaluator's own
+        routing guess — then runs it via workflow_executor.run(), which
+        itself dispatches every step through the same ActionRegistry."""
+        entities = trace.context_analysis.mentioned_entities
+        spoken_name = entities[0] if entities else None
+        if not spoken_name:
+            return "I couldn't tell which workflow to run."
+
+        resolved = self._resolve_workflow_by_name(spoken_name)
+        if resolved is None:
+            return f"I couldn't find a workflow named '{spoken_name}'."
+        workflow_id, display_name = resolved
+
+        context = ActionContext(
+            requested_by=_DEVICE_CONTROL_REQUESTED_BY,
+            persona_name=persona_name,
+            session_id=session_id,
+            decision_trace=trace,
+        )
+        run_result = self._workflow_executor.run(workflow_id, context)
+        return _describe_workflow_result(run_result, display_name)
+
+    def _resolve_workflow_by_name(self, name: str) -> tuple[str, str] | None:
+        """Linear scan over list_all() rather than a new WorkflowStore
+        query method — workflow_store.py is outside this sprint's own
+        Files to Modify, and max_steps_per_workflow-bounded stores are
+        small enough that this is a cheap, honest choice, not a
+        performance shortcut that will bite later. Returns the stored
+        definition's own (workflow_id, name) — its real, proper-cased
+        name, not necessarily the same casing/wording ContextAnalysis
+        happened to extract from the spoken transcript — so a spoken
+        confirmation names the workflow the way it was actually saved."""
+        lowered = name.strip().lower()
+        for definition in self._workflow_store.list_all():
+            if definition.name.strip().lower() == lowered:
+                return definition.workflow_id, definition.name
+        return None
+
+
+def _describe_action_result(result: ActionResult, target: str) -> str:
+    """Folds an ActionResult into a plain, spoken confirmation —
+    honestly reflecting SUCCEEDED/DENIED/anything-else, never
+    optimistic, matching the Explainability Rule applied to a live
+    device-control turn."""
+    if result.status is ActionStatus.SUCCEEDED:
+        return f"Done — I've opened {target}."
+    if result.status is ActionStatus.DENIED:
+        return f"I'm not able to do that: {result.error_message}"
+    return f"That didn't work: {result.error_message}"
+
+
+def _describe_workflow_result(run_result: WorkflowRunResult, name: str) -> str:
+    """Folds a WorkflowRunResult into a plain, spoken confirmation —
+    distinguishes a declined/timed-out whole-workflow confirmation, a
+    disabled workflow (zero step_results with no confirmation prompt
+    either — the only other way to reach zero steps, since a
+    nonexistent workflow is already ruled out by the caller's own
+    by-name resolution before run() is ever called), a partial run, and
+    a full success."""
+    if run_result.whole_workflow_confirmation in (
+        ConfirmationOutcome.DECLINED,
+        ConfirmationOutcome.TIMED_OUT,
+    ):
+        return f"I didn't run the '{name}' workflow since it wasn't confirmed."
+    if not run_result.step_results:
+        return f"The '{name}' workflow is currently disabled."
+    if run_result.aborted_early:
+        return f"I ran part of the '{name}' workflow, but a step failed partway through."
+    return f"Done — I've run the '{name}' workflow."

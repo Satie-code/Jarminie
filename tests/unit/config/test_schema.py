@@ -13,6 +13,7 @@ from config.schema import (
     ResourceThresholds,
     UIConfig,
     VoiceConfig,
+    WorkflowConfig,
 )
 
 
@@ -276,4 +277,21 @@ def test_blank_allowed_file_roots_entry_raises():
         device_control=DeviceControlConfig(allowed_file_roots=["C:/Users/test/Documents", "  "])
     )
     with pytest.raises(ConfigError, match="allowed_file_roots"):
+        config.validate()
+
+
+# --- WorkflowConfig (Sprint 4.10 additions) ----------------------------------------
+
+
+def test_non_positive_large_workflow_step_threshold_raises():
+    config = AppConfig(workflow=WorkflowConfig(large_workflow_step_threshold=0))
+    with pytest.raises(ConfigError, match="large_workflow_step_threshold"):
+        config.validate()
+
+
+def test_blank_large_workflow_confirmation_prompt_template_raises():
+    config = AppConfig(
+        workflow=WorkflowConfig(large_workflow_confirmation_prompt_template="   ")
+    )
+    with pytest.raises(ConfigError, match="large_workflow_confirmation_prompt_template"):
         config.validate()

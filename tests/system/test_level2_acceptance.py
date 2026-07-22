@@ -91,7 +91,9 @@ def test_full_level2_acceptance_scripted_conversation(
     # already renders generically — zero ui/status_panel.py changes
     # needed (Sprint 2.12's own Acceptance Criteria, re-confirmed here
     # through a real CoreManager rather than assumed; the six Level 3
-    # additions are Sprint 3.12's own Decision Engine Integration).
+    # additions are Sprint 3.12's own Decision Engine Integration; the
+    # two Level 4 additions are Sprint 4.11's own Workflow & Device
+    # Control Integration).
     states = h.core_manager.module_states()
     assert set(states) == {
         "microphone",
@@ -109,5 +111,7 @@ def test_full_level2_acceptance_scripted_conversation(
         "context_analyzer",
         "priority_queue_manager",
         "authority_evaluator",
+        "action_audit_log",
+        "workflow_store",
     }
     assert all(state == "running" for state in states.values())

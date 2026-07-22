@@ -22,8 +22,10 @@ from config.schema import (
     MemoryConfig,
     ModelConfig,
     ResourceThresholds,
+    SecurityConfig,
     UIConfig,
     VoiceConfig,
+    WorkflowConfig,
 )
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "defaults.yaml"
@@ -45,6 +47,8 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "logging": LoggingConfig,
     "ui": UIConfig,
     "device_control": DeviceControlConfig,
+    "security": SecurityConfig,
+    "workflow": WorkflowConfig,
 }
 
 

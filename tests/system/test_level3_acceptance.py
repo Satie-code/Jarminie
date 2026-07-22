@@ -165,7 +165,9 @@ def test_full_level3_acceptance_scripted_conversation(
 
     # Every Level 1+2+3 module is registered, was actually running, and
     # is visible via the same module_states() Status Panel already
-    # renders generically.
+    # renders generically. The two Level 4 additions ("action_audit_log",
+    # "workflow_store") are Sprint 4.11's own Workflow & Device Control
+    # Integration, now part of the same shared app_harness object graph.
     states = h.core_manager.module_states()
     assert set(states) == {
         "microphone",
@@ -183,6 +185,8 @@ def test_full_level3_acceptance_scripted_conversation(
         "context_analyzer",
         "priority_queue_manager",
         "authority_evaluator",
+        "action_audit_log",
+        "workflow_store",
     }
     assert all(state == "running" for state in states.values())
 

@@ -25,7 +25,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.schema import AppConfig, DatabaseConfig, MemoryConfig, VoiceConfig
+from config.schema import (
+    AppConfig,
+    DatabaseConfig,
+    DeviceControlConfig,
+    MemoryConfig,
+    SecurityConfig,
+    VoiceConfig,
+    WorkflowConfig,
+)
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
 from database.sqlite_client import SqliteClient
@@ -33,6 +41,13 @@ from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
+from device_control.action_engine import ActionRegistry
+from device_control.action_log import ActionAuditLog
+from device_control.application_manager import ApplicationManager
+from device_control.command_executor import CommandExecutionEngine
+from device_control.file_operations import FileOperationsManager
+from device_control.resource_gate import ActionResourceGate
+from device_control.window_manager import WindowManager
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -44,6 +59,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from security.confirmation_service import VoiceConfirmationService
+from security.permission_gate import PermissionGate
+from security.policy_engine import PermissionPolicyEngine
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, MicrophoneMode
@@ -52,6 +70,8 @@ from voice.quiet_mode import OperatingMode, QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import TranscriptionResult
 from voice.wake_word import WakeWordDetector
+from workflow.workflow_executor import WorkflowExecutor
+from workflow.workflow_store import WorkflowStore
 
 WAIT_TIMEOUT = 5.0
 
@@ -276,6 +296,55 @@ def app_harness(tmp_path, voice_config):
     priority_queue_manager = PriorityQueueManager(resource_monitor)
     authority_evaluator = AuthorityEvaluator()
 
+    # Sprint 4.11: Level 4 Part A, safety-scoped the same way
+    # tests/integration/conftest.py's own pipeline_harness is —
+    # allowed_file_roots confined to tmp_path, application_allowlist
+    # naming only hostname.exe (see that file's own fixture docstring
+    # for why: a real, argument-free, instantly-exiting Windows binary,
+    # never a real installed application on the developer's own machine).
+    device_control_config = DeviceControlConfig(
+        allowed_file_roots=[str(tmp_path)],
+        application_allowlist=["hostname.exe"],
+    )
+    security_config = SecurityConfig(confirmation_timeout_seconds=2.0)
+    workflow_config = WorkflowConfig()
+
+    policy_engine = PermissionPolicyEngine(security_config)
+    confirmation_service = VoiceConfirmationService(
+        session_manager, persona_manager, security_config.confirmation_timeout_seconds
+    )
+    permission_gate = PermissionGate(
+        authority_evaluator, policy_engine, confirmation_service, device_control_config
+    )
+    resource_gate = ActionResourceGate(
+        resource_monitor, priority_queue_manager, device_control_config
+    )
+    audit_sqlite_client = SqliteClient(config.database.sqlite_path)
+    audit_log = ActionAuditLog(audit_sqlite_client, device_control_config)
+    action_registry = ActionRegistry(
+        permission_gate,
+        resource_gate,
+        audit_log,
+        max_retry_attempts=device_control_config.max_retry_attempts,
+    )
+    application_manager = ApplicationManager(device_control_config)
+    file_operations_manager = FileOperationsManager(device_control_config)
+    window_manager = WindowManager(device_control_config)
+    command_executor = CommandExecutionEngine(device_control_config)
+    for executor in (
+        application_manager,
+        file_operations_manager,
+        window_manager,
+        command_executor,
+    ):
+        action_registry.register(executor)
+
+    workflow_sqlite_client = SqliteClient(config.database.sqlite_path)
+    workflow_store = WorkflowStore(workflow_sqlite_client, workflow_config)
+    workflow_executor = WorkflowExecutor(
+        workflow_store, action_registry, policy_engine, confirmation_service, workflow_config
+    )
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -294,6 +363,9 @@ def app_harness(tmp_path, voice_config):
         short_term_memory=short_term_memory,
         confidence_scorer=confidence_scorer,
         memory_lifecycle_manager=memory_lifecycle_manager,
+        action_registry=action_registry,
+        workflow_store=workflow_store,
+        workflow_executor=workflow_executor,
     )
 
     core_manager.register_module("microphone", mic)
@@ -323,6 +395,12 @@ def app_harness(tmp_path, voice_config):
     core_manager.register_module("context_analyzer", context_analyzer)
     core_manager.register_module("priority_queue_manager", priority_queue_manager)
     core_manager.register_module("authority_evaluator", authority_evaluator)
+    # Sprint 4.11: Level 4 Part A's own two real ManagedModules, registered
+    # after Level 3 for the identical reason Level 3 is registered after
+    # communication_pipeline above — see main.py's own
+    # _register_level4_modules() docstring.
+    core_manager.register_module("action_audit_log", audit_log)
+    core_manager.register_module("workflow_store", workflow_store)
 
     core_manager.startup()
 
@@ -355,6 +433,13 @@ def app_harness(tmp_path, voice_config):
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
         resource_monitor=resource_monitor,
+        # Sprint 4.11 (Workflow & Device Control Integration) additions.
+        action_registry=action_registry,
+        application_manager=application_manager,
+        audit_log=audit_log,
+        workflow_store=workflow_store,
+        workflow_executor=workflow_executor,
+        device_control_config=device_control_config,
     )
     try:
         yield harness

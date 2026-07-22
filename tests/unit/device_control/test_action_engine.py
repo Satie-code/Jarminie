@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from config.schema import DeviceControlConfig, SecurityConfig
 from decision.authority import AuthorityEvaluator
 from device_control.action_engine import (
     ActionContext,
@@ -13,7 +14,10 @@ from device_control.action_engine import (
     ActionStatus,
     ActionType,
 )
+from device_control.resource_gate import ResourceGateDecision
+from security.confirmation_service import ConfirmationOutcome
 from security.permission_gate import PermissionDecision, PermissionGate
+from security.policy_engine import PermissionPolicyEngine
 
 
 def make_request(
@@ -53,10 +57,14 @@ class RaisingExecutor:
     """An executor whose execute() always raises — proves dispatch()
     never lets an executor's own exception escape."""
 
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def can_handle(self, action_type: ActionType) -> bool:
         return True
 
     def execute(self, request: ActionRequest) -> ActionResult:
+        self.call_count += 1
         raise RuntimeError("boom")
 
 
@@ -79,9 +87,54 @@ class RaisingPermissionGate:
         raise RuntimeError("permission check exploded")
 
 
+class StubResourceGate:
+    """A fixed-decision ActionResourceGate stand-in, duck-typed against
+    the real ActionResourceGate's check()/last_blocked_alerts() shape."""
+
+    def __init__(
+        self, decision: ResourceGateDecision, resource_names: list[str] | None = None
+    ) -> None:
+        self._decision = decision
+        self._resource_names = resource_names or []
+        self.checked_action_types: list[ActionType] = []
+
+    def check(self, action_type: ActionType) -> ResourceGateDecision:
+        self.checked_action_types.append(action_type)
+        return self._decision
+
+    def last_blocked_alerts(self) -> list[object]:
+        class _FakeAlert:
+            def __init__(self, resource: str) -> None:
+                self.resource = resource
+                self.value = 99.0
+
+        return [_FakeAlert(name) for name in self._resource_names]
+
+
+class RaisingResourceGate:
+    def check(self, action_type: ActionType) -> ResourceGateDecision:
+        raise RuntimeError("resource check exploded")
+
+
+class _AlwaysConfirmConfirmationService:
+    """A stub ConfirmationService that always confirms — this fixture
+    exercises ActionRegistry's own dispatch/routing behavior, not
+    Sprint 4.7's confirmation flow itself (covered separately in
+    tests/unit/security/), so a real voice-backed service isn't needed
+    here."""
+
+    def request_confirmation(self, request) -> ConfirmationOutcome:
+        return ConfirmationOutcome.CONFIRMED
+
+
 @pytest.fixture
 def real_permission_gate() -> PermissionGate:
-    return PermissionGate(AuthorityEvaluator())
+    return PermissionGate(
+        AuthorityEvaluator(),
+        PermissionPolicyEngine(SecurityConfig()),
+        _AlwaysConfirmConfirmationService(),
+        DeviceControlConfig(),
+    )
 
 
 @pytest.fixture
@@ -237,3 +290,267 @@ def test_dispatch_with_real_permission_gate_and_authority_evaluator(registry):
 
     assert result.status is ActionStatus.SUCCEEDED
     assert len(executor.calls) == 1
+
+
+# --- ActionResourceGate integration (Sprint 4.6) --------------------------------
+
+
+def test_dispatch_with_no_resource_gate_behaves_exactly_as_before(real_permission_gate):
+    """Regression: constructing ActionRegistry with no resource_gate
+    argument at all (Sprint 4.1's original call shape) must behave
+    identically — confirms this sprint's change is genuinely additive."""
+    registry = ActionRegistry(real_permission_gate)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.SUCCEEDED
+    assert executor.calls
+
+
+def test_dispatch_proceeds_when_resource_gate_allows():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    resource_gate = StubResourceGate(ResourceGateDecision.PROCEED)
+    registry = ActionRegistry(permission_gate, resource_gate)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.SUCCEEDED
+    assert executor.calls
+    assert resource_gate.checked_action_types == [ActionType.LAUNCH_APPLICATION]
+
+
+def test_dispatch_blocked_by_resource_gate_never_calls_executor():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    resource_gate = StubResourceGate(
+        ResourceGateDecision.BLOCKED_CRITICAL_RESOURCE, resource_names=["cpu"]
+    )
+    registry = ActionRegistry(permission_gate, resource_gate)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.FAILED
+    assert executor.calls == []
+    assert "cpu" in result.error_message
+
+
+def test_dispatch_permission_denial_short_circuits_before_resource_gate():
+    """Permission is checked first — a DENY must mean the resource gate
+    is never even consulted, per this sprint's own fixed-order Integration
+    Considerations."""
+    permission_gate = StubPermissionGate(PermissionDecision.DENY)
+    resource_gate = StubResourceGate(ResourceGateDecision.PROCEED)
+    registry = ActionRegistry(permission_gate, resource_gate)
+    registry.register(FakeExecutor(ActionType.LAUNCH_APPLICATION))
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.DENIED
+    assert resource_gate.checked_action_types == []
+
+
+def test_dispatch_resource_gate_exception_degrades_to_failed_not_raised():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate, RaisingResourceGate())
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.FAILED
+    assert executor.calls == []
+
+
+# --- ActionAuditLog integration (Sprint 4.8) ------------------------------------
+
+
+class SpyAuditLog:
+    def __init__(self) -> None:
+        self.records: list[tuple] = []
+
+    def record(self, result, permission_decision, risk_level):
+        self.records.append((result, permission_decision, risk_level))
+        return None
+
+
+def test_dispatch_with_no_audit_log_behaves_exactly_as_before():
+    """Regression: no audit_log argument at all (pre-4.8 call shape)
+    must behave identically — confirms this sprint's change is
+    genuinely additive."""
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.SUCCEEDED
+
+
+def test_successful_dispatch_produces_exactly_one_audit_record():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    audit_log = SpyAuditLog()
+    registry = ActionRegistry(permission_gate, audit_log=audit_log)
+    registry.register(FakeExecutor(ActionType.LAUNCH_APPLICATION))
+
+    registry.dispatch(make_request())
+
+    assert len(audit_log.records) == 1
+    result, permission_decision, risk_level = audit_log.records[0]
+    assert result.status is ActionStatus.SUCCEEDED
+    assert permission_decision is PermissionDecision.ALLOW
+    assert risk_level is None
+
+
+def test_denied_dispatch_produces_exactly_one_audit_record():
+    permission_gate = StubPermissionGate(PermissionDecision.DENY)
+    audit_log = SpyAuditLog()
+    registry = ActionRegistry(permission_gate, audit_log=audit_log)
+    registry.register(FakeExecutor(ActionType.LAUNCH_APPLICATION))
+
+    registry.dispatch(make_request())
+
+    assert len(audit_log.records) == 1
+    result, permission_decision, _ = audit_log.records[0]
+    assert result.status is ActionStatus.DENIED
+    assert permission_decision is PermissionDecision.DENY
+
+
+def test_failed_dispatch_produces_exactly_one_audit_record():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    audit_log = SpyAuditLog()
+    registry = ActionRegistry(permission_gate, audit_log=audit_log)
+    registry.register(RaisingExecutor())
+
+    registry.dispatch(make_request())
+
+    assert len(audit_log.records) == 1
+    assert audit_log.records[0][0].status is ActionStatus.FAILED
+
+
+def test_permission_check_exception_still_produces_an_audit_record():
+    audit_log = SpyAuditLog()
+    registry = ActionRegistry(RaisingPermissionGate(), audit_log=audit_log)
+    registry.register(FakeExecutor(ActionType.LAUNCH_APPLICATION))
+
+    registry.dispatch(make_request())
+
+    assert len(audit_log.records) == 1
+    result, permission_decision, _ = audit_log.records[0]
+    assert result.status is ActionStatus.FAILED
+    assert permission_decision is PermissionDecision.DENY
+
+
+# --- Retry logic (Sprint 4.8) ----------------------------------------------------
+
+
+class TransientThenSucceedExecutor:
+    """Fails with a timeout-shaped error message for its first
+    fail_count calls, then succeeds."""
+
+    def __init__(self, handled_type: ActionType, fail_count: int) -> None:
+        self.handled_type = handled_type
+        self.fail_count = fail_count
+        self.calls: list[ActionRequest] = []
+
+    def can_handle(self, action_type: ActionType) -> bool:
+        return action_type is self.handled_type
+
+    def execute(self, request: ActionRequest) -> ActionResult:
+        self.calls.append(request)
+        if len(self.calls) <= self.fail_count:
+            return ActionResult(
+                request=request,
+                status=ActionStatus.FAILED,
+                completed_at=datetime.now(UTC),
+                error_message="Command timed out after 5.0s.",
+            )
+        return ActionResult(
+            request=request, status=ActionStatus.SUCCEEDED, completed_at=datetime.now(UTC)
+        )
+
+
+class AlwaysTransientFailureExecutor:
+    def __init__(self, handled_type: ActionType) -> None:
+        self.handled_type = handled_type
+        self.calls: list[ActionRequest] = []
+
+    def can_handle(self, action_type: ActionType) -> bool:
+        return action_type is self.handled_type
+
+    def execute(self, request: ActionRequest) -> ActionResult:
+        self.calls.append(request)
+        return ActionResult(
+            request=request,
+            status=ActionStatus.FAILED,
+            completed_at=datetime.now(UTC),
+            error_message="Blocked by critical resource pressure: cpu at 95.0% (critical)",
+        )
+
+
+def test_transient_failure_is_retried_until_it_succeeds():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate, max_retry_attempts=2)
+    executor = TransientThenSucceedExecutor(ActionType.LAUNCH_APPLICATION, fail_count=1)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.SUCCEEDED
+    assert len(executor.calls) == 2
+
+
+def test_transient_failure_exhausts_retries_and_reports_failed():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    audit_log = SpyAuditLog()
+    registry = ActionRegistry(permission_gate, audit_log=audit_log, max_retry_attempts=2)
+    executor = AlwaysTransientFailureExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.FAILED
+    assert len(executor.calls) == 3  # 1 initial attempt + 2 retries
+    assert len(audit_log.records) == 1  # exactly one audit record for the whole call
+
+
+def test_zero_max_retry_attempts_means_no_retry_at_all():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate)  # default max_retry_attempts=0
+    executor = AlwaysTransientFailureExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.FAILED
+    assert len(executor.calls) == 1
+
+
+def test_non_transient_denial_is_never_retried():
+    permission_gate = StubPermissionGate(PermissionDecision.DENY)
+    registry = ActionRegistry(permission_gate, max_retry_attempts=2)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.DENIED
+    assert executor.calls == []
+
+
+def test_non_transient_failure_is_never_retried():
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate, max_retry_attempts=2)
+    executor = RaisingExecutor()
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.FAILED
+    assert result.error_message == "Executor raised an unexpected internal error."
+    assert executor.call_count == 1

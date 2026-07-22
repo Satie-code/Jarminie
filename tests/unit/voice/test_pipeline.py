@@ -15,9 +15,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from decision.authority import EngineSelection
+from device_control.action_engine import ActionResult, ActionStatus
 from personas.persona_manager import SwitchReason
+from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
 from voice.session_manager import SessionEndReason
+from workflow.workflow_executor import WorkflowRunResult
 
 
 @pytest.fixture
@@ -43,6 +47,7 @@ def collaborators():
     context_analysis = MagicMock(name="context_analysis")
     context_analysis.primary_topic = "some topic"
     context_analysis.suggested_persona = None
+    context_analysis.mentioned_entities = []
     context_analyzer = MagicMock()
     context_analyzer.analyze.return_value = context_analysis
 
@@ -55,6 +60,7 @@ def collaborators():
 
     decision_trace = MagicMock(name="decision_trace")
     decision_trace.context_analysis = context_analysis
+    decision_trace.selected_engine = EngineSelection.CONVERSATIONAL_RESPONSE
     authority_evaluator = MagicMock()
     authority_evaluator.evaluate.return_value = decision_trace
 
@@ -65,6 +71,16 @@ def collaborators():
     confidence_scorer.detect_override_phrase.return_value = False
 
     memory_lifecycle_manager = MagicMock()
+
+    action_registry = MagicMock()
+    action_registry.dispatch.return_value = ActionResult(
+        request=MagicMock(), status=ActionStatus.SUCCEEDED, completed_at=MagicMock()
+    )
+
+    workflow_store = MagicMock()
+    workflow_store.list_all.return_value = []
+
+    workflow_executor = MagicMock()
 
     return {
         "mic": MagicMock(),
@@ -84,6 +100,9 @@ def collaborators():
         "short_term_memory": short_term_memory,
         "confidence_scorer": confidence_scorer,
         "memory_lifecycle_manager": memory_lifecycle_manager,
+        "action_registry": action_registry,
+        "workflow_store": workflow_store,
+        "workflow_executor": workflow_executor,
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -113,6 +132,9 @@ def pipeline(collaborators):
         short_term_memory=collaborators["short_term_memory"],
         confidence_scorer=collaborators["confidence_scorer"],
         memory_lifecycle_manager=collaborators["memory_lifecycle_manager"],
+        action_registry=collaborators["action_registry"],
+        workflow_store=collaborators["workflow_store"],
+        workflow_executor=collaborators["workflow_executor"],
     )
 
 
@@ -312,3 +334,199 @@ def test_decision_pipeline_failure_degrades_gracefully_without_ending_the_sessio
     )
     collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
     assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)
+
+
+# --- DEVICE_CONTROL / WORKFLOW routing (Sprint 4.11) -------------------------
+
+
+def test_device_control_turn_dispatches_launch_application_and_speaks_confirmation(
+    pipeline, collaborators
+):
+    collaborators["decision_trace"].selected_engine = EngineSelection.DEVICE_CONTROL
+    collaborators["context_analysis"].mentioned_entities = ["notepad"]
+
+    pipeline._handle_turn_complete("open notepad", "session-1")
+
+    request = collaborators["action_registry"].dispatch.call_args[0][0]
+    assert request.action_type.value == "launch_application"
+    assert request.parameters == {"operation": "launch", "executable_path": "notepad.exe"}
+    assert request.context.requested_by == "voice_turn"
+    assert request.context.persona_name == "jarvis"
+    assert request.context.session_id == "session-1"
+    assert request.context.decision_trace is collaborators["decision_trace"]
+
+    collaborators["persona_manager"].compose_reply_safely.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "Done — I've opened notepad.exe.", "p340"
+    )
+    turn = collaborators["conversation_store"].record_turn.call_args[0][0]
+    assert turn.response_text == "Done — I've opened notepad.exe."
+
+
+def test_device_control_turn_passes_through_an_extension_already_present(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.DEVICE_CONTROL
+    collaborators["context_analysis"].mentioned_entities = ["chrome.exe"]
+
+    pipeline._handle_turn_complete("open chrome.exe", "session-1")
+
+    request = collaborators["action_registry"].dispatch.call_args[0][0]
+    assert request.parameters["executable_path"] == "chrome.exe"
+
+
+def test_device_control_turn_with_no_entity_reports_it_could_not_tell(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.DEVICE_CONTROL
+    collaborators["context_analysis"].mentioned_entities = []
+
+    pipeline._handle_turn_complete("open it", "session-1")
+
+    collaborators["action_registry"].dispatch.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I couldn't tell what application to open.", "p340"
+    )
+
+
+def test_device_control_turn_reports_a_denied_result(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.DEVICE_CONTROL
+    collaborators["context_analysis"].mentioned_entities = ["cmd"]
+    collaborators["action_registry"].dispatch.return_value = ActionResult(
+        request=MagicMock(),
+        status=ActionStatus.DENIED,
+        completed_at=MagicMock(),
+        error_message="Application not on allowlist",
+    )
+
+    pipeline._handle_turn_complete("open cmd", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I'm not able to do that: Application not on allowlist", "p340"
+    )
+
+
+def test_device_control_turn_reports_a_failed_result(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.DEVICE_CONTROL
+    collaborators["context_analysis"].mentioned_entities = ["nonexistent"]
+    collaborators["action_registry"].dispatch.return_value = ActionResult(
+        request=MagicMock(),
+        status=ActionStatus.FAILED,
+        completed_at=MagicMock(),
+        error_message="No such file or directory",
+    )
+
+    pipeline._handle_turn_complete("open nonexistent", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "That didn't work: No such file or directory", "p340"
+    )
+
+
+def test_workflow_turn_resolves_by_name_and_runs_it(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WORKFLOW
+    collaborators["context_analysis"].mentioned_entities = ["Morning Routine"]
+    stored = MagicMock()
+    stored.name = "Morning Routine"
+    stored.workflow_id = "wf-1"
+    collaborators["workflow_store"].list_all.return_value = [stored]
+    run_result = WorkflowRunResult(
+        workflow_id="wf-1",
+        run_id="run-1",
+        step_results=[MagicMock()],
+        aborted_early=False,
+        whole_workflow_confirmation=None,
+        started_at=MagicMock(),
+        completed_at=MagicMock(),
+    )
+    collaborators["workflow_executor"].run.return_value = run_result
+
+    pipeline._handle_turn_complete("run my morning routine", "session-1")
+
+    workflow_id, context = collaborators["workflow_executor"].run.call_args[0]
+    assert workflow_id == "wf-1"
+    assert context.requested_by == "voice_turn"
+    assert context.session_id == "session-1"
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "Done — I've run the 'Morning Routine' workflow.", "p340"
+    )
+
+
+def test_workflow_turn_name_lookup_is_case_insensitive(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WORKFLOW
+    collaborators["context_analysis"].mentioned_entities = ["morning routine"]
+    stored = MagicMock()
+    stored.name = "Morning Routine"
+    stored.workflow_id = "wf-1"
+    collaborators["workflow_store"].list_all.return_value = [stored]
+    collaborators["workflow_executor"].run.return_value = WorkflowRunResult(
+        workflow_id="wf-1",
+        run_id="run-1",
+        step_results=[MagicMock()],
+        aborted_early=False,
+        whole_workflow_confirmation=None,
+        started_at=MagicMock(),
+        completed_at=MagicMock(),
+    )
+
+    pipeline._handle_turn_complete("run my morning routine", "session-1")
+
+    collaborators["workflow_executor"].run.assert_called_once()
+    assert collaborators["workflow_executor"].run.call_args[0][0] == "wf-1"
+
+
+def test_workflow_turn_not_found_reports_it_and_never_calls_run(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WORKFLOW
+    collaborators["context_analysis"].mentioned_entities = ["nonexistent workflow"]
+    collaborators["workflow_store"].list_all.return_value = []
+
+    pipeline._handle_turn_complete("run the nonexistent workflow", "session-1")
+
+    collaborators["workflow_executor"].run.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I couldn't find a workflow named 'nonexistent workflow'.", "p340"
+    )
+
+
+def test_workflow_turn_declined_confirmation_reports_it(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WORKFLOW
+    collaborators["context_analysis"].mentioned_entities = ["Big Cleanup"]
+    stored = MagicMock()
+    stored.name = "Big Cleanup"
+    stored.workflow_id = "wf-2"
+    collaborators["workflow_store"].list_all.return_value = [stored]
+    collaborators["workflow_executor"].run.return_value = WorkflowRunResult(
+        workflow_id="wf-2",
+        run_id="run-2",
+        step_results=[],
+        aborted_early=True,
+        whole_workflow_confirmation=ConfirmationOutcome.DECLINED,
+        started_at=MagicMock(),
+        completed_at=MagicMock(),
+    )
+
+    pipeline._handle_turn_complete("run the big cleanup workflow", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I didn't run the 'Big Cleanup' workflow since it wasn't confirmed.", "p340"
+    )
+
+
+def test_workflow_turn_partial_run_reports_it(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WORKFLOW
+    collaborators["context_analysis"].mentioned_entities = ["Big Cleanup"]
+    stored = MagicMock()
+    stored.name = "Big Cleanup"
+    stored.workflow_id = "wf-2"
+    collaborators["workflow_store"].list_all.return_value = [stored]
+    collaborators["workflow_executor"].run.return_value = WorkflowRunResult(
+        workflow_id="wf-2",
+        run_id="run-2",
+        step_results=[MagicMock(), MagicMock()],
+        aborted_early=True,
+        whole_workflow_confirmation=None,
+        started_at=MagicMock(),
+        completed_at=MagicMock(),
+    )
+
+    pipeline._handle_turn_complete("run the big cleanup workflow", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I ran part of the 'Big Cleanup' workflow, but a step failed partway through.", "p340"
+    )

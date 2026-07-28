@@ -22,27 +22,23 @@ individually classified MEDIUM/HIGH risk still triggers its own Sprint
 4.7 confirmation during dispatch() regardless of whether the
 whole-workflow prompt already ran.
 
-Known gap, not fixed here (out of this sprint's own scope): the
+Resolved (Sprint 4.13, Technical Debt Resolution — was an open gap,
+backlog/technical_debt.md item 25, through Sprint 4.12): the
 whole-workflow ConfirmationRequest's prompt_text is built from
 WorkflowConfig.large_workflow_confirmation_prompt_template (naming the
-workflow, step count, and higher-risk step count), but
-VoiceConfirmationService.request_confirmation() (security/
-confirmation_service.py, Sprint 4.7) deliberately ignores
-ConfirmationRequest.prompt_text and rebuilds its own spoken text from
-ConfirmationRequest.action_request/risk_level via build_prompt_text() —
-by design, per that module's own docstring ("rather than trusting a
-possibly-generic prompt_text unconditionally"). Since the pseudo
-ActionRequest built for the whole-workflow prompt is a WORKFLOW_STEP
-action with no per-workflow description template in
-security/confirmation_service.py's own _ACTION_DESCRIPTIONS, a real
-voice-spoken whole-workflow prompt currently degrades to the generic
-"This will run a workflow step. Should I proceed?" rather than the
-richer template text — prompt_text itself is still correctly built and
-is exactly what a future non-voice (e.g. UI dialog) ConfirmationService
-implementation would use verbatim. Changing VoiceConfirmationService's
-own already-shipped, already-tested behavior is a Sprint 4.7 concern, not
-this sprint's own Files to Modify — see docs/backlog/technical_debt.md
-item 25.
+workflow, step count, and higher-risk step count) and now sets
+has_custom_prompt=True, telling VoiceConfirmationService.
+request_confirmation() (security/confirmation_service.py) to speak it
+verbatim instead of rebuilding a generic description from the pseudo
+WORKFLOW_STEP ActionRequest via build_prompt_text() — the pseudo request
+has no per-workflow description template in that module's own
+_ACTION_DESCRIPTIONS and never could, so the flag lets this specific,
+richer-than-a-single-ActionRequest prompt through rather than trying to
+express it as one. Every other ConfirmationRequest in this codebase
+(PermissionGate.check()'s own per-step confirmations) leaves
+has_custom_prompt at its default False, since build_prompt_text() is
+already the richest description a single ActionRequest can carry —
+unaffected by this change.
 
 Sprint 4.12 hardening (scenario d): three internal call sites inside
 run() are now individually, narrowly guarded — never one blanket catch
@@ -289,6 +285,13 @@ class WorkflowExecutor:
             action_request=pseudo_request,
             risk_level=RiskLevel.HIGH if high_risk_count > 0 else RiskLevel.MEDIUM,
             prompt_text=prompt_text,
+            # Sprint 4.13 (Technical Debt Resolution) — closes
+            # backlog/technical_debt.md item 25: tells
+            # VoiceConfirmationService to speak prompt_text verbatim
+            # rather than rebuilding a generic WORKFLOW_STEP description
+            # from pseudo_request, which structurally cannot carry the
+            # workflow's own name/step_count/high_risk_count.
+            has_custom_prompt=True,
         )
         try:
             outcome = self._confirmation_service.request_confirmation(confirmation_request)

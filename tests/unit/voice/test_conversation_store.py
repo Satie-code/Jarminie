@@ -274,3 +274,20 @@ def test_purge_older_than_swallows_and_logs_a_failure(db_path, database_config):
         store.stop()
 
     assert removed == 0
+
+
+def test_start_calls_purge_older_than_for_real(db_path, database_config, monkeypatch):
+    """Sprint 4.13 (Technical Debt Resolution): closes the "zero callers"
+    half of backlog/technical_debt.md item 11 — start() now calls
+    purge_older_than() for real, once, the same one-time-at-startup
+    pattern already established by MemoryLifecycleManager (Sprint 3.12)
+    and ActionAuditLog (Sprint 4.8, see that sprint's own
+    test_start_calls_purge_older_than_for_real)."""
+    store = ConversationSessionStore(SqliteClient(db_path), database_config)
+    calls = []
+    monkeypatch.setattr(store, "purge_older_than", lambda: calls.append(True) or 0)
+
+    store.start()
+
+    assert calls == [True]
+    store.stop()

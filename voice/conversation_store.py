@@ -69,14 +69,27 @@ class ConversationSessionStore:
 
     def start(self) -> None:
         """Open the SQLite connection and ensure the conversation-turns
-        table exists (idempotent)."""
+        table exists (idempotent).
+
+        Sprint 4.13 (Technical Debt Resolution): purge_older_than() is now
+        called for real, once, right here — the same one-time-at-startup
+        pattern already established by MemoryLifecycleManager (Sprint
+        3.12) and ActionAuditLog (Sprint 4.8), closing the "zero callers"
+        half of backlog/technical_debt.md item 11 exactly as that item's
+        own text proposed. A true periodic cadence remains Level 4 Part
+        B's Scheduler's job."""
         try:
             self._sqlite_client.connect()
             self._sqlite_client.execute(_CREATE_TABLE_SQL)
         except Exception as exc:
             raise ConversationStoreError(f"Failed to start conversation store: {exc}") from exc
         self._started = True
-        logger.info("Conversation session store started.")
+        purged = self.purge_older_than()
+        logger.info(
+            "Conversation session store started; purged %d turn(s) older than %d days.",
+            purged,
+            self._database_config.conversation_retention_days,
+        )
 
     def stop(self) -> None:
         self._sqlite_client.close()

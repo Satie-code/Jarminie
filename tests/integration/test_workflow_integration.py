@@ -171,18 +171,18 @@ def test_workflow_turn_with_a_high_risk_step_triggers_confirmation_but_cannot_be
 
     # The whole-workflow confirmation prompt is genuinely spoken first —
     # proof the real Sprint 4.7 flow was actually invoked, not skipped.
-    # It is NOT the rich, workflow-naming template text
+    # It IS the rich, workflow-naming template text
     # WorkflowExecutor._maybe_request_whole_workflow_confirmation() built
-    # (that text lives only in ConfirmationRequest.prompt_text) — this is
-    # backlog/technical_debt.md item 25's own gap, now confirmed for the
-    # first time against a real, live VoiceConfirmationService rather
-    # than a fake one: VoiceConfirmationService.request_confirmation()
-    # deliberately ignores ConfirmationRequest.prompt_text and rebuilds
-    # generic per-ActionType text instead (security/confirmation_
-    # service.py's own documented, tested behavior since Sprint 4.7).
+    # (backlog/technical_debt.md item 25, resolved in Sprint 4.13):
+    # ConfirmationRequest.has_custom_prompt=True now tells the real, live
+    # VoiceConfirmationService to speak prompt_text verbatim rather than
+    # rebuilding a generic per-ActionType description.
     _wait_for_speak_call_count(h.tts, 1)
     prompt_text, _ = h.tts.speak_calls[0]
-    assert prompt_text == "This will run a workflow step. Should I proceed?"
+    assert prompt_text == (
+        "This workflow 'Cleanup' will run 1 actions, including 1 higher-risk steps. "
+        "Should I proceed?"
+    )
 
     # No reply is ever pushed — the confirmation simply runs out its own
     # clock (security_config.confirmation_timeout_seconds, this harness's

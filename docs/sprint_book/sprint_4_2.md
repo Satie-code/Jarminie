@@ -211,3 +211,7 @@ None new. The `notepad.exe` finding is documented as an Engineering Decision (a 
 - **General, for any future sprint writing tests that spawn real GUI-shaped processes**: use the `sys.executable` + `time.sleep()` pattern established here, not `notepad.exe` or another packaged-app-redirected executable — see this sprint's own Engineering Decisions and the test file's module docstring.
 
 **Sprint 4.2 (Application Manager) is complete.** **Sprint 4.3 (File & Folder Operations) is next.**
+
+### Post-Sprint Fix (Technical Debt Resolution, 2026-07-28)
+
+`backlog/technical_debt.md` item 28 (found during Sprint 4.12's own adversarial audit): `ApplicationManager.execute()`'s `except (OSError, psutil.Error)` clause didn't catch `pywintypes.error` (confirmed not an `OSError` subclass), so a real Win32 failure from `focus()`'s own `SetForegroundWindow` call would propagate past this method's own boundary — already caught one layer up by `ActionRegistry._dispatch_once()`'s own outer `except Exception` (Sprint 4.1), so never a live safety gap, but this class couldn't produce its own specific error message for it, unlike `window_manager.py`'s already-complete handling of the identical exception type (Sprint 4.4). `pywintypes.error` added to `execute()`'s own except clause. 1 new regression test (`test_execute_focus_degrades_to_failed_on_a_real_pywintypes_error`, `tests/unit/device_control/test_application_manager.py`).

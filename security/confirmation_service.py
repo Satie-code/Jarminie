@@ -49,9 +49,15 @@ implementation ever sees the request (so even a future non-voice
 implementation gets a sensible, medium-agnostic description "for free")
 — VoiceConfirmationService then additionally reuses the very same
 function internally for what it actually speaks, rather than trusting a
-possibly-generic prompt_text unconditionally. One implementation, not
-two independently-maintained copies of the same describe-this-action
-logic.
+possibly-generic prompt_text unconditionally, UNLESS the caller set
+ConfirmationRequest.has_custom_prompt=True (Sprint 4.13, Technical Debt
+Resolution — closes backlog/technical_debt.md item 25), signaling that
+prompt_text was already built from richer context than build_prompt_text()
+could reconstruct from action_request alone (e.g. WorkflowExecutor's own
+whole-workflow prompt, which names the workflow/step count/high-risk
+count no single ActionRequest carries). One implementation, not two
+independently-maintained copies of the same describe-this-action logic,
+for every caller that doesn't opt out.
 """
 
 from __future__ import annotations
@@ -119,11 +125,26 @@ def build_prompt_text(action_request: ActionRequest, risk_level: RiskLevel) -> s
 class ConfirmationRequest:
     """prompt_text is a human-readable description of exactly what will
     happen, built from ActionRequest.parameters — the Explainability
-    Rule applied to a confirmation prompt, not just a decision trace."""
+    Rule applied to a confirmation prompt, not just a decision trace.
+
+    has_custom_prompt (Sprint 4.13, Technical Debt Resolution — closes
+    backlog/technical_debt.md item 25) tells VoiceConfirmationService to
+    speak prompt_text verbatim instead of rebuilding its own via
+    build_prompt_text()/_describe_action(). Default False preserves
+    every existing caller's behavior unchanged (PermissionGate.check()
+    never sets it, since build_prompt_text(request, risk_level) is
+    already the richest description a single ActionRequest can carry).
+    Set True only when a caller has built prompt_text from richer
+    context than a bare ActionRequest can express — e.g.
+    WorkflowExecutor's own whole-workflow prompt, which names the
+    workflow, its step count, and its higher-risk step count, none of
+    which the pseudo WORKFLOW_STEP ActionRequest it also builds could
+    honestly convey through _describe_action() alone."""
 
     action_request: ActionRequest
     risk_level: RiskLevel
     prompt_text: str
+    has_custom_prompt: bool = False
 
 
 class ConfirmationOutcome(Enum):
@@ -187,7 +208,11 @@ class VoiceConfirmationService:
             return ConfirmationOutcome.TIMED_OUT
 
         try:
-            prompt_text = self._build_prompt_text(request.action_request, request.risk_level)
+            prompt_text = (
+                request.prompt_text
+                if request.has_custom_prompt
+                else self._build_prompt_text(request.action_request, request.risk_level)
+            )
             voice_id = self._persona_manager.active_persona().voice_id
             self._session_manager.speak_reply(prompt_text, voice_id)
 

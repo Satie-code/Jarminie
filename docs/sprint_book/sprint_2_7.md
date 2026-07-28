@@ -139,3 +139,7 @@ Delivered exactly the files this sprint's spec named:
 **No real-hardware/model verification needed or run** — unlike the voice-pipeline sprints (2.1–2.6), this sprint's only external dependency is Python's stdlib `sqlite3` against a real file, which every test already exercises directly (no fake/mock stands in for SQLite itself; only the one write-failure-injection test uses a double, and only for the `execute()` call it needs to fail).
 
 `docs/STATUS.md` updated: Phase 2.2 (Conversation Engine) is now **Designing** (this sprint done; 2.8 Context Manager onward still Planned). **Sprint 2.8 (Context Manager) is next.**
+
+### Post-Sprint Fix (Technical Debt Resolution, 2026-07-28)
+
+`purge_older_than()` had no caller anywhere in the codebase since this sprint shipped it — logged as `backlog/technical_debt.md` item 11, which named its own resolution as ready to apply without waiting for a Scheduler ("`ConversationSessionStore.start()` could adopt the identical one-line change today"). `start()` now calls `purge_older_than()` once, right after the table is created, mirroring `MemoryLifecycleManager.start()` (Sprint 3.12) and `ActionAuditLog.start()` (Sprint 4.8) exactly. 1 new regression test (`test_start_calls_purge_older_than_for_real`, `tests/unit/voice/test_conversation_store.py`), matching `test_action_log.py`'s own equivalent test. A true periodic cadence remains Level 4 Part B's Scheduler's job — this closes only the "zero callers" half of the gap, same honest scoping as its two precedents.

@@ -139,6 +139,48 @@ def test_speaks_via_active_persona_voice_and_uses_configured_timeout():
     assert session_manager.capture_timeout_seconds == 15.0
 
 
+def test_has_custom_prompt_true_speaks_prompt_text_verbatim():
+    """Sprint 4.13 (Technical Debt Resolution) — closes
+    backlog/technical_debt.md item 25: a caller that built prompt_text
+    from richer context than a single ActionRequest can carry (e.g.
+    WorkflowExecutor's own whole-workflow prompt) gets it spoken
+    verbatim, not rebuilt from build_prompt_text()."""
+    session_manager = _FakeSessionManager(active=True)
+    session_manager.reply_to_return = "yes"
+    service = VoiceConfirmationService(session_manager, _FakePersonaManager(), 15.0)
+    request = ConfirmationRequest(
+        action_request=make_action_request(ActionType.WORKFLOW_STEP),
+        risk_level=RiskLevel.HIGH,
+        prompt_text="This workflow 'Cleanup' will run 3 actions, including 1 higher-risk steps.",
+        has_custom_prompt=True,
+    )
+
+    service.request_confirmation(request)
+
+    spoken_text, _ = session_manager.speak_reply_calls[0]
+    assert spoken_text == (
+        "This workflow 'Cleanup' will run 3 actions, including 1 higher-risk steps."
+    )
+
+
+def test_has_custom_prompt_false_still_rebuilds_a_generic_description():
+    """Default behavior (every PermissionGate.check()-originated request)
+    is unchanged by item 25's fix — has_custom_prompt defaults False."""
+    session_manager = _FakeSessionManager(active=True)
+    session_manager.reply_to_return = "yes"
+    service = VoiceConfirmationService(session_manager, _FakePersonaManager(), 15.0)
+    request = ConfirmationRequest(
+        action_request=make_action_request(ActionType.WORKFLOW_STEP),
+        risk_level=RiskLevel.HIGH,
+        prompt_text="This is completely ignored when has_custom_prompt is False.",
+    )
+
+    service.request_confirmation(request)
+
+    spoken_text, _ = session_manager.speak_reply_calls[0]
+    assert spoken_text == "This will run a workflow step. Should I proceed?"
+
+
 @pytest.mark.parametrize(
     "reply_text,expected_outcome",
     [

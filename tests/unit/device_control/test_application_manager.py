@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import psutil
 import pytest
+import pywintypes
 
 from config.schema import DeviceControlConfig
 from device_control.action_engine import ActionContext, ActionRequest, ActionStatus, ActionType
@@ -289,6 +290,31 @@ def test_execute_focus_missing_process_id_fails(manager):
     result = manager.execute(make_request("focus"))
     assert result.status is ActionStatus.FAILED
     assert "process_id" in result.error_message
+
+
+def test_execute_focus_degrades_to_failed_on_a_real_pywintypes_error(manager):
+    """Sprint 4.13 (Technical Debt Resolution) — closes
+    backlog/technical_debt.md item 28: pywintypes.error is not an
+    OSError subclass, so a real Win32 focus failure would previously
+    propagate past execute()'s own boundary uncaught (already caught one
+    layer up by ActionRegistry._dispatch_once()'s own outer except
+    Exception, but this class couldn't produce its own specific error
+    message for it, unlike window_manager.py's own established handling
+    of the identical exception type)."""
+    tracked = _spawn_sleeper(manager)
+    request = make_request("focus", process_id=tracked.process_id)
+
+    with (
+        patch.object(manager, "_find_window_for_process", return_value=424242),
+        patch(
+            "device_control.application_manager.win32gui.SetForegroundWindow",
+            side_effect=pywintypes.error(5, "SetForegroundWindow", "Access is denied."),
+        ),
+    ):
+        result = manager.execute(request)
+
+    assert result.status is ActionStatus.FAILED
+    assert result.error_message
 
 
 # --- unknown/missing operation ------------------------------------------------------

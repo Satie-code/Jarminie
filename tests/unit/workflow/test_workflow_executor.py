@@ -227,6 +227,10 @@ def test_whole_workflow_confirmation_triggers_at_step_count_threshold():
     prompt_text = confirmation_service.requests[0].prompt_text
     assert "Morning Routine" in prompt_text
     assert "5 actions" in prompt_text
+    # Sprint 4.13 (Technical Debt Resolution, backlog/technical_debt.md
+    # item 25): tells VoiceConfirmationService to speak this richer
+    # template text verbatim rather than rebuilding a generic one.
+    assert confirmation_service.requests[0].has_custom_prompt is True
     assert result.whole_workflow_confirmation is ConfirmationOutcome.CONFIRMED
     assert len(registry.dispatched) == 5  # confirmed -> steps still run
 

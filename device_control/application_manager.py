@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import psutil
+import pywintypes
 import win32gui
 import win32process
 
@@ -75,9 +76,19 @@ class ApplicationManager:
     values (they are read/low-risk variants of the same "application"
     concern per this sprint's own spec).
 
-    execute() only ever catches OSError/psutil.Error — errors this
-    class can meaningfully interpret and report — never a bare except,
-    per docs/CODING_STANDARDS.md.
+    execute() only ever catches OSError/psutil.Error/pywintypes.error —
+    errors this class can meaningfully interpret and report — never a
+    bare except, per docs/CODING_STANDARDS.md. pywintypes.error was added
+    in Sprint 4.13 (Technical Debt Resolution, closes
+    backlog/technical_debt.md item 28) — it is not an OSError subclass,
+    so a real Win32 failure from focus()'s own win32gui.
+    SetForegroundWindow(hwnd) call would otherwise propagate past this
+    method's own boundary uncaught, mirroring window_manager.py's own
+    established precedent for the identical exception type (Sprint 4.4).
+    ActionRegistry._dispatch_once()'s own outer except Exception already
+    caught this either way (Sprint 4.1) — this only gives ApplicationManager
+    its own, more specific error message for this one case, same as
+    WindowManager already has.
     """
 
     def __init__(self, device_control_config: DeviceControlConfig) -> None:
@@ -98,7 +109,7 @@ class ApplicationManager:
                 return self._handle_focus(request)
             if operation == "list":
                 return self._handle_list(request)
-        except (OSError, psutil.Error) as exc:
+        except (OSError, psutil.Error, pywintypes.error) as exc:
             logger.exception("ApplicationManager operation %r failed", operation)
             return ActionResult(
                 request=request,

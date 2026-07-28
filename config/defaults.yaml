@@ -170,6 +170,10 @@ device_control:
   # Sprint 4.8 — Action Logging & Recovery.
   audit_log_retention_days: 90
   max_retry_attempts: 2
+  # Sprint 4.12 — Error Handling & Recovery Hardening. A short, bounded
+  # post-launch liveness check — see config/schema.py's DeviceControlConfig
+  # docstring.
+  application_launch_readiness_check_seconds: 0.5
 
 security:
   # Sprint 4.7 — Permission & Confirmation System. Empty: every

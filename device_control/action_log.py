@@ -117,6 +117,14 @@ def _build_parameters_summary(result: ActionResult) -> str:
         process_id = getattr(result.output, "process_id", None)
         if process_id is not None:
             parts.append(f"process_id={process_id}")
+        readiness_confirmed = getattr(result.output, "readiness_confirmed", None)
+        if readiness_confirmed is not None:
+            # Sprint 4.12 hardening (scenario a): surfaces
+            # ApplicationManager's own bounded post-launch liveness
+            # check in the audit trail — a launch that spawned but
+            # couldn't be confirmed alive is now distinguishable here,
+            # not just in the live in-process TrackedApplication.
+            parts.append(f"readiness_confirmed={readiness_confirmed}")
     return ", ".join(parts)
 
 
@@ -200,24 +208,35 @@ class ActionAuditLog:
         result: ActionResult,
         permission_decision: PermissionDecision,
         risk_level: RiskLevel | None,
-    ) -> ActionAuditRecord:
+    ) -> ActionAuditRecord | None:
         """Never raises out to the caller — ActionRegistry.dispatch()
         must not fail an otherwise-successful action just because the
         audit write itself failed (same discipline as
-        ConversationSessionStore.record_turn())."""
-        action_type_value = result.request.action_type.value
-        record = ActionAuditRecord(
-            action_type=action_type_value,
-            parameters_summary=_build_parameters_summary(result),
-            requested_by=result.request.context.requested_by,
-            risk_level=risk_level.value if risk_level is not None else None,
-            permission_decision=permission_decision.value,
-            status=result.status.value,
-            error_message=result.error_message,
-            is_reversible=action_type_value in _REVERSIBLE_ACTION_TYPES,
-            recorded_at=datetime.now(UTC),
-        )
+        ConversationSessionStore.record_turn()).
+
+        Sprint 4.12 hardening (scenario f): the ENTIRE body is guarded
+        now, not just the SQLite INSERT — this method's own docstring
+        already promised "never raises," but building the record itself
+        (_build_parameters_summary(), reading result.request.context.
+        requested_by, etc.) previously ran unguarded before the try
+        block, an incomplete implementation of that promise rather than
+        a deliberate scope limit. Returns None only on this failure
+        path — no production caller inspects the return value
+        (ActionRegistry.dispatch() discards it), so widening this
+        already-Optional-shaped contract is safe and additive."""
         try:
+            action_type_value = result.request.action_type.value
+            record = ActionAuditRecord(
+                action_type=action_type_value,
+                parameters_summary=_build_parameters_summary(result),
+                requested_by=result.request.context.requested_by,
+                risk_level=risk_level.value if risk_level is not None else None,
+                permission_decision=permission_decision.value,
+                status=result.status.value,
+                error_message=result.error_message,
+                is_reversible=action_type_value in _REVERSIBLE_ACTION_TYPES,
+                recorded_at=datetime.now(UTC),
+            )
             self._sqlite_client.execute(
                 "INSERT INTO action_audit_log "
                 "(action_type, parameters_summary, requested_by, risk_level, "
@@ -236,7 +255,10 @@ class ActionAuditLog:
                 ),
             )
         except Exception:
-            logger.exception("Failed to persist action audit record for %s.", action_type_value)
+            logger.exception(
+                "Failed to persist action audit record for %s.", result.request.action_type.value
+            )
+            return None
         return record
 
     def query(

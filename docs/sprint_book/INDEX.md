@@ -131,9 +131,9 @@ See the "Level 4 breakdown changes (2026-07-20)" note above for why this table i
 | 4.8    | Action Logging & Recovery                                  | 4.1/4.2     | 4.1, 4.2, 4.3, 4.6, 4.7   | Medium      | [sprint_4_8.md](sprint_4_8.md) — **Complete** |
 | 4.9    | Workflow Builder                                           | 4.2         | 4.1, 3.11                 | Medium      | [sprint_4_9.md](sprint_4_9.md) — **Complete** |
 | 4.10   | Workflow Executor                                          | 4.2         | 4.1, 4.7, 4.8, 4.9        | Medium–High | [sprint_4_10.md](sprint_4_10.md) — **Complete** |
-| 4.11   | Workflow & Device Control Integration                      | integration | 4.1–4.10, 2.12, 3.12      | High        | [sprint_4_11.md](sprint_4_11.md)     |
-| 4.12   | Error Handling & Recovery Hardening                        | reliability | 4.11                      | Medium      | [sprint_4_12.md](sprint_4_12.md)     |
-| 4.13   | Integration Testing & Level Freeze (Part A)                | level gate  | 4.12                      | Medium–High | [sprint_4_13.md](sprint_4_13.md)     |
+| 4.11   | Workflow & Device Control Integration                      | integration | 4.1–4.10, 2.12, 3.12      | High        | [sprint_4_11.md](sprint_4_11.md) — **Complete** |
+| 4.12   | Error Handling & Recovery Hardening                        | reliability | 4.11                      | Medium      | [sprint_4_12.md](sprint_4_12.md) — **Complete** |
+| 4.13   | Integration Testing & Level Freeze (Part A)                | level gate  | 4.12                      | Medium–High | [sprint_4_13.md](sprint_4_13.md) — **Complete** |
 
 ### Part B — Scheduler & Internet Agent (roadmap granularity only, deferred)
 

@@ -10,14 +10,22 @@ step rows wholesale (delete-then-reinsert) rather than diffing —
 matching this sprint's own explicit "no versioning, save() overwrites
 outright" Potential Risk, a deliberate scope limit, not an oversight.
 
-No Fail Gracefully wrapping around SQLite errors here (unlike
-ConversationSessionStore/ActionAuditLog, which already went through
-their own dedicated hardening passes) — this sprint's own Implementation
-Tasks name only the max_steps_per_workflow ValueError as a required
-error path; systematic exception hardening across every Level 4 Part A
-persistence class is Sprint 4.12's (Error Handling & Recovery Hardening)
-job, the same "hardening arrives in its own later sprint" precedent
-already established for Level 2 (2.13) and Level 3 (3.13).
+Sprint 4.13 (Integration Testing & Level Freeze) adversarial re-read
+finding: get()/list_all() now degrade gracefully (None/[]) on a SQLite
+failure, matching MemoryStore's own established Fail Gracefully
+convention (Sprint 3.14) — these are this class's only two methods with
+a real, live production caller today (WorkflowExecutor.run() and
+CommunicationPipeline._resolve_workflow_by_name(), respectively; the
+former already had a narrower guard of its own from Sprint 4.12, kept
+as deliberate defense in depth, not made redundant by this one).
+save()/delete()/set_enabled() remain deliberately unhardened — per this
+project's own consistently-applied "do not harden speculatively ahead
+of a real caller" discipline (see docs/backlog/technical_debt.md items
+11/15/17) — since none of the three has any production caller yet; a
+workflow-authoring UI/voice surface, whenever it arrives, is what should
+finally give them one and prompt the same treatment. See
+docs/backlog/technical_debt.md item 27 for the full history of this
+finding.
 """
 
 from __future__ import annotations
@@ -125,20 +133,42 @@ class WorkflowStore:
             )
 
     def get(self, workflow_id: str) -> WorkflowDefinition | None:
-        rows = self._sqlite_client.query(
-            "SELECT workflow_id, name, created_by, created_at, is_enabled "
-            "FROM workflows WHERE workflow_id = ?",
-            (workflow_id,),
-        )
-        if not rows:
+        """Sprint 4.13 hardening: a SQLite failure (either this query or
+        _build_definition()'s own step-row query) degrades to None — the
+        same "nothing found" outcome as a genuinely-missing workflow,
+        matching MemoryStore.get_by_id()'s own established convention.
+        WorkflowExecutor.run()'s own Sprint 4.12 guard around this call
+        remains in place as deliberate defense in depth, not made
+        redundant by this one — see workflow_executor.py's own
+        docstring."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT workflow_id, name, created_by, created_at, is_enabled "
+                "FROM workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            if not rows:
+                return None
+            return self._build_definition(rows[0])
+        except Exception:
+            logger.exception("Failed to read workflow %s; treating as not found.", workflow_id)
             return None
-        return self._build_definition(rows[0])
 
     def list_all(self) -> list[WorkflowDefinition]:
-        rows = self._sqlite_client.query(
-            "SELECT workflow_id, name, created_by, created_at, is_enabled FROM workflows"
-        )
-        return [self._build_definition(row) for row in rows]
+        """Sprint 4.13 hardening: a SQLite failure degrades to an empty
+        list — CommunicationPipeline._resolve_workflow_by_name() (this
+        method's only real caller today) already treats "no match" as a
+        normal, reportable outcome ("I couldn't find a workflow named
+        ..."), so this closes a real, previously-unguarded gap without
+        changing that caller's own behavior at all."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT workflow_id, name, created_by, created_at, is_enabled FROM workflows"
+            )
+            return [self._build_definition(row) for row in rows]
+        except Exception:
+            logger.exception("Failed to list workflows.")
+            return []
 
     def delete(self, workflow_id: str) -> bool:
         if self.get(workflow_id) is None:

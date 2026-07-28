@@ -259,6 +259,14 @@ def test_blank_application_allowlist_entry_raises():
         config.validate()
 
 
+def test_non_positive_application_launch_readiness_check_seconds_raises():
+    config = AppConfig(
+        device_control=DeviceControlConfig(application_launch_readiness_check_seconds=0)
+    )
+    with pytest.raises(ConfigError, match="application_launch_readiness_check_seconds"):
+        config.validate()
+
+
 def test_default_allowed_file_roots_is_non_empty_and_valid():
     """The computed default (Path.home()-based) must itself pass
     validation -- not just a hand-constructed override."""

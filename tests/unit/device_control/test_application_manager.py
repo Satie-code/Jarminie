@@ -107,6 +107,41 @@ def test_execute_launch_succeeds_and_returns_tracked_application(manager):
 
     assert result.status is ActionStatus.SUCCEEDED
     assert isinstance(result.output, TrackedApplication)
+
+
+# --- launch readiness check (Sprint 4.12 hardening, scenario a) --------------------
+
+
+def test_launch_confirms_readiness_for_a_long_running_process(manager):
+    tracked = manager.launch(sys.executable, requested_by="test", args=_SLEEP_ARGS)
+    assert tracked.readiness_confirmed is True
+
+
+def test_launch_reports_unconfirmed_readiness_for_a_process_that_exits_immediately():
+    """A real, induced case — the child process genuinely exits before
+    the bounded readiness window elapses, not a mocked exception."""
+    manager = ApplicationManager(
+        DeviceControlConfig(application_launch_readiness_check_seconds=0.3)
+    )
+    tracked = manager.launch(sys.executable, requested_by="test", args=["-c", "pass"])
+
+    assert tracked.readiness_confirmed is False
+    assert psutil.pid_exists(tracked.process_id) is False
+
+
+def test_launch_still_reports_succeeded_even_when_readiness_is_unconfirmed():
+    """Reporting FAILED would be dishonest — the process genuinely did
+    spawn; unconfirmed readiness is a distinct, additional signal, not a
+    downgrade of ActionStatus itself."""
+    manager = ApplicationManager(
+        DeviceControlConfig(application_launch_readiness_check_seconds=0.3)
+    )
+    result = manager.execute(
+        make_request("launch", executable_path=sys.executable, args=["-c", "pass"])
+    )
+
+    assert result.status is ActionStatus.SUCCEEDED
+    assert result.output.readiness_confirmed is False
     assert result.output in manager.list_tracked()
 
 

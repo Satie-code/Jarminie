@@ -8,9 +8,12 @@ already the interpreter running these tests).
 """
 
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import PureWindowsPath
 from unittest.mock import patch
+
+import psutil
 
 from config.schema import DeviceControlConfig
 from device_control.action_engine import ActionContext, ActionRequest, ActionStatus, ActionType
@@ -136,6 +139,35 @@ def test_command_exceeding_timeout_is_reported_timed_out():
     assert isinstance(result.output, CommandResult)
     assert result.output.timed_out is True
     assert result.output.exit_code is None
+
+
+def test_command_exceeding_timeout_leaves_no_orphaned_process(tmp_path):
+    """Sprint 4.12 hardening (scenario c): CommandResult.timed_out=True
+    was already correctly reported (Sprint 4.5's own designed behavior,
+    via subprocess.run()'s documented timeout handling, which calls
+    Popen.kill() internally before re-raising TimeoutExpired) — this is
+    a real, adversarial regression test proving that guarantee actually
+    holds, not just that the result is reported timed_out. The hanging
+    script writes its own real OS pid to a file before sleeping, so this
+    test can verify via psutil that the process is genuinely gone
+    afterward, independent of anything CommandResult itself reports."""
+    engine = _engine(command_timeout_seconds=0.3)
+    pid_file = tmp_path / "pid.txt"
+    script = (
+        f"import os, time\n"
+        f"with open(r'{pid_file}', 'w') as f:\n"
+        f"    f.write(str(os.getpid()))\n"
+        f"time.sleep(5)\n"
+    )
+
+    result = engine.execute(make_request([sys.executable, "-c", script]))
+
+    assert result.output.timed_out is True
+    spawned_pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 2.0
+    while psutil.pid_exists(spawned_pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not psutil.pid_exists(spawned_pid), "Timed-out subprocess was left running (orphaned)."
 
 
 # --- nonexistent executable (approved by name, absent in reality) -------------------

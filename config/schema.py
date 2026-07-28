@@ -353,6 +353,17 @@ class DeviceControlConfig:
     failure (a timeout, or a Sprint 4.6 resource-gate block) — 0 disables
     retry entirely, a valid, honest configuration, not a special-cased
     "off" flag.
+
+    application_launch_readiness_check_seconds (Sprint 4.12 — Error
+    Handling & Recovery Hardening) bounds ApplicationManager.launch()'s
+    own post-spawn liveness check: a short, non-blocking-on-exit poll
+    confirming the process is still running (not a real "is this app
+    responsive" guarantee — no universal OS-level signal for that exists
+    without a window handle, which many valid launches never create).
+    A process that has already exited within this window is reported via
+    TrackedApplication.readiness_confirmed=False, still ActionStatus.
+    SUCCEEDED (the process DID spawn) — see device_control/
+    application_manager.py's own docstring.
     """
 
     application_allowlist: list[str] | None = None
@@ -367,6 +378,7 @@ class DeviceControlConfig:
     )
     audit_log_retention_days: int = 90
     max_retry_attempts: int = 2
+    application_launch_readiness_check_seconds: float = 0.5
 
 
 _VALID_RISK_LEVEL_VALUES: frozenset[str] = frozenset({"low", "medium", "high"})
@@ -701,6 +713,11 @@ class AppConfig:
             raise ConfigError(
                 "device_control.max_retry_attempts must not be negative, "
                 f"got {self.device_control.max_retry_attempts}"
+            )
+        if self.device_control.application_launch_readiness_check_seconds <= 0:
+            raise ConfigError(
+                "device_control.application_launch_readiness_check_seconds must be positive, "
+                f"got {self.device_control.application_launch_readiness_check_seconds}"
             )
 
     def _validate_security(self) -> None:

@@ -304,3 +304,133 @@ def test_nonexistent_workflow_id_degrades_to_reportable_abort_not_exception():
     assert result.whole_workflow_confirmation is None
     assert confirmation_service.requests == []
     assert registry.dispatched == []
+
+
+# --- Sprint 4.12 hardening (scenario d): internal faults never propagate ------------
+
+
+class RaisingWorkflowStore:
+    def get(self, workflow_id: str):
+        raise RuntimeError("workflow_store.get() exploded")
+
+
+class RaisingActionRegistry:
+    def __init__(self) -> None:
+        self.dispatched: list[ActionRequest] = []
+
+    def dispatch(self, request: ActionRequest) -> ActionResult:
+        self.dispatched.append(request)
+        raise RuntimeError("dispatch() exploded")
+
+
+class RaisingConfirmationService:
+    def __init__(self) -> None:
+        self.requests: list[ConfirmationRequest] = []
+
+    def request_confirmation(self, request: ConfirmationRequest) -> ConfirmationOutcome:
+        self.requests.append(request)
+        raise RuntimeError("request_confirmation() exploded")
+
+
+def test_workflow_store_get_exception_degrades_to_reportable_abort_not_exception():
+    executor = WorkflowExecutor(
+        workflow_store=RaisingWorkflowStore(),
+        action_registry=FakeActionRegistry(),
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=FakeConfirmationService(),
+        workflow_config=WorkflowConfig(),
+    )
+
+    result = executor.run("wf-1", BASE_CONTEXT)  # must not raise
+
+    assert result.aborted_early is True
+    assert result.step_results == []
+
+
+def test_confirmation_service_exception_times_out_and_aborts_before_any_dispatch():
+    steps = [make_step(i) for i in range(5)]  # triggers the whole-workflow prompt
+    definition = make_definition(steps)
+    registry = FakeActionRegistry()
+    executor = WorkflowExecutor(
+        workflow_store=FakeWorkflowStore(definition),
+        action_registry=registry,
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=RaisingConfirmationService(),
+        workflow_config=WorkflowConfig(),
+    )
+
+    result = executor.run("wf-1", BASE_CONTEXT)  # must not raise
+
+    assert result.aborted_early is True
+    assert result.whole_workflow_confirmation is ConfirmationOutcome.TIMED_OUT
+    assert registry.dispatched == []
+
+
+def test_dispatch_exception_preserves_prior_step_results_and_marks_the_fault_distinctly():
+    steps = [make_step(0), make_step(1, continue_on_failure=False), make_step(2)]
+    definition = make_definition(steps)
+    registry = RaisingActionRegistry()
+    executor = WorkflowExecutor(
+        workflow_store=FakeWorkflowStore(definition),
+        action_registry=registry,
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=FakeConfirmationService(),
+        workflow_config=WorkflowConfig(),
+    )
+
+    result = executor.run("wf-1", BASE_CONTEXT)  # must not raise
+
+    assert len(registry.dispatched) == 1  # aborted after the first step's own fault
+    assert result.aborted_early is True
+    assert len(result.step_results) == 3
+    assert result.step_results[0].action_result.status is ActionStatus.FAILED
+    assert "internal executor fault" in result.step_results[0].action_result.error_message.lower()
+    assert result.step_results[1].skipped is True
+    assert result.step_results[2].skipped is True
+
+
+@pytest.mark.parametrize(
+    ("steps_count", "workflow_store_raises", "confirmation_raises", "dispatch_raises"),
+    [
+        (1, True, False, False),
+        (5, False, True, False),
+        (2, False, False, True),
+    ],
+    ids=[
+        "workflow_store_get_raises",
+        "confirmation_service_raises",
+        "action_registry_dispatch_raises",
+    ],
+)
+def test_run_sweep_every_internal_call_site_fault_degrades_gracefully(
+    steps_count, workflow_store_raises, confirmation_raises, dispatch_raises
+):
+    """Sprint 4.12 Acceptance Criteria, verbatim: 'No failure anywhere in
+    ... WorkflowExecutor.run() propagates as an unhandled exception —
+    verified by a dedicated adversarial test sweeping every internal
+    call site with an injected failure.' Consolidates the three
+    individual scenario-d tests above (each with its own, more specific
+    assertions) into one explicit sweep across all three of run()'s own
+    internal call sites."""
+    steps = [make_step(i) for i in range(steps_count)]
+    definition = make_definition(steps)
+
+    workflow_store = (
+        RaisingWorkflowStore() if workflow_store_raises else FakeWorkflowStore(definition)
+    )
+    confirmation_service = (
+        RaisingConfirmationService() if confirmation_raises else FakeConfirmationService()
+    )
+    action_registry = RaisingActionRegistry() if dispatch_raises else FakeActionRegistry()
+
+    executor = WorkflowExecutor(
+        workflow_store=workflow_store,
+        action_registry=action_registry,
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=confirmation_service,
+        workflow_config=WorkflowConfig(),
+    )
+
+    result = executor.run("wf-1", BASE_CONTEXT)  # must never raise, for any case above
+
+    assert result.aborted_early is True

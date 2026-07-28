@@ -43,6 +43,35 @@ implementation would use verbatim. Changing VoiceConfirmationService's
 own already-shipped, already-tested behavior is a Sprint 4.7 concern, not
 this sprint's own Files to Modify — see docs/backlog/technical_debt.md
 item 25.
+
+Sprint 4.12 hardening (scenario d): three internal call sites inside
+run() are now individually, narrowly guarded — never one blanket catch
+around the whole method, which would risk masking an unrelated
+implementation bug (this sprint's own explicit Potential Risk) — so an
+unexpected internal fault at any of them degrades to an honest result
+instead of propagating and losing every already-completed step's own
+WorkflowStepResult:
+
+- workflow_store.get(workflow_id) — WorkflowStore's own SQLite calls
+  have no Fail Gracefully wrapping of their own yet (see workflow_store.py's
+  own docstring, which named this sprint as the reason why); guarded
+  here at the one call site this class makes, degrading to the same
+  reportable abort already used for "workflow does not exist" rather
+  than raising. WorkflowStore itself remains otherwise unhardened —
+  see docs/backlog/technical_debt.md item 27.
+- confirmation_service.request_confirmation() (inside
+  _maybe_request_whole_workflow_confirmation()) — any ConfirmationService
+  implementation (not just VoiceConfirmationService, itself separately
+  hardened this same sprint) that raised here would otherwise escape
+  run() entirely; degrades to ConfirmationOutcome.TIMED_OUT, the same
+  fail-safe-down value the whole confirmation system already uses.
+- action_registry.dispatch() per step — already guaranteed not to raise
+  by Sprints 4.1/4.6/4.7/4.8's own hardening, so this is pure defense in
+  depth (the scenario named "not just a step's own ActionResult.FAILED"
+  explicitly asks for it anyway); degrades to a FAILED ActionResult
+  whose error_message names this as an internal executor fault, never
+  conflated with a normal step DENIED/FAILED per the Data Flow's own
+  "distinguishable in the result, not conflated" requirement.
 """
 
 from __future__ import annotations
@@ -135,7 +164,15 @@ class WorkflowExecutor:
         started_at = datetime.now(UTC)
         run_id = str(uuid.uuid4())
 
-        definition = self._workflow_store.get(workflow_id)
+        try:
+            definition = self._workflow_store.get(workflow_id)
+        except Exception:
+            logger.exception(
+                "WorkflowExecutor.run(): workflow_store.get(%s) raised an unexpected "
+                "internal fault; aborting as if the workflow could not be found.",
+                workflow_id,
+            )
+            return self._aborted_result(workflow_id, run_id, started_at, None)
         if definition is None:
             logger.warning("WorkflowExecutor.run(): workflow %s does not exist.", workflow_id)
             return self._aborted_result(workflow_id, run_id, started_at, None)
@@ -177,7 +214,25 @@ class WorkflowExecutor:
                 )
                 continue
 
-            result = self._action_registry.dispatch(request)
+            try:
+                result = self._action_registry.dispatch(request)
+            except Exception:
+                logger.exception(
+                    "WorkflowExecutor.run(): action_registry.dispatch() raised an "
+                    "unexpected internal fault for step %d of workflow %s; aborting "
+                    "with every already-completed step's own result preserved.",
+                    step.step_index,
+                    workflow_id,
+                )
+                result = ActionResult(
+                    request=request,
+                    status=ActionStatus.FAILED,
+                    completed_at=datetime.now(UTC),
+                    error_message=(
+                        "Internal executor fault while dispatching this step "
+                        "(not a normal step failure/denial)."
+                    ),
+                )
             step_results.append(
                 WorkflowStepResult(step_index=step.step_index, action_result=result, skipped=False)
             )
@@ -235,7 +290,16 @@ class WorkflowExecutor:
             risk_level=RiskLevel.HIGH if high_risk_count > 0 else RiskLevel.MEDIUM,
             prompt_text=prompt_text,
         )
-        outcome = self._confirmation_service.request_confirmation(confirmation_request)
+        try:
+            outcome = self._confirmation_service.request_confirmation(confirmation_request)
+        except Exception:
+            logger.exception(
+                "ConfirmationService.request_confirmation() raised an unexpected "
+                "internal fault for workflow %s; timing out (denying) rather than "
+                "risking an unconfirmed run.",
+                definition.workflow_id,
+            )
+            return ConfirmationOutcome.TIMED_OUT
         logger.info(
             "Whole-workflow confirmation for %s (%d steps, %d high-risk): %s",
             definition.workflow_id,

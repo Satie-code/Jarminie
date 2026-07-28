@@ -13,6 +13,14 @@ Two hard, structural invariants, not configurable overrides:
   False (not intended for any shipped config — see
   config/schema.py's DeviceControlConfig docstring), delete() refuses
   to run at all rather than silently downgrading safety.
+
+Sprint 4.12 hardening (scenario b): _handle_move() no longer delegates
+to a single opaque shutil.move() call — it copies, verifies the
+destination genuinely exists, then separately deletes the original,
+so a failure removing the source after a successful copy (a locked or
+read-only file, most commonly) is reported as a specific, actionable
+error naming both paths, never a generic failure that silently leaves
+a duplicated file unexplained.
 """
 
 from __future__ import annotations
@@ -169,10 +177,36 @@ class FileOperationsManager:
         return _OperationOutcome(path=str(target), operation="file_create")
 
     def _handle_move(self, request: ActionRequest) -> _OperationOutcome:
+        """Sprint 4.12 hardening (scenario b): an explicit copy, then a
+        post-copy existence verification, then a separately-guarded
+        delete of the original — replacing a single opaque shutil.move()
+        call, which internally does exactly this same copy-then-delete
+        sequence for a cross-device move but gives this class no
+        visibility into which half failed. If the delete step itself
+        fails (e.g. the source is locked or read-only), the destination
+        copy has already genuinely succeeded — reporting a clean
+        SUCCEEDED with a silently-duplicated source would hide real,
+        surprising state from the caller; this raises a specific,
+        actionable OSError instead, never a generic "move failed"."""
         source, destination = self._resolve_source_and_destination(request)
         if destination.exists():
             raise OSError(f"Destination already exists: {destination}")
-        shutil.move(str(source), str(destination))
+        if source.is_dir():
+            shutil.copytree(str(source), str(destination))
+        else:
+            shutil.copy2(str(source), str(destination))
+        if not destination.exists():
+            raise OSError(f"Move failed: destination was not created: {destination}")
+        try:
+            if source.is_dir():
+                shutil.rmtree(str(source))
+            else:
+                source.unlink()
+        except OSError as exc:
+            raise OSError(
+                f"Copied to {destination} but could not remove the original at "
+                f"{source} — manual cleanup may be needed: {exc}"
+            ) from exc
         return _OperationOutcome(path=str(destination), operation="file_move")
 
     def _handle_copy(self, request: ActionRequest) -> _OperationOutcome:

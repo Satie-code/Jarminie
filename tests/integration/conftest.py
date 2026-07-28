@@ -313,6 +313,21 @@ def pipeline_harness(tmp_path, voice_config):
     device_control_config = DeviceControlConfig(
         allowed_file_roots=[str(tmp_path)],
         application_allowlist=["hostname.exe"],
+        # Post-Sprint Fix (found during Sprint 4.12's own full-suite run):
+        # resource_gate_action_types defaults to ["launch_application",
+        # "system_command"], which makes ActionResourceGate sample the
+        # REAL host machine's own current CPU/RAM via ResourceMonitor —
+        # a genuine, non-deterministic environmental dependency this
+        # harness otherwise deliberately avoids (fakes stand in for
+        # every other hardware/model boundary). Confirmed concretely: a
+        # real launch_application dispatch was blocked here because
+        # this development machine's own real RAM usage was genuinely
+        # at 90-96% at the time, unrelated to anything this test
+        # exercises. Empty here disables real resource sampling for
+        # this harness entirely — resource-gate blocking behavior
+        # itself is already covered by tests/unit/device_control/
+        # test_resource_gate.py's own dedicated, deterministic suite.
+        resource_gate_action_types=[],
     )
     security_config = SecurityConfig(confirmation_timeout_seconds=2.0)
     workflow_config = WorkflowConfig()

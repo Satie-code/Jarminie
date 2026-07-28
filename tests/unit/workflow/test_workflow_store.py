@@ -207,3 +207,58 @@ def test_health_check_false_before_start(tmp_path):
 
 def test_health_check_true_after_start(store):
     assert store.health_check() is True
+
+
+# --- Sprint 4.13 hardening: SQLite failure handling (adversarial re-read) -----------
+# get()/list_all() are this class's only two methods with a real, live production
+# caller today (WorkflowExecutor.run(), CommunicationPipeline._resolve_workflow_
+# by_name()) — see workflow_store.py's own docstring and docs/backlog/
+# technical_debt.md item 27 for why save()/delete()/set_enabled() are not
+# hardened here.
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test double"
+    pattern (tests/unit/memory/test_memory_store.py, Sprint 3.14) — a real
+    SqliteClient whose query() can be switched to fail on demand, after
+    start() has already succeeded."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def _make_raising_store(tmp_path) -> tuple[WorkflowStore, _RaisingSqliteClient]:
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    store = WorkflowStore(client, WorkflowConfig())
+    store.start()  # succeeds — failure is switched on only afterward
+    return store, client
+
+
+def test_get_degrades_to_none_on_a_sqlite_read_failure(tmp_path):
+    store, client = _make_raising_store(tmp_path)
+    try:
+        store.save(make_definition())
+        client.raise_on_query = True
+
+        assert store.get("wf-1") is None
+    finally:
+        client.raise_on_query = False
+        store.stop()
+
+
+def test_list_all_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    store, client = _make_raising_store(tmp_path)
+    try:
+        store.save(make_definition())
+        client.raise_on_query = True
+
+        assert store.list_all() == []
+    finally:
+        client.raise_on_query = False
+        store.stop()

@@ -554,3 +554,62 @@ def test_non_transient_failure_is_never_retried():
     assert result.status is ActionStatus.FAILED
     assert result.error_message == "Executor raised an unexpected internal error."
     assert executor.call_count == 1
+
+
+# --- Sprint 4.12 hardening (scenario f): audit-log failure never affects the ---------
+# --- action's own real, returned result --------------------------------------------
+
+
+class RaisingAuditLog:
+    def record(self, result, permission_decision, risk_level):
+        raise RuntimeError("audit log exploded")
+
+
+def test_audit_log_exception_does_not_affect_the_returned_action_result():
+    """Deliberate defense in depth: ActionAuditLog.record() already
+    guards its own entire body (also hardened this sprint), but this
+    proves dispatch() itself never trusts that alone — a raising
+    audit_log implementation still leaves the real action outcome
+    completely unaffected."""
+    permission_gate = StubPermissionGate(PermissionDecision.ALLOW)
+    registry = ActionRegistry(permission_gate, audit_log=RaisingAuditLog())
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())
+
+    assert result.status is ActionStatus.SUCCEEDED
+    assert executor.calls
+
+
+@pytest.mark.parametrize(
+    ("permission_gate", "resource_gate", "audit_log", "executor_should_run"),
+    [
+        (RaisingPermissionGate(), None, None, False),
+        (StubPermissionGate(PermissionDecision.ALLOW), RaisingResourceGate(), None, False),
+        (StubPermissionGate(PermissionDecision.ALLOW), None, RaisingAuditLog(), True),
+    ],
+    ids=["permission_gate_raises", "resource_gate_raises", "audit_log_raises"],
+)
+def test_dispatch_sweep_every_internal_collaborator_fault_degrades_gracefully(
+    permission_gate, resource_gate, audit_log, executor_should_run
+):
+    """Sprint 4.12 Acceptance Criteria, verbatim: 'No failure anywhere in
+    ActionRegistry.dispatch() propagates as an unhandled exception —
+    verified by a dedicated adversarial test sweeping every internal
+    call site with an injected failure.' The fourth internal call site
+    (executor.execute()) has its own dedicated sweep already
+    (test_executor_exception_degrades_to_failed_not_raised above) since
+    a RaisingExecutor needs to be the registered executor itself, not
+    an additional constructor argument alongside these three."""
+    registry = ActionRegistry(permission_gate, resource_gate, audit_log)
+    executor = FakeExecutor(ActionType.LAUNCH_APPLICATION)
+    registry.register(executor)
+
+    result = registry.dispatch(make_request())  # must never raise, for any case above
+
+    assert isinstance(result, ActionResult)
+    if executor_should_run:
+        assert executor.calls
+    else:
+        assert executor.calls == []

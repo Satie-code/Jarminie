@@ -183,6 +183,71 @@ def test_launch_application_success_includes_process_id_in_summary():
         log.stop()
 
 
+def test_launch_application_success_includes_readiness_confirmed_in_summary():
+    """Sprint 4.12 hardening (scenario a's own audit-trail visibility)."""
+    request = make_request(ActionType.LAUNCH_APPLICATION, executable_path="notepad.exe")
+    output = type(
+        "TrackedApplication", (), {"process_id": 4242, "readiness_confirmed": False}
+    )()
+    result = type(
+        "Result", (), {"request": request, "status": ActionStatus.SUCCEEDED,
+                        "output": output, "error_message": None}
+    )()
+    client = SqliteClient(":memory:")
+    log = ActionAuditLog(client, DeviceControlConfig())
+    log.start()
+    try:
+        record = log.record(result, PermissionDecision.ALLOW, RiskLevel.LOW)
+        assert "readiness_confirmed=False" in record.parameters_summary
+    finally:
+        log.stop()
+
+
+# --- Sprint 4.12 hardening (scenario f): record() never raises, even on a real -------
+# --- induced persistence failure, and never blocks/alters the caller's own result ----
+
+
+def test_record_survives_a_real_closed_sqlite_connection(tmp_path, device_control_config):
+    """A real, induced failure — the underlying connection is genuinely
+    closed before record() runs, not a mocked exception."""
+    client = SqliteClient(str(tmp_path / "audit.db"))
+    log = ActionAuditLog(client, device_control_config)
+    log.start()
+    client.close()  # simulated real persistence failure
+
+    request = make_request(ActionType.WINDOW_FOCUS)
+    result = type(
+        "Result", (), {"request": request, "status": ActionStatus.SUCCEEDED,
+                        "output": None, "error_message": None}
+    )()
+
+    record = log.record(result, PermissionDecision.ALLOW, RiskLevel.LOW)  # must not raise
+
+    assert record is None
+
+
+def test_record_survives_a_failure_while_building_the_summary_itself(audit_log):
+    """The Sprint 4.12 gap this scenario closes: record()'s own try
+    block previously started AFTER the ActionAuditRecord was already
+    built, so a failure while building it (not just the SQLite write)
+    would have escaped unguarded. A parameter value whose __str__ itself
+    raises reproduces this for real."""
+
+    class _ExplodingValue:
+        def __str__(self):
+            raise RuntimeError("this value refuses to stringify")
+
+    request = make_request(ActionType.FILE_CREATE, path=_ExplodingValue())
+    result = type(
+        "Result", (), {"request": request, "status": ActionStatus.SUCCEEDED,
+                        "output": None, "error_message": None}
+    )()
+
+    record = audit_log.record(result, PermissionDecision.ALLOW, RiskLevel.LOW)  # must not raise
+
+    assert record is None
+
+
 # --- query() filtering -----------------------------------------------------------------
 
 

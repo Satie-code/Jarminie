@@ -167,6 +167,16 @@ class ActionRegistry:
     returns it, so dispatch() genuinely has no RiskLevel to report —
     ActionAuditRecord.record()'s own risk_level: RiskLevel | None
     signature anticipates exactly this case, not a workaround.
+
+    Sprint 4.12 hardening (scenario f): dispatch()'s own call to
+    audit_log.record() is now itself wrapped, on top of record()'s own
+    (also widened this same sprint) internal guarding — deliberate
+    defense in depth, not redundant, matching this class's own
+    established "an outer catch for anything a narrower one doesn't
+    already cover" discipline. A failure anywhere in the audit-logging
+    layer can never block, alter, or lose the real ActionResult a
+    caller is waiting on — logging is a side effect of an action, never
+    a precondition for it completing.
     """
 
     def __init__(
@@ -209,7 +219,19 @@ class ActionRegistry:
             attempts += 1
 
         if self._audit_log is not None:
-            self._audit_log.record(result, permission_decision, None)
+            try:
+                self._audit_log.record(result, permission_decision, None)
+            except Exception:
+                # Sprint 4.12 hardening (scenario f): ActionAuditLog.record()
+                # already guards its own entire body, but this outer catch is
+                # deliberate defense in depth — the real action outcome below
+                # must never be lost just because logging it failed, even if
+                # a future audit_log implementation isn't as careful.
+                logger.exception(
+                    "ActionAuditLog.record() raised unexpectedly for %s; the action's "
+                    "own real result is still returned to the caller unaffected.",
+                    request.action_type.value,
+                )
         return result
 
     def _dispatch_once(self, request: ActionRequest) -> tuple[ActionResult, PermissionDecision]:

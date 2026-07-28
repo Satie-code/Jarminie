@@ -305,6 +305,11 @@ def app_harness(tmp_path, voice_config):
     device_control_config = DeviceControlConfig(
         allowed_file_roots=[str(tmp_path)],
         application_allowlist=["hostname.exe"],
+        # Post-Sprint Fix (Sprint 4.12): see tests/integration/conftest.py's
+        # own pipeline_harness for why — real resource sampling against
+        # the actual host machine is a genuine, non-deterministic
+        # dependency this harness otherwise avoids everywhere else.
+        resource_gate_action_types=[],
     )
     security_config = SecurityConfig(confirmation_timeout_seconds=2.0)
     workflow_config = WorkflowConfig()

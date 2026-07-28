@@ -30,6 +30,19 @@ B) has no session to speak/listen through; request_confirmation()
 degrades to TIMED_OUT immediately in that case, never a crash or an
 indefinite wait.
 
+Sprint 4.12 hardening (scenario e): is_active() being True at the start
+of request_confirmation() does not guarantee the session stays healthy
+for the rest of the call — a real race (the session ending, or
+VoiceSessionManager/PersonaManager erroring, between that check and
+speak_reply()/capture_and_transcribe_reply() actually running) could
+previously raise (e.g. VoiceSessionManager.speak_reply()'s own
+SessionError) straight out of request_confirmation(), propagating into
+whatever called it (PermissionGate.check(), or WorkflowExecutor's own
+whole-workflow confirmation call). The whole speak-then-listen sequence
+is now wrapped: any unexpected failure degrades to TIMED_OUT, the same
+fail-safe-down value every other confirmation-denial path already uses
+— never a crash, never treated as an implicit CONFIRMED.
+
 build_prompt_text() is reused by security/permission_gate.py itself to
 populate ConfirmationRequest.prompt_text before any ConfirmationService
 implementation ever sees the request (so even a future non-voice
@@ -173,13 +186,22 @@ class VoiceConfirmationService:
             )
             return ConfirmationOutcome.TIMED_OUT
 
-        prompt_text = self._build_prompt_text(request.action_request, request.risk_level)
-        voice_id = self._persona_manager.active_persona().voice_id
-        self._session_manager.speak_reply(prompt_text, voice_id)
+        try:
+            prompt_text = self._build_prompt_text(request.action_request, request.risk_level)
+            voice_id = self._persona_manager.active_persona().voice_id
+            self._session_manager.speak_reply(prompt_text, voice_id)
 
-        reply_text = self._session_manager.capture_and_transcribe_reply(
-            self._confirmation_timeout_seconds
-        )
+            reply_text = self._session_manager.capture_and_transcribe_reply(
+                self._confirmation_timeout_seconds
+            )
+        except Exception:
+            logger.exception(
+                "VoiceConfirmationService.request_confirmation() failed unexpectedly "
+                "(the voice session may have ended or errored mid-request); timing out "
+                "rather than risking an unanswered prompt being treated as consent."
+            )
+            return ConfirmationOutcome.TIMED_OUT
+
         if reply_text is None:
             logger.info("Confirmation timed out waiting for a spoken reply.")
             return ConfirmationOutcome.TIMED_OUT

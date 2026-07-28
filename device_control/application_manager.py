@@ -6,11 +6,26 @@ structural safety boundary, not a convenience default. There is no
 "close/focus any running application by PID" capability here; that
 would be a materially higher-risk capability requiring its own
 Permission & Confirmation System (Sprint 4.7) review.
+
+Sprint 4.12 hardening (scenario a): launch() no longer just fires
+subprocess.Popen() and trusts it blindly — it also performs a short,
+bounded, non-blocking-on-exit liveness check (device_control_config.
+application_launch_readiness_check_seconds) confirming the process is
+still running shortly after spawn, not already dead. This is a
+best-effort heuristic only, not a real "is this arbitrary application
+responsive" guarantee — no universal OS-level signal for that exists
+without a window handle, which many valid launches (CLI/background
+processes) never create at all. ActionStatus is still always SUCCEEDED
+once Popen() itself succeeds (the process DID spawn — reporting FAILED
+would be dishonest); the distinction lives in TrackedApplication's own
+new readiness_confirmed field, which ActionAuditLog (Sprint 4.8) also
+now surfaces in its parameters_summary.
 """
 
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -31,18 +46,25 @@ logger = get_logger(__name__)
 
 _HANDLED_TYPES = frozenset({ActionType.LAUNCH_APPLICATION, ActionType.CLOSE_APPLICATION})
 _PROCESS_TERMINATE_TIMEOUT_SECONDS = 5
+_READINESS_POLL_INTERVAL_SECONDS = 0.05
 
 
 @dataclass
 class TrackedApplication:
     """One application this manager itself launched. launched_via is
     the ActionContext.requested_by value that launched it, kept for
-    Sprint 4.8's (Action Logging & Recovery) own audit trail."""
+    Sprint 4.8's (Action Logging & Recovery) own audit trail.
+    readiness_confirmed (Sprint 4.12) is True once launch()'s own
+    bounded post-spawn check found the process still running — False
+    means it had already exited within that short window (a real,
+    worth-surfacing signal that it may have crashed immediately or
+    never truly started), not that the launch itself failed."""
 
     process_id: int
     executable_path: str
     launched_at: datetime
     launched_via: str
+    readiness_confirmed: bool = True
 
 
 class ApplicationManager:
@@ -100,15 +122,44 @@ class ApplicationManager:
         to ActionStatus.FAILED; direct callers see the real exception.
         """
         process = subprocess.Popen([executable_path, *(args or [])])
+        readiness_confirmed = self._confirm_process_alive(
+            process, self._config.application_launch_readiness_check_seconds
+        )
         tracked = TrackedApplication(
             process_id=process.pid,
             executable_path=executable_path,
             launched_at=datetime.now(UTC),
             launched_via=requested_by,
+            readiness_confirmed=readiness_confirmed,
         )
         self._tracked[tracked.process_id] = tracked
-        logger.info("Application launched: %s (pid=%d)", executable_path, tracked.process_id)
+        if readiness_confirmed:
+            logger.info("Application launched: %s (pid=%d)", executable_path, tracked.process_id)
+        else:
+            logger.warning(
+                "Application %s (pid=%d) could not be confirmed alive within %.2fs of "
+                "launch — it may have exited immediately or be hung at OS level.",
+                executable_path,
+                tracked.process_id,
+                self._config.application_launch_readiness_check_seconds,
+            )
         return tracked
+
+    def _confirm_process_alive(self, process: subprocess.Popen, timeout_seconds: float) -> bool:
+        """Sprint 4.12 hardening (scenario a): a bounded, non-blocking-
+        on-exit poll — never waits for the process to exit, only checks
+        whether it already has. Deliberately a liveness check, not a
+        real readiness/responsiveness check: this module has no
+        universal way to know an arbitrary application has become
+        interactive (many valid launches, e.g. CLI/background processes,
+        never create a window at all), so "still running after a short
+        bound" is the most honest signal available without one."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return False
+            time.sleep(_READINESS_POLL_INTERVAL_SECONDS)
+        return process.poll() is None
 
     def close(self, process_id: int) -> bool:
         """False if process_id isn't tracked by this manager — refuses

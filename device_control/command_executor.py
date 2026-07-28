@@ -22,6 +22,18 @@ command happens to echo secrets — CommandResult carries it in full
 (a caller/workflow needs the real output to act on), but any
 redaction/truncation policy before persisting it to disk is Sprint
 4.8's (Action Logging & Recovery) responsibility, not this module's.
+
+Sprint 4.12 hardening (scenario c): no code change was needed here —
+_run_subprocess()'s use of subprocess.run(timeout=...) already
+guarantees the underlying process is killed (Popen.kill(), per
+CPython's own documented TimeoutExpired handling) before
+TimeoutExpired is re-raised, never left as an orphaned process. Sprint
+4.5's own test suite verified CommandResult.timed_out=True was
+reported correctly but never verified the real OS process was actually
+gone afterward — closed by a dedicated adversarial regression test in
+tests/unit/device_control/test_command_executor.py instead, matching
+Sprint 3.13's own "verify under adversarial conditions rather than
+assume the earlier design holds" precedent.
 """
 
 from __future__ import annotations

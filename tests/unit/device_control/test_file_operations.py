@@ -185,6 +185,33 @@ def test_move_destination_already_exists_fails(manager, tmp_path):
     assert source.exists()  # untouched
 
 
+# --- partial-move detection (Sprint 4.12 hardening, scenario b) --------------------
+
+
+def test_move_reports_a_clear_error_when_the_original_cannot_be_removed(manager, tmp_path):
+    """Real, induced failure — a read-only source file genuinely cannot
+    be deleted on Windows once copied, not a mocked exception. Proves
+    the destination copy is left intact and honestly reported, rather
+    than a generic FAILED hiding a real, silently-duplicated file."""
+    source = tmp_path / "source.txt"
+    source.write_text("real content")
+    destination = tmp_path / "dest.txt"
+    source.chmod(0o444)  # read-only: Windows refuses to delete this
+
+    try:
+        result = manager.execute(
+            make_request(ActionType.FILE_MOVE, source=str(source), destination=str(destination))
+        )
+    finally:
+        source.chmod(0o666)  # restore so tmp_path's own cleanup can remove it
+
+    assert result.status is ActionStatus.FAILED
+    assert "could not remove the original" in result.error_message
+    assert destination.exists()
+    assert destination.read_text(encoding="utf-8") == "real content"
+    assert source.exists()  # nothing lost — both copies still present
+
+
 def test_file_rename_succeeds_within_scope(manager, tmp_path):
     source = tmp_path / "old_name.txt"
     source.write_text("content")

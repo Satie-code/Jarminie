@@ -18,6 +18,7 @@ from security.confirmation_service import (
     build_prompt_text,
 )
 from security.policy_engine import RiskLevel
+from voice.errors import SessionError
 
 
 class _FakeSessionManager:
@@ -26,14 +27,20 @@ class _FakeSessionManager:
         self.speak_reply_calls: list[tuple[str, str]] = []
         self.capture_timeout_seconds: float | None = None
         self.reply_to_return: str | None = "yes"
+        self.raise_on_speak: Exception | None = None
+        self.raise_on_capture: Exception | None = None
 
     def is_active(self) -> bool:
         return self._active
 
     def speak_reply(self, text: str, voice_id: str) -> None:
+        if self.raise_on_speak is not None:
+            raise self.raise_on_speak
         self.speak_reply_calls.append((text, voice_id))
 
     def capture_and_transcribe_reply(self, timeout_seconds: float) -> str | None:
+        if self.raise_on_capture is not None:
+            raise self.raise_on_capture
         self.capture_timeout_seconds = timeout_seconds
         return self.reply_to_return
 
@@ -173,3 +180,41 @@ def test_no_reply_within_timeout_is_timed_out():
     outcome = service.request_confirmation(request)
 
     assert outcome is ConfirmationOutcome.TIMED_OUT
+
+
+# --- Sprint 4.12 hardening (scenario e): VoiceSessionManager failure mid-request ----
+
+
+def test_speak_reply_raising_degrades_to_timed_out_not_an_exception():
+    """A real induced VoiceSessionManager failure — is_active() was True
+    when checked, but the session errors (e.g. a real SessionError from
+    a race where the session ends) once speak_reply() actually runs —
+    distinct from the already-tested "no active session at all" case."""
+    session_manager = _FakeSessionManager(active=True)
+    session_manager.raise_on_speak = SessionError("session ended mid-request")
+    service = VoiceConfirmationService(session_manager, _FakePersonaManager(), 20.0)
+    request = ConfirmationRequest(
+        action_request=make_action_request(ActionType.FILE_DELETE, path="a.txt"),
+        risk_level=RiskLevel.HIGH,
+        prompt_text="x",
+    )
+
+    outcome = service.request_confirmation(request)  # must not raise
+
+    assert outcome is ConfirmationOutcome.TIMED_OUT
+
+
+def test_capture_and_transcribe_reply_raising_degrades_to_timed_out_not_an_exception():
+    session_manager = _FakeSessionManager(active=True)
+    session_manager.raise_on_capture = RuntimeError("unexpected capture failure")
+    service = VoiceConfirmationService(session_manager, _FakePersonaManager(), 20.0)
+    request = ConfirmationRequest(
+        action_request=make_action_request(ActionType.FILE_DELETE, path="a.txt"),
+        risk_level=RiskLevel.HIGH,
+        prompt_text="x",
+    )
+
+    outcome = service.request_confirmation(request)  # must not raise
+
+    assert outcome is ConfirmationOutcome.TIMED_OUT
+    assert len(session_manager.speak_reply_calls) == 1  # the prompt was genuinely spoken first

@@ -93,9 +93,13 @@ def test_full_level2_acceptance_scripted_conversation(
     # through a real CoreManager rather than assumed; the six Level 3
     # additions are Sprint 3.12's own Decision Engine Integration; the
     # two Level 4 additions are Sprint 4.11's own Workflow & Device
-    # Control Integration).
+    # Control Integration; the two Level 4 Part B additions are Sprint
+    # 4.18's own Scheduler & Internet Agent Integration, registered
+    # early per that sprint's own ordering requirement).
     states = h.core_manager.module_states()
     assert set(states) == {
+        "task_scheduler",
+        "calendar_store",
         "microphone",
         "speech_to_text",
         "text_to_speech",

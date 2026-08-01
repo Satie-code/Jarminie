@@ -197,11 +197,13 @@ class FakeVoiceSessionManager:
 
     def __init__(self) -> None:
         self.begin_session_calls = 0
+        self.announce_first_calls: list[tuple[str, str] | None] = []
         self._active = False
         self.raise_on_begin_session = False
 
-    def begin_session(self):
+    def begin_session(self, announce_first=None):
         self.begin_session_calls += 1
+        self.announce_first_calls.append(announce_first)
         if self.raise_on_begin_session:
             raise RuntimeError("simulated microphone failure while beginning a session")
         self._active = True

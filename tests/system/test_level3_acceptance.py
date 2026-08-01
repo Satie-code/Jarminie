@@ -167,9 +167,13 @@ def test_full_level3_acceptance_scripted_conversation(
     # is visible via the same module_states() Status Panel already
     # renders generically. The two Level 4 additions ("action_audit_log",
     # "workflow_store") are Sprint 4.11's own Workflow & Device Control
-    # Integration, now part of the same shared app_harness object graph.
+    # Integration; the two Level 4 Part B additions ("task_scheduler",
+    # "calendar_store") are Sprint 4.18's own Scheduler & Internet Agent
+    # Integration — all part of the same shared app_harness object graph.
     states = h.core_manager.module_states()
     assert set(states) == {
+        "task_scheduler",
+        "calendar_store",
         "microphone",
         "speech_to_text",
         "text_to_speech",

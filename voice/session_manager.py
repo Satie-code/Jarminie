@@ -174,7 +174,7 @@ class VoiceSessionManager:
     def is_active(self) -> bool:
         return self._session is not None
 
-    def begin_session(self) -> VoiceSession:
+    def begin_session(self, announce_first: tuple[str, str] | None = None) -> VoiceSession:
         """Begin a new session: switch the mic to active capture and
         start listening for the first utterance.
 
@@ -186,7 +186,31 @@ class VoiceSessionManager:
         recognize a phrase) and the underlying stream never actually
         pauses (see MicrophoneManager's own docstring). Without this, the
         wake phrase's own audio was the first thing Whisper transcribed,
-        e.g. "hey jarvis" being echoed back as if it were the command."""
+        e.g. "hey jarvis" being echoed back as if it were the command.
+
+        announce_first (Sprint 4.18, additive — None preserves every
+        existing caller's exact prior behavior) is a (text, voice_id)
+        pair spoken via TTS BEFORE the utterance-capture thread starts,
+        for JARMINEI-initiated sessions (a proactive reminder
+        announcement, QuietModeController.activate(SCHEDULED_ALERT))
+        where the correct order is speak-first-then-listen, the reverse
+        of every wake-word-triggered session. Speaking before the
+        capture thread exists is deliberate, not incidental: starting
+        capture first would let the announcement's own TTS playback be
+        picked up by the still-active microphone concurrently with
+        _session_loop()'s own utterance capture — a real, previously
+        unseen risk (JARMINEI's own voice mistaken for user speech, or a
+        premature "utterance complete" firing on captured silence) this
+        project has never had to guard against before, since every prior
+        session's own first spoken reply always followed a real captured
+        user utterance rather than preceding one. A TTS failure during
+        this pre-listen announcement is NOT swallowed — the session is
+        torn back down (mic returned to passive, self._session cleared)
+        and the exception re-raised, so QuietModeController.activate()'s
+        own existing try/except (already rolling back to DORMANT on any
+        begin_session() failure) keeps its own state and this class's
+        state in agreement; health_check() would otherwise see a
+        DORMANT-with-still-active-session mismatch."""
         now = datetime.now(UTC)
         session = VoiceSession(session_id=str(uuid.uuid4()), started_at=now, last_activity_at=now)
         self._session = session
@@ -196,6 +220,26 @@ class VoiceSessionManager:
         self._mic.flush_stale_audio()
         self._stop_listening.clear()
         self._reply_ready.clear()
+
+        if announce_first is not None:
+            text, voice_id = announce_first
+            self._state = SessionState.SPEAKING
+            try:
+                self._tts.speak(text, voice_id)
+            except TextToSpeechError:
+                self._session = None
+                self._state = SessionState.IDLE
+                try:
+                    self._mic.set_mode(MicrophoneMode.PASSIVE_LISTENING)
+                except MicrophoneError:
+                    logger.exception(
+                        "Failed to return microphone to passive mode after a failed "
+                        "pre-listen announcement."
+                    )
+                raise
+            self._state = SessionState.LISTENING
+            session.last_activity_at = datetime.now(UTC)
+
         self._listen_thread = threading.Thread(
             target=self._session_loop, name="voice-session-listener", daemon=True
         )

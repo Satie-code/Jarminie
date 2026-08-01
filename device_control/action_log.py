@@ -302,7 +302,16 @@ class ActionAuditLog:
             for row in rows
         ]
 
-    def purge_older_than(self, days: int) -> int:
+    def purge_older_than(self, days: int | None = None) -> int:
+        """days defaults to device_control_config.audit_log_retention_days
+        when omitted (2026-08-01, Sprint 4.18) — mirrors
+        ConversationSessionStore.purge_older_than()'s own established
+        default-to-configured-retention convention, so a periodic
+        TaskScheduler job can register this bound method directly
+        (zero-arg-callable) without needing to also carry
+        DeviceControlConfig just to supply this one value."""
+        if days is None:
+            days = self._config.audit_log_retention_days
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
         try:
             removed = self._sqlite_client.query(

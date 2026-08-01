@@ -36,6 +36,42 @@ def test_activate_records_reason_and_transitions(fake_session_manager):
     assert fake_session_manager.begin_session_calls == 1
 
 
+# --- announce_first passthrough (Sprint 4.18) ---------------------------------
+
+
+def test_activate_without_announce_first_passes_none(fake_session_manager):
+    controller = QuietModeController(fake_session_manager)
+    controller.start()
+
+    controller.activate(ActivationReason.WAKE_WORD)
+
+    assert fake_session_manager.announce_first_calls == [None]
+
+
+def test_activate_with_announce_first_passes_it_through(fake_session_manager):
+    controller = QuietModeController(fake_session_manager)
+    controller.start()
+
+    controller.activate(
+        ActivationReason.SCHEDULED_ALERT, announce_first=("Your reminder is due.", "p340")
+    )
+
+    assert fake_session_manager.announce_first_calls == [("Your reminder is due.", "p340")]
+    assert controller.current_mode() is OperatingMode.ACTIVE
+
+
+def test_activate_with_announce_first_failure_rolls_back_to_dormant(fake_session_manager):
+    fake_session_manager.raise_on_begin_session = True
+    controller = QuietModeController(fake_session_manager)
+    controller.start()
+
+    controller.activate(
+        ActivationReason.SCHEDULED_ALERT, announce_first=("Your reminder is due.", "p340")
+    )
+
+    assert controller.current_mode() is OperatingMode.DORMANT
+
+
 def test_wake_word_detection_while_already_active_is_a_no_op(fake_session_manager):
     controller = QuietModeController(fake_session_manager)
     controller.start()

@@ -239,6 +239,72 @@ def test_completed_turn_resets_the_timeout_window(
     manager.stop()
 
 
+def test_begin_session_with_announce_first_speaks_before_the_capture_thread_starts(
+    started_mic, manager_factory, fake_tts, fake_audio_backend, loud_frame
+):
+    """Sprint 4.18: announce_first speaks via TTS before _session_loop's
+    own capture thread begins — verified indirectly by confirming the
+    TTS call happened and the session is genuinely listening afterward,
+    matching this method's own documented ordering guarantee."""
+    manager = manager_factory()
+
+    manager.begin_session(announce_first=("Your reminder is due.", "p340"))
+
+    assert fake_tts.calls == [("Your reminder is due.", "p340")]
+    assert manager.is_active() is True
+    assert started_mic.current_mode() is MicrophoneMode.ACTIVE_CAPTURE
+    manager.end_session(SessionEndReason.EXPLICIT_END)
+
+
+def test_begin_session_with_announce_first_still_captures_a_turn_afterward(
+    manager_factory, turn_complete_event, fake_tts, fake_audio_backend, loud_frame
+):
+    fake_audio_backend.frame_queue = [loud_frame]
+    turns = []
+    manager = manager_factory(turns=turns)
+
+    manager.begin_session(announce_first=("Your reminder is due.", "p340"))
+    try:
+        assert turn_complete_event.wait(timeout=_WAIT_TIMEOUT)
+    finally:
+        manager.end_session(SessionEndReason.EXPLICIT_END)
+
+    assert len(turns) == 1
+
+
+def test_begin_session_without_announce_first_never_calls_tts(
+    started_mic, manager_factory, fake_tts
+):
+    """Default (None) preserves every existing caller's exact prior
+    behavior — no TTS call at all during begin_session() itself."""
+    manager = manager_factory()
+
+    manager.begin_session()
+
+    assert fake_tts.calls == []
+    manager.end_session(SessionEndReason.EXPLICIT_END)
+
+
+def test_begin_session_announce_first_failure_tears_down_the_session_and_reraises(
+    started_mic, manager_factory, fake_tts
+):
+    """A TTS failure during the pre-listen announcement must not leave
+    the session half-started — self._session is cleared and the mic
+    returned to passive, so QuietModeController.activate()'s own
+    rollback-to-DORMANT stays consistent with VoiceSessionManager's own
+    state (see begin_session()'s own docstring)."""
+    from voice.errors import TextToSpeechError
+
+    fake_tts.should_raise = True
+    manager = manager_factory()
+
+    with pytest.raises(TextToSpeechError):
+        manager.begin_session(announce_first=("Your reminder is due.", "p340"))
+
+    assert manager.is_active() is False
+    assert started_mic.current_mode() is MicrophoneMode.PASSIVE_LISTENING
+
+
 def test_max_utterance_seconds_caps_unbounded_buffering(
     manager_factory, turn_complete_event, fake_audio_backend, loud_frame
 ):

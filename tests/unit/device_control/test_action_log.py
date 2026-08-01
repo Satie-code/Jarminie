@@ -327,6 +327,39 @@ def test_purge_older_than_deletes_only_older_records(tmp_path, device_control_co
         log.stop()
 
 
+def test_purge_older_than_with_no_argument_uses_configured_retention(
+    tmp_path, device_control_config
+):
+    """Sprint 4.18: days defaults to device_control_config.audit_log_
+    retention_days when omitted — mirrors ConversationSessionStore.
+    purge_older_than()'s own established convention, so a periodic
+    TaskScheduler job can register this bound method directly, with no
+    args, and still purge using the real configured retention window."""
+    config = DeviceControlConfig(
+        allowed_file_roots=[str(tmp_path)], audit_log_retention_days=90
+    )
+    client = SqliteClient(str(tmp_path / "default_purge.db"))
+    log = ActionAuditLog(client, config)
+    log.start()
+    try:
+        old_request = make_request(ActionType.WINDOW_FOCUS)
+        old_result = type(
+            "Result", (), {"request": old_request, "status": ActionStatus.SUCCEEDED,
+                            "output": None, "error_message": None}
+        )()
+        log.record(old_result, PermissionDecision.ALLOW, RiskLevel.LOW)
+        client.execute(
+            "UPDATE action_audit_log SET recorded_at = ?",
+            ((datetime.now(UTC) - timedelta(days=100)).isoformat(),),
+        )
+
+        removed = log.purge_older_than()  # no argument
+
+        assert removed == 1
+    finally:
+        log.stop()
+
+
 def test_start_calls_purge_older_than_for_real(tmp_path, device_control_config, monkeypatch):
     client = SqliteClient(str(tmp_path / "startpurge.db"))
     log = ActionAuditLog(client, device_control_config)

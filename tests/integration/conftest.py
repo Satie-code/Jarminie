@@ -39,9 +39,11 @@ import pytest
 from config.schema import (
     DatabaseConfig,
     DeviceControlConfig,
+    InternetConfig,
     MemoryConfig,
     ModelConfig,
     ResourceThresholds,
+    SchedulerConfig,
     SecurityConfig,
     VoiceConfig,
     WorkflowConfig,
@@ -59,6 +61,10 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from internet.research_engine import ResearchEngine
+from internet.search_provider import SearchResult
+from internet.source_validator import SourceValidator
+from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -70,6 +76,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from scheduler.calendar_store import CalendarStore
+from scheduler.reminder_engine import ReminderEngine
+from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
@@ -188,7 +197,14 @@ class FakeLanguageModelClient:
 
     should_raise (Sprint 3.13 hardening, scenario a) simulates Ollama
     being entirely unreachable — same should_raise convention already
-    established on FakeSpeechToText/FakeTextToSpeech above."""
+    established on FakeSpeechToText/FakeTextToSpeech above.
+
+    summary_response (Sprint 4.18) is returned for internet/
+    summarizer.py's own prompt — detected via the literal "Search
+    results:" substring that ONLY that prompt template ever contains
+    (IntentDetector's own always has "CATEGORY:", ContextAnalyzer's
+    never has either), the same "dispatch on a template-unique literal
+    substring" discipline this fake already used for the first two."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -196,6 +212,7 @@ class FakeLanguageModelClient:
             "TOPIC: general\nENTITIES: NONE\nREFERENCES_PAST: NO\n"
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
+        self.summary_response = "Here is a summary based on the provided sources."
         self.calls: list[str] = []
         self.should_raise = False
 
@@ -207,7 +224,30 @@ class FakeLanguageModelClient:
             raise LlmError("simulated Ollama connection failure")
         if "CATEGORY:" in prompt:
             return self.intent_response
+        if "Search results:" in prompt:
+            return self.summary_response
         return self.context_response
+
+
+class FakeSearchProvider:
+    """Local double implementing the SearchProvider Protocol (Sprint
+    4.18) — the one place tests/integration/ fakes the Internet Agent's
+    own true external boundary, matching every other module's "fake
+    only at the seams needing real hardware/models/external services"
+    precedent."""
+
+    def __init__(self) -> None:
+        self.queued_results: list[SearchResult] = []
+        self.calls: list[tuple[str, int]] = []
+        self.should_raise = False
+
+    def search(self, query: str, max_results: int) -> list[SearchResult]:
+        self.calls.append((query, max_results))
+        if self.should_raise:
+            from internet.search_provider import SearchError
+
+            raise SearchError("simulated search provider failure")
+        return self.queued_results
 
 
 @pytest.fixture
@@ -233,9 +273,35 @@ def voice_config() -> VoiceConfig:
     )
 
 
-@pytest.fixture
-def pipeline_harness(tmp_path, voice_config):
-    """Builds the real Communication Pipeline object graph, matching
+def _wait_for_no_scheduler_worker_threads(timeout: float = 3.0) -> None:
+    """Polls (never blindly sleeps) until no APScheduler ThreadPoolExecutor
+    worker thread remains alive, or timeout elapses — best-effort, not a
+    guarantee, so a stuck job body can't turn teardown itself into a new
+    hang. Confirmed directly (a throwaway BackgroundScheduler probe, not
+    just APScheduler's own docs) that shutdown(wait=False) still leaves
+    an in-flight job's own "ThreadPoolExecutor-N_M"-named worker thread
+    alive until that invocation actually finishes — the scheduler's own
+    dispatcher thread (named "APScheduler") disappears immediately, but
+    the worker executing real store code does not. Calling this between
+    TaskScheduler.stop() and closing any SqliteClient connection a job
+    might still be mid-execute()/commit() against is the real fix for a
+    concretely reproduced hang (a full thread-stack dump showed threads
+    stuck in sqlite_client.close()/query() — sqlite3_close() racing a
+    concurrent execute() on the same connection object from another
+    thread is undefined behavior at the SQLite C level, not a clean,
+    fast-failing exception)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(
+            t.name.startswith("ThreadPoolExecutor") and t.is_alive()
+            for t in threading.enumerate()
+        ):
+            return
+        time.sleep(0.02)
+
+
+def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig):
+    """The real Communication Pipeline object graph, matching
     main.py's own composition order exactly (_register_level2_modules,
     _register_level3_modules, and — Sprint 4.11 — _register_level4_modules)
     — fakes only at the mic/wake-engine/STT/TTS/Ollama boundary.
@@ -368,6 +434,35 @@ def pipeline_harness(tmp_path, voice_config):
         workflow_store, action_registry, policy_engine, confirmation_service, workflow_config
     )
 
+    # Sprint 4.18 (Scheduler & Internet Agent Integration) — Level 4
+    # Part B, same fake-boundary discipline as Level 4 Part A above
+    # (fakes only at the real network/LLM boundary — FakeSearchProvider/
+    # FakeLanguageModelClient). scheduler_config is caller-supplied (not
+    # hardcoded here) precisely so pipeline_harness (below) can keep its
+    # own REALISTIC (slow, near-production-default) intervals — a real,
+    # concretely reproduced hang was found when these fired every
+    # 0.05-0.1s: a background TaskScheduler job (e.g.
+    # conversation_store_purge) mid-SQLite-operation on APScheduler's own
+    # thread pool raced against teardown closing that same SqliteClient
+    # connection from the main thread — while fast_scheduler_harness
+    # (below) opts into short intervals for tests that need to observe
+    # real recurrence, paired with _wait_for_no_scheduler_worker_threads()
+    # in this same function's own teardown to close that exact race
+    # instead of merely avoiding it by staying slow.
+    internet_config = InternetConfig()
+
+    task_scheduler = TaskScheduler()
+    calendar_sqlite_client = SqliteClient(database_config.sqlite_path)
+    calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
+    reminder_engine = ReminderEngine(
+        calendar_store, priority_queue_manager, task_scheduler, scheduler_config
+    )
+
+    fake_search_provider = FakeSearchProvider()
+    research_engine = ResearchEngine(fake_search_provider, internet_config)
+    source_validator = SourceValidator(internet_config)
+    summarizer = Summarizer(llm_client, internet_config, model_config)
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -389,8 +484,25 @@ def pipeline_harness(tmp_path, voice_config):
         action_registry=action_registry,
         workflow_store=workflow_store,
         workflow_executor=workflow_executor,
+        task_scheduler=task_scheduler,
+        calendar_store=calendar_store,
+        reminder_engine=reminder_engine,
+        research_engine=research_engine,
+        source_validator=source_validator,
+        summarizer=summarizer,
+        action_audit_log=audit_log,
+        scheduler_config=scheduler_config,
     )
 
+    # task_scheduler/calendar_store start FIRST, before pipeline.start()
+    # — CommunicationPipeline.start() (Sprint 4.18) calls
+    # task_scheduler.add_job() directly, which requires TaskScheduler.
+    # start() to have already run (matching main.py's own real
+    # registration-order requirement, reproduced here by hand since this
+    # harness starts modules individually rather than through
+    # CoreManager).
+    task_scheduler.start()
+    calendar_store.start()
     mic.start()
     conversation_store.start()
     persona_manager.start()
@@ -437,12 +549,29 @@ def pipeline_harness(tmp_path, voice_config):
         workflow_store=workflow_store,
         workflow_executor=workflow_executor,
         device_control_config=device_control_config,
+        task_scheduler=task_scheduler,
+        calendar_store=calendar_store,
+        reminder_engine=reminder_engine,
+        fake_search_provider=fake_search_provider,
+        research_engine=research_engine,
+        source_validator=source_validator,
+        summarizer=summarizer,
+        scheduler_config=scheduler_config,
+        internet_config=internet_config,
     )
     try:
         yield harness
     finally:
         wake_word_detector.stop()
         pipeline.stop()
+        # task_scheduler.stop() moved here (immediately after pipeline.stop()
+        # removes every job it registered) — deliberately BEFORE any
+        # store's own stop() closes the SqliteClient connection a still
+        # in-flight job invocation might be using. See
+        # _wait_for_no_scheduler_worker_threads()'s own docstring for the
+        # concretely reproduced race this ordering (plus the wait) closes.
+        task_scheduler.stop()
+        _wait_for_no_scheduler_worker_threads()
         workflow_store.stop()
         audit_log.stop()
         authority_evaluator.stop()
@@ -456,6 +585,47 @@ def pipeline_harness(tmp_path, voice_config):
         persona_manager.stop()
         conversation_store.stop()
         mic.stop()
+        calendar_store.stop()
+
+
+@pytest.fixture
+def pipeline_harness(tmp_path, voice_config):
+    """SchedulerConfig() (realistic, slow defaults) — see
+    _pipeline_harness_impl()'s own docstring for why. Every existing
+    integration test in this directory uses this fixture; only
+    test_scheduler_integration.py opts into fast_scheduler_harness
+    below instead."""
+    yield from _pipeline_harness_impl(tmp_path, voice_config, SchedulerConfig())
+
+
+@pytest.fixture
+def fast_scheduler_harness(tmp_path, voice_config):
+    """Identical object graph to pipeline_harness, but with short
+    poll_interval_seconds/maintenance_interval_seconds so
+    test_scheduler_integration.py can observe real recurrence (a job
+    firing more than once, a due reminder actually becoming due) within
+    a normal test's own patience, instead of waiting out
+    SchedulerConfig()'s own production-realistic 30s/3600s defaults.
+    Not shared with any other test file — see _pipeline_harness_impl()'s
+    own docstring for why fast intervals don't belong in the widely-reused
+    pipeline_harness fixture.
+
+    0.3s (not more aggressive) — Post-Sprint Fix: SqliteClient gained its
+    own threading.Lock (2026-08-01) once concurrent, unsynchronized
+    access to one connection from several of these very jobs was found
+    to genuinely corrupt reads. That lock is correct and necessary, but
+    it also means these jobs' real SQLite work now genuinely serializes
+    instead of racing — at 0.15s, sustained load across this whole
+    file's several tests occasionally pushed a job's own next tick to
+    arrive before its still-serializing predecessor finished, which
+    APScheduler (default max_instances=1) then skips rather than stacks.
+    That's harmless in itself (a skipped tick, not a corruption or a
+    crash), but it intermittently ate into a test's own bounded-wait
+    margin under this file's cumulative load. 0.3s gives every job
+    comfortable headroom while still resolving well within any test's
+    own 5s wait_until timeout."""
+    fast_config = SchedulerConfig(poll_interval_seconds=0.3, maintenance_interval_seconds=0.3)
+    yield from _pipeline_harness_impl(tmp_path, voice_config, fast_config)
 
 
 @pytest.fixture
@@ -480,6 +650,27 @@ def wait_for_dormant():
                 return
             time.sleep(0.02)
         raise AssertionError("Timed out waiting for Quiet Mode Controller to return to DORMANT.")
+
+    return _wait
+
+
+@pytest.fixture
+def wait_until():
+    """Generic bounded-poll helper — the same "poll a real observable
+    state, never blindly sleep-and-hope" discipline as
+    wait_for_active_capture/wait_for_dormant above, for the scheduler-
+    and internet-agent-specific conditions (Sprint 4.18) those two named
+    fixtures don't cover: a PriorityQueueManager peek, a TTS call count,
+    a maintenance job's own call counter. Returns True/False rather than
+    raising, so a caller can assert with its own descriptive message."""
+
+    def _wait(predicate, timeout: float = WAIT_TIMEOUT, interval: float = 0.02) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return False
 
     return _wait
 

@@ -11,15 +11,23 @@ tests/integration/test_decision_engine_integration.py for the Sprint
 """
 
 import logging
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
+from config.schema import SchedulerConfig
 from decision.authority import EngineSelection
+from decision.priority_queue import PriorityLevel
 from device_control.action_engine import ActionResult, ActionStatus
+from internet.search_provider import SearchResult
+from internet.source_validator import Citation
+from internet.summarizer import ResearchSummary
 from personas.persona_manager import SwitchReason
+from scheduler.scheduler_model import ItemType, ScheduledItem
 from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
+from voice.quiet_mode import ActivationReason, OperatingMode
 from voice.session_manager import SessionEndReason
 from workflow.workflow_executor import WorkflowRunResult
 
@@ -82,11 +90,17 @@ def collaborators():
 
     workflow_executor = MagicMock()
 
+    quiet_mode_controller = MagicMock()
+    quiet_mode_controller.current_mode.return_value = OperatingMode.DORMANT
+
+    priority_queue_manager.peek_next.return_value = None
+    priority_queue_manager.pop_next.return_value = None
+
     return {
         "mic": MagicMock(),
         "wake_word_detector": MagicMock(),
         "session_manager": MagicMock(),
-        "quiet_mode_controller": MagicMock(),
+        "quiet_mode_controller": quiet_mode_controller,
         "conversation_store": MagicMock(),
         "context_manager": context_manager,
         "persona_manager": persona_manager,
@@ -103,6 +117,14 @@ def collaborators():
         "action_registry": action_registry,
         "workflow_store": workflow_store,
         "workflow_executor": workflow_executor,
+        "task_scheduler": MagicMock(),
+        "calendar_store": MagicMock(),
+        "reminder_engine": MagicMock(),
+        "research_engine": MagicMock(),
+        "source_validator": MagicMock(),
+        "summarizer": MagicMock(),
+        "action_audit_log": MagicMock(),
+        "scheduler_config": SchedulerConfig(),
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -135,6 +157,14 @@ def pipeline(collaborators):
         action_registry=collaborators["action_registry"],
         workflow_store=collaborators["workflow_store"],
         workflow_executor=collaborators["workflow_executor"],
+        task_scheduler=collaborators["task_scheduler"],
+        calendar_store=collaborators["calendar_store"],
+        reminder_engine=collaborators["reminder_engine"],
+        research_engine=collaborators["research_engine"],
+        source_validator=collaborators["source_validator"],
+        summarizer=collaborators["summarizer"],
+        action_audit_log=collaborators["action_audit_log"],
+        scheduler_config=collaborators["scheduler_config"],
     )
 
 
@@ -161,6 +191,85 @@ def test_stop_disconnects_both_relays(pipeline, collaborators):
     assert collaborators["turn_complete_relay"].target is None
     assert collaborators["session_ended_relay"].target is None
     assert pipeline.health_check() is False
+
+
+# --- TaskScheduler job registration (Sprint 4.18) -----------------------------
+
+
+def test_start_registers_reminder_engine(pipeline, collaborators):
+    pipeline.start()
+
+    collaborators["reminder_engine"].register.assert_called_once()
+
+
+def test_start_registers_every_maintenance_job(pipeline, collaborators):
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    registered_job_ids = {call.kwargs["job_id"] for call in add_job.call_args_list}
+    assert registered_job_ids == {
+        "memory_lifecycle_cleanup_pass",
+        "memory_lifecycle_monthly_review",
+        "conversation_store_purge",
+        "action_audit_log_purge",
+        "proactive_reminder_announcement",
+    }
+
+
+def test_start_registers_maintenance_jobs_with_the_configured_interval(pipeline, collaborators):
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    interval_for_job_id = {call.kwargs["job_id"]: call.args[1] for call in add_job.call_args_list}
+    scheduler_config = collaborators["scheduler_config"]
+    assert interval_for_job_id["memory_lifecycle_cleanup_pass"] == (
+        scheduler_config.maintenance_interval_seconds
+    )
+    assert interval_for_job_id["conversation_store_purge"] == (
+        scheduler_config.maintenance_interval_seconds
+    )
+    assert interval_for_job_id["proactive_reminder_announcement"] == (
+        scheduler_config.poll_interval_seconds
+    )
+
+
+def test_start_registers_maintenance_jobs_with_the_real_bound_methods(pipeline, collaborators):
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    func_for_job_id = {call.kwargs["job_id"]: call.args[0] for call in add_job.call_args_list}
+    assert func_for_job_id["memory_lifecycle_cleanup_pass"] == (
+        collaborators["memory_lifecycle_manager"].run_cleanup_pass
+    )
+    assert func_for_job_id["memory_lifecycle_monthly_review"] == (
+        collaborators["memory_lifecycle_manager"].run_monthly_review
+    )
+    assert func_for_job_id["conversation_store_purge"] == (
+        collaborators["conversation_store"].purge_older_than
+    )
+    assert func_for_job_id["action_audit_log_purge"] == (
+        collaborators["action_audit_log"].purge_older_than
+    )
+    assert func_for_job_id["proactive_reminder_announcement"] == (
+        pipeline._check_and_announce_due_reminder
+    )
+
+
+def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collaborators):
+    pipeline.start()
+
+    pipeline.stop()
+
+    remove_job = collaborators["task_scheduler"].remove_job
+    removed_job_ids = {call.args[0] for call in remove_job.call_args_list}
+    assert removed_job_ids == {
+        "memory_lifecycle_cleanup_pass",
+        "memory_lifecycle_monthly_review",
+        "conversation_store_purge",
+        "action_audit_log_purge",
+        "proactive_reminder_announcement",
+    }
+    collaborators["reminder_engine"].unregister.assert_called_once()
 
 
 # --- Decision Engine pipeline sequencing (Sprint 3.12) -----------------------
@@ -529,4 +638,157 @@ def test_workflow_turn_partial_run_reports_it(pipeline, collaborators):
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
         "I ran part of the 'Big Cleanup' workflow, but a step failed partway through.", "p340"
+    )
+
+
+# --- SCHEDULER routing (Sprint 4.18) ------------------------------------------
+
+
+def test_scheduler_turn_creates_a_reminder_with_a_resolvable_time(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.SCHEDULER
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "remind me to call mom in 20 minutes"
+    collaborators["context_analysis"].primary_topic = "call mom"
+
+    pipeline._handle_turn_complete("remind me to call mom in 20 minutes", "session-1")
+
+    collaborators["calendar_store"].save.assert_called_once()
+    saved_item = collaborators["calendar_store"].save.call_args[0][0]
+    assert saved_item.title == "call mom"
+    assert saved_item.item_type == ItemType.EVENT
+    reply_text = collaborators["session_manager"].speak_reply.call_args[0][0]
+    assert reply_text.startswith("Done — I'll remind you about call mom at")
+
+
+def test_scheduler_turn_falls_back_to_raw_transcript_when_no_topic(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.SCHEDULER
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "remind me to call mom in 20 minutes"
+    collaborators["context_analysis"].primary_topic = ""
+
+    pipeline._handle_turn_complete("remind me to call mom in 20 minutes", "session-1")
+
+    saved_item = collaborators["calendar_store"].save.call_args[0][0]
+    assert saved_item.title == "remind me to call mom in 20 minutes"
+
+
+def test_scheduler_turn_with_no_resolvable_time_reports_it_and_never_saves(
+    pipeline, collaborators
+):
+    collaborators["decision_trace"].selected_engine = EngineSelection.SCHEDULER
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "remind me to call mom tomorrow"
+
+    pipeline._handle_turn_complete("remind me to call mom tomorrow", "session-1")
+
+    collaborators["calendar_store"].save.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I couldn't tell when to remind you.", "p340"
+    )
+
+
+# --- INTERNET_AGENT routing (Sprint 4.18) -------------------------------------
+
+
+def test_internet_agent_turn_speaks_summary_with_citation_count(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.INTERNET_AGENT
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "search for the latest Python release"
+    collaborators["context_analysis"].primary_topic = "latest Python release"
+
+    results = [
+        SearchResult(
+            title="T", url="https://example.com", snippet="s", retrieved_at=datetime.now(UTC)
+        )
+    ]
+    collaborators["research_engine"].research.return_value = results
+    citations = [Citation(title="T", url="https://example.com", is_corroborated=True)]
+    collaborators["source_validator"].validate.return_value = citations
+    collaborators["summarizer"].summarize.return_value = ResearchSummary(
+        query="latest Python release",
+        summary_text="Python 3.13 was released recently.",
+        citations=citations,
+        generated_at=datetime.now(UTC),
+    )
+
+    pipeline._handle_turn_complete("search for the latest Python release", "session-1")
+
+    collaborators["research_engine"].research.assert_called_once_with("latest Python release")
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "Python 3.13 was released recently. (Based on 1 source(s), 1 corroborated.)", "p340"
+    )
+
+
+def test_internet_agent_turn_with_no_results_reports_it_and_never_summarizes(
+    pipeline, collaborators
+):
+    collaborators["decision_trace"].selected_engine = EngineSelection.INTERNET_AGENT
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "search for something obscure"
+    collaborators["context_analysis"].primary_topic = "something obscure"
+    collaborators["research_engine"].research.return_value = []
+
+    pipeline._handle_turn_complete("search for something obscure", "session-1")
+
+    collaborators["summarizer"].summarize.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I couldn't find anything for something obscure.", "p340"
+    )
+
+
+# --- Proactive reminder announcement (Sprint 4.18) ----------------------------
+
+
+def test_check_and_announce_due_reminder_skips_when_a_session_is_active(pipeline, collaborators):
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.ACTIVE
+
+    pipeline._check_and_announce_due_reminder()
+
+    collaborators["priority_queue_manager"].peek_next.assert_not_called()
+    collaborators["quiet_mode_controller"].activate.assert_not_called()
+
+
+def test_check_and_announce_due_reminder_skips_when_queue_is_empty(pipeline, collaborators):
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = None
+
+    pipeline._check_and_announce_due_reminder()
+
+    collaborators["priority_queue_manager"].pop_next.assert_not_called()
+    collaborators["quiet_mode_controller"].activate.assert_not_called()
+
+
+def test_check_and_announce_due_reminder_skips_a_non_reminder_item(pipeline, collaborators):
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.IMPORTANT_ALERT
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+
+    pipeline._check_and_announce_due_reminder()
+
+    collaborators["priority_queue_manager"].pop_next.assert_not_called()
+    collaborators["quiet_mode_controller"].activate.assert_not_called()
+
+
+def test_check_and_announce_due_reminder_announces_a_due_reminder(pipeline, collaborators):
+    scheduled_item = ScheduledItem(
+        item_id="item-1",
+        item_type=ItemType.EVENT,
+        title="Team standup",
+        scheduled_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+    )
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.SCHEDULED_REMINDER
+    popped = MagicMock()
+    popped.payload = scheduled_item
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_due_reminder()
+
+    collaborators["priority_queue_manager"].pop_next.assert_called_once()
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=("Team standup", "p340")
     )

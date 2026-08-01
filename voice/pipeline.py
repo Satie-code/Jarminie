@@ -39,6 +39,12 @@ Wiring diagram (matches sprint_3_12.md's own Data Flow):
         WORKFLOW -> _handle_workflow_turn(trace, session_id, persona.name)
             -> WorkflowStore lookup by name -> WorkflowExecutor.run()
             -> WorkflowRunResult -> reply text (Sprint 4.11)
+        SCHEDULER -> _handle_scheduler_turn(trace)
+            -> parse a resolvable relative time from the transcript
+            -> CalendarStore.save(ScheduledItem) -> reply text (Sprint 4.18)
+        INTERNET_AGENT -> _handle_internet_agent_turn(trace)
+            -> ResearchEngine.research() -> SourceValidator.validate()
+            -> Summarizer.summarize() -> reply text (Sprint 4.18)
         else -> PersonaManager.compose_reply_safely(transcript, context, decision_trace)
             -> active_persona.compose_reply(...) -> reply text
           |
@@ -54,6 +60,42 @@ Wiring diagram (matches sprint_3_12.md's own Data Flow):
     (silence timeout) -> end_session() -> QuietModeController.deactivate()
           |
     Microphone (passive) -- back to Quiet Mode
+
+Sprint 4.18 (Scheduler & Internet Agent Integration) adds a SECOND,
+entirely independent wiring diagram — this project's first genuinely
+PROACTIVE (JARMINEI-initiated, not turn-triggered) behavior, registered
+as a TaskScheduler job from start() rather than triggered by any
+conversation turn:
+
+    (background, every scheduler_config.poll_interval_seconds)
+    _check_and_announce_due_reminder():
+        QuietModeController.current_mode() is DORMANT?  -- no -> return
+        (a live session is active; Part 2's own "Queued" language for
+        Scheduled Reminders means this due item simply waits for the
+        next poll, it never interrupts)
+          | yes
+        PriorityQueueManager.peek_next() names a SCHEDULED_REMINDER? -- no -> return
+          | yes
+        PriorityQueueManager.pop_next() -> ScheduledItem
+          |
+        QuietModeController.activate(SCHEDULED_ALERT,
+            announce_first=(item.title, persona.voice_id))
+            -> VoiceSessionManager.begin_session(announce_first=...)
+               speaks the reminder BEFORE utterance capture starts,
+               then re-arms listening exactly like any other session
+               (see voice/session_manager.py's own docstring for why
+               that ordering matters)
+
+start() also registers four more TaskScheduler jobs, closing
+backlog/technical_debt.md items 11/15's still-open recurring-cadence
+half for the first time in this project's history (each was
+previously only invoked once, at its own module's start()):
+ReminderEngine.register() (its own due-item poll, Sprint 4.15),
+MemoryLifecycleManager.run_cleanup_pass()/run_monthly_review(), and
+ConversationSessionStore.purge_older_than()/ActionAuditLog.
+purge_older_than() (both zero-arg-callable via their own configured-
+retention defaults) — all on scheduler_config.maintenance_interval_
+seconds. See this class's own start()/stop() for the exact job_ids.
 
 Resolving a real circular-construction problem (a call this sprint's own
 spec left implicit, not literally addressed): WakeWordDetector.on_detected
@@ -111,15 +153,18 @@ means spoken through persona.voice_id (VoiceSessionManager.speak_reply()),
 not literally through Persona.compose_reply().
 """
 
+import re
+import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from config.schema import SchedulerConfig
 from core.logging_setup import get_logger
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
-from decision.priority_queue import PriorityQueueManager
+from decision.priority_queue import PriorityLevel, PriorityQueueManager
 from device_control.action_engine import (
     ActionContext,
     ActionRegistry,
@@ -128,16 +173,24 @@ from device_control.action_engine import (
     ActionStatus,
     ActionType,
 )
+from device_control.action_log import ActionAuditLog
+from internet.research_engine import ResearchEngine
+from internet.source_validator import SourceValidator
+from internet.summarizer import Summarizer
 from memory.confidence_scorer import ConfidenceScorer
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.retrieval_engine import MemoryRetrievalEngine
 from memory.short_term_memory import ShortTermMemory
 from personas.persona_manager import PersonaManager, SwitchReason
+from scheduler.calendar_store import CalendarStore
+from scheduler.reminder_engine import ReminderEngine
+from scheduler.scheduler_model import ItemType, ScheduledItem
+from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import ConfirmationOutcome
 from voice.context_manager import ContextManager, ConversationContext
 from voice.conversation_store import ConversationSessionStore, ConversationTurn
 from voice.microphone import MicrophoneManager
-from voice.quiet_mode import QuietModeController
+from voice.quiet_mode import ActivationReason, OperatingMode, QuietModeController
 from voice.session_manager import SessionEndReason, VoiceSessionManager
 from voice.wake_word import WakeWordDetector
 from workflow.workflow_executor import WorkflowExecutor, WorkflowRunResult
@@ -153,6 +206,40 @@ platform's own default extension appended when the entity itself has
 none — matching this project's Windows-locked tech stack (Part 3). A
 name that already looks like a path/filename (contains a dot) is passed
 through unchanged."""
+
+_RELATIVE_TIME_PATTERN = re.compile(
+    r"in\s+(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b", re.IGNORECASE
+)
+"""The REAL relative-time parser (Sprint 4.18) — computes the actual
+timestamp, distinct from decision/authority.py's own
+_RELATIVE_TIME_HINT_PATTERN, which only checks presence for routing
+purposes. Deliberately duplicated rather than shared/imported: routing
+is cheap and lives in the Decision Engine's own dependency-light
+module; real resolution happens here, downstream, the same split
+_resolve_action_engine()'s own docstring already established for
+DEVICE_CONTROL/WORKFLOW."""
+
+_MAINTENANCE_JOB_IDS: tuple[str, ...] = (
+    "memory_lifecycle_cleanup_pass",
+    "memory_lifecycle_monthly_review",
+    "conversation_store_purge",
+    "action_audit_log_purge",
+)
+_REMINDER_ANNOUNCEMENT_JOB_ID = "proactive_reminder_announcement"
+
+
+def _parse_relative_time(transcript: str, now: datetime) -> datetime | None:
+    """Deliberately narrow, matching this sprint's own Architecture
+    Notes: only "in N minutes"/"in N hours" phrasing resolves — no
+    absolute date/time parsing ("tomorrow at 5pm") exists. Returns None
+    (never raises) when nothing resolvable is found."""
+    match = _RELATIVE_TIME_PATTERN.search(transcript)
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    delta = timedelta(hours=amount) if unit.startswith("h") else timedelta(minutes=amount)
+    return now + delta
 
 
 class CallbackRelay:
@@ -202,6 +289,14 @@ class CommunicationPipeline:
         action_registry: ActionRegistry,
         workflow_store: WorkflowStore,
         workflow_executor: WorkflowExecutor,
+        task_scheduler: TaskScheduler,
+        calendar_store: CalendarStore,
+        reminder_engine: ReminderEngine,
+        research_engine: ResearchEngine,
+        source_validator: SourceValidator,
+        summarizer: Summarizer,
+        action_audit_log: ActionAuditLog,
+        scheduler_config: SchedulerConfig,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -221,6 +316,14 @@ class CommunicationPipeline:
         self._action_registry = action_registry
         self._workflow_store = workflow_store
         self._workflow_executor = workflow_executor
+        self._task_scheduler = task_scheduler
+        self._calendar_store = calendar_store
+        self._reminder_engine = reminder_engine
+        self._research_engine = research_engine
+        self._source_validator = source_validator
+        self._summarizer = summarizer
+        self._action_audit_log = action_audit_log
+        self._scheduler_config = scheduler_config
         self._turn_complete_relay = turn_complete_relay
         self._session_ended_relay = session_ended_relay
         self._wired = False
@@ -229,14 +332,62 @@ class CommunicationPipeline:
         """Connect the callback chain: point both relays at their real
         targets. WakeWordDetector.on_detected needs no relay — it already
         points directly at quiet_mode_controller._on_wake_word_detected,
-        wired at construction time in main.py."""
+        wired at construction time in main.py.
+
+        Sprint 4.18: also registers every Level 4 Part B TaskScheduler
+        job — ReminderEngine's own due-item poll, the three periodic
+        maintenance passes, and the proactive-announcement idle-check.
+        This REQUIRES task_scheduler to already be started (main.py's
+        own registration order puts task_scheduler before
+        communication_pipeline specifically so this holds — see
+        main.py's own docstring for the full reasoning); calling
+        add_job() before TaskScheduler.start() has run raises
+        RuntimeError, which would surface immediately as a real
+        CoreManager module-start failure, not a silent no-op."""
         self._turn_complete_relay.target = self._handle_turn_complete
         self._session_ended_relay.target = self._quiet_mode_controller._on_session_ended
         self._wired = True
+
+        self._reminder_engine.register()
+        self._task_scheduler.add_job(
+            self._memory_lifecycle_manager.run_cleanup_pass,
+            self._scheduler_config.maintenance_interval_seconds,
+            job_id=_MAINTENANCE_JOB_IDS[0],
+        )
+        self._task_scheduler.add_job(
+            self._memory_lifecycle_manager.run_monthly_review,
+            self._scheduler_config.maintenance_interval_seconds,
+            job_id=_MAINTENANCE_JOB_IDS[1],
+        )
+        self._task_scheduler.add_job(
+            self._conversation_store.purge_older_than,
+            self._scheduler_config.maintenance_interval_seconds,
+            job_id=_MAINTENANCE_JOB_IDS[2],
+        )
+        self._task_scheduler.add_job(
+            self._action_audit_log.purge_older_than,
+            self._scheduler_config.maintenance_interval_seconds,
+            job_id=_MAINTENANCE_JOB_IDS[3],
+        )
+        self._task_scheduler.add_job(
+            self._check_and_announce_due_reminder,
+            self._scheduler_config.poll_interval_seconds,
+            job_id=_REMINDER_ANNOUNCEMENT_JOB_ID,
+        )
         logger.info("Communication Pipeline wiring connected.")
 
     def stop(self) -> None:
-        """Disconnect the callback chain."""
+        """Disconnect the callback chain and every TaskScheduler job
+        registered in start(). Assumes task_scheduler is still running
+        at this point — main.py's reverse-shutdown-order guarantee
+        (task_scheduler registered/started before communication_pipeline
+        means it stops AFTER communication_pipeline) keeps this true in
+        real operation; see main.py's own docstring."""
+        self._task_scheduler.remove_job(_REMINDER_ANNOUNCEMENT_JOB_ID)
+        for job_id in _MAINTENANCE_JOB_IDS:
+            self._task_scheduler.remove_job(job_id)
+        self._reminder_engine.unregister()
+
         self._turn_complete_relay.target = None
         self._session_ended_relay.target = None
         self._wired = False
@@ -351,6 +502,10 @@ class CommunicationPipeline:
                 reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
             elif selected_engine is EngineSelection.WORKFLOW:
                 reply = self._handle_workflow_turn(decision_trace, session_id, persona.name)
+            elif selected_engine is EngineSelection.SCHEDULER:
+                reply = self._handle_scheduler_turn(decision_trace)
+            elif selected_engine is EngineSelection.INTERNET_AGENT:
+                reply = self._handle_internet_agent_turn(decision_trace)
             else:
                 reply = self._persona_manager.compose_reply_safely(
                     transcript, context, decision_trace
@@ -460,6 +615,97 @@ class CommunicationPipeline:
             if definition.name.strip().lower() == lowered:
                 return definition.workflow_id, definition.name
         return None
+
+    def _handle_scheduler_turn(self, trace: DecisionTrace) -> str:
+        """Sprint 4.18. Deliberately narrow, matching
+        _handle_device_control_turn()'s own precedent: creates a NEW
+        reminder only when the transcript names a resolvable relative
+        time ("in N minutes"/"in N hours" — AuthorityEvaluator's own
+        routing already confirmed one exists via _is_schedulable_
+        reminder_request() before selecting SCHEDULER at all, but this
+        method re-parses it here to get the actual computed timestamp,
+        the same "routing is cheap, real resolution happens downstream"
+        split _resolve_action_engine() established for DEVICE_CONTROL/
+        WORKFLOW).
+
+        Two real gaps, named not hidden (see sprint_4_18.md's own
+        Architecture Notes): no absolute date/time parsing ("tomorrow
+        at 5pm", "next Monday"), and no postpone/acknowledge of an
+        EXISTING reminder from a live turn — there is no "which
+        reminder do you mean" disambiguation mechanism this project
+        has, unlike a workflow's own by-name lookup. ReminderEngine.
+        postpone()/reschedule()/acknowledge() remain real, tested, and
+        callable with no live turn-based caller yet — the same
+        "implemented, tested in isolation, no live caller" shape this
+        project already tracks elsewhere (backlog/technical_debt.md
+        item 24's own precedent)."""
+        now = datetime.now(UTC)
+        scheduled_at = _parse_relative_time(trace.intent.raw_transcript, now)
+        if scheduled_at is None:
+            return "I couldn't tell when to remind you."
+
+        title = trace.context_analysis.primary_topic.strip() or trace.intent.raw_transcript.strip()
+        item = ScheduledItem(
+            item_id=str(uuid.uuid4()),
+            item_type=ItemType.EVENT,
+            title=title,
+            scheduled_at=scheduled_at,
+            created_at=now,
+        )
+        self._calendar_store.save(item)
+        return f"Done — I'll remind you about {title} at {scheduled_at.strftime('%H:%M')}."
+
+    def _handle_internet_agent_turn(self, trace: DecisionTrace) -> str:
+        """Sprint 4.18. ResearchEngine.research() already degrades to []
+        (never raises) on any real search failure (Sprint 4.16); this
+        method short-circuits on that empty result rather than still
+        calling Summarizer — asking an LLM to "summarize" zero real
+        search results risks a worse, entirely ungrounded hallucination
+        than the honest "couldn't find anything" this returns instead."""
+        query = trace.context_analysis.primary_topic.strip() or trace.intent.raw_transcript.strip()
+        results = self._research_engine.research(query)
+        if not results:
+            return f"I couldn't find anything for {query}."
+
+        citations = self._source_validator.validate(results)
+        summary = self._summarizer.summarize(query, results, citations)
+        corroborated_count = sum(1 for c in summary.citations if c.is_corroborated)
+        return (
+            f"{summary.summary_text} (Based on {len(summary.citations)} source(s), "
+            f"{corroborated_count} corroborated.)"
+        )
+
+    def _check_and_announce_due_reminder(self) -> None:
+        """Sprint 4.18. TaskScheduler job body (registered in start(),
+        on scheduler_config.poll_interval_seconds) — this project's
+        first genuinely PROACTIVE (JARMINEI-initiated, not turn-
+        triggered) behavior. See this module's own docstring for the
+        full wiring diagram and Architecture Notes for the real
+        concurrency discipline this method's own call ordering exists
+        to satisfy.
+
+        Part 2's own Priority Queue language for Scheduled Reminders is
+        explicit: "Queued" — a due item found while a session is
+        already ACTIVE is left untouched in the queue (peek_next(), not
+        popped) rather than interrupting; the next poll checks again.
+        peek_next() before pop_next() also means a future, still-
+        unhandled PriorityItem type (anything other than
+        SCHEDULED_REMINDER — no other live source exists yet, see
+        backlog/technical_debt.md item 17) is never silently consumed
+        by this method without understanding it."""
+        if self._quiet_mode_controller.current_mode() is not OperatingMode.DORMANT:
+            return
+        peeked = self._priority_queue_manager.peek_next()
+        if peeked is None or peeked.priority is not PriorityLevel.SCHEDULED_REMINDER:
+            return
+
+        item = self._priority_queue_manager.pop_next()
+        scheduled_item: ScheduledItem = item.payload
+        persona = self._persona_manager.active_persona()
+        self._quiet_mode_controller.activate(
+            ActivationReason.SCHEDULED_ALERT,
+            announce_first=(scheduled_item.title, persona.voice_id),
+        )
 
 
 def _describe_action_result(result: ActionResult, target: str) -> str:

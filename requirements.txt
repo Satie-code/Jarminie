@@ -32,7 +32,8 @@ ollama>=0.3
 # Phase 3.1 — Semantic Memory
 chromadb>=0.5
 
-# Phase 4.2 / 4.3 — Workflow & Scheduler
+# Sprint 4.15 — Reminder Engine. Backs scheduler/task_scheduler.py's
+# TaskScheduler (a real BackgroundScheduler instance).
 APScheduler>=3.10
 
 # Phase 4.1 — Device Control (full Resource Protection throttling; psutil itself moved up to Sprint 1.4)
@@ -44,3 +45,10 @@ pywin32>=306; sys_platform == "win32"
 # list, added here per docs/backlog/technical_debt.md's tracked-dependency
 # convention (same treatment as item 3's coqui-tts naming correction).
 Send2Trash>=1.8
+
+# Sprint 4.16 — Search & Research. HTTP client for internet/brave_search_provider.py's
+# real Brave Search API call — already an indirect dependency of this
+# project (pulled in transitively), added here explicitly since this
+# sprint is its first direct caller, per this project's own "explicit
+# declaration for anything directly imported" convention.
+requests>=2.31

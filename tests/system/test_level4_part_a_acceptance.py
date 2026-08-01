@@ -477,9 +477,13 @@ def test_level4_part_a_full_acceptance_scenario(
     assert abort_result.step_results[2].skipped is True
     assert abort_result.step_results[2].action_result.status is ActionStatus.PENDING
 
-    # --- Every Level 1-4 Part A module is registered and running. -------
+    # --- Every Level 1-4 Part A (+ Part B's own two ManagedModules,
+    # registered early per Sprint 4.18's own ordering requirement) is
+    # registered and running. -------
     states = h.core_manager.module_states()
     assert set(states) == {
+        "task_scheduler",
+        "calendar_store",
         "microphone",
         "speech_to_text",
         "text_to_speech",

@@ -227,6 +227,98 @@ def test_action_request_with_no_entities_still_falls_back_conversationally(evalu
     assert "couldn't identify a specific target" in trace.reasoning_text
 
 
+# --- Sprint 4.18: real SCHEDULER/INTERNET_AGENT routing ------------------------
+
+
+def test_action_request_with_reminder_keyword_and_resolvable_time_selects_scheduler(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(
+            IntentCategory.ACTION_REQUEST, raw_transcript="remind me to call mom in 20 minutes"
+        ),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.SCHEDULER
+    assert "scheduler" in trace.reasoning_text.lower()
+
+
+def test_action_request_with_reminder_keyword_in_hours_selects_scheduler(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="set a reminder in 2 hours"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.SCHEDULER
+
+
+def test_action_request_with_reminder_keyword_but_no_resolvable_time_falls_back(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="remind me to call mom tomorrow"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.CONVERSATIONAL_RESPONSE
+    assert "couldn't identify a specific time" in trace.reasoning_text
+
+
+def test_action_request_with_resolvable_time_but_no_reminder_keyword_does_not_select_scheduler(
+    evaluator,
+):
+    """A bare relative-time phrase with no scheduler keyword must not
+    accidentally route to SCHEDULER — both conditions are required."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="open notepad in 5 minutes"),
+        make_context_analysis(mentioned_entities=["notepad"]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.DEVICE_CONTROL
+
+
+def test_informational_intent_wanting_current_information_selects_internet_agent(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(
+            IntentCategory.INFORMATIONAL, raw_transcript="search for the latest Python release"
+        ),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.INTERNET_AGENT
+    assert "internet agent" in trace.reasoning_text.lower()
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "what's the latest news on AI",
+        "look up the current weather",
+        "what's happening in the world today",
+    ],
+)
+def test_informational_intent_current_information_keyword_variants(evaluator, transcript):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript=transcript),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.INTERNET_AGENT
+
+
+def test_informational_intent_without_current_information_keyword_stays_inform_only(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript="what is the capital of France"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.INFORM_ONLY
+
+
 # --- reasoning_text -------------------------------------------------------------
 
 

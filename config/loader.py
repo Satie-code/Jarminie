@@ -18,10 +18,12 @@ from config.schema import (
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
+    InternetConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
     ResourceThresholds,
+    SchedulerConfig,
     SecurityConfig,
     UIConfig,
     VoiceConfig,
@@ -49,6 +51,8 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "device_control": DeviceControlConfig,
     "security": SecurityConfig,
     "workflow": WorkflowConfig,
+    "scheduler": SchedulerConfig,
+    "internet": InternetConfig,
 }
 
 

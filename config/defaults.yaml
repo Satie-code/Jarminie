@@ -199,3 +199,37 @@ workflow:
   large_workflow_confirmation_prompt_template: >-
     This workflow '{name}' will run {step_count} actions, including
     {high_risk_count} higher-risk steps. Should I proceed?
+
+scheduler:
+  # Sprint 4.14 — Calendar & Deadlines Store. A defensive, unvalidated
+  # bound against an unbounded future-dated query — see
+  # config/schema.py's SchedulerConfig docstring.
+  max_lookahead_days: 365
+  # Sprint 4.15 — Reminder Engine. How often the background poll checks
+  # CalendarStore for newly-due items, and how far ahead of that check
+  # "due" looks into the future.
+  poll_interval_seconds: 30.0
+  reminder_lookahead_seconds: 0.0
+  # Sprint 4.18 — Scheduler & Internet Agent Integration. Recurring
+  # cadence for background maintenance passes (memory lifecycle,
+  # conversation/audit-log purges) — deliberately much longer than
+  # poll_interval_seconds.
+  maintenance_interval_seconds: 3600.0
+
+internet:
+  # 2026-08-01 Post-Sprint Revision — provider-agnostic refactor. See
+  # internet/search_provider_registry.py for the full list of
+  # registered providers and config/schema.py's InternetConfig
+  # docstring for the full reasoning. search_api_key/search_base_url
+  # are deliberately NOT set here — supply search_api_key via the
+  # JARMINEI_INTERNET_SEARCH_API_KEY environment variable, never
+  # committed to this file; search_base_url is for a self-hosted
+  # provider (e.g. SearXNG), not needed by the default "brave" provider.
+  search_provider: "brave"
+  search_base_url: null
+  max_results_per_query: 5
+  request_timeout_seconds: 10.0
+  # Sprint 4.17 — Summarization & Source Validation. null means "reuse
+  # models.ollama_model."
+  summarization_model: null
+  min_sources_for_corroboration: 2

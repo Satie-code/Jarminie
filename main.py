@@ -13,10 +13,10 @@ loop (app.exec()) is what keeps the process alive between the two.
 """
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from config import ConfigLoader
-from config.schema import AppConfig
+from config.schema import AppConfig, SchedulerConfig
 from core import configure_logging
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
@@ -33,6 +33,10 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from internet.research_engine import ResearchEngine
+from internet.search_provider_registry import create_search_provider
+from internet.source_validator import SourceValidator
+from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -44,6 +48,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from scheduler.calendar_store import CalendarStore
+from scheduler.reminder_engine import ReminderEngine
+from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
@@ -128,6 +135,23 @@ class _Level4Modules:
     workflow_executor: WorkflowExecutor
 
 
+@dataclass
+class _Level4PartBModules:
+    """Bundles every Level 4 Part B (Scheduler & Internet Agent) object
+    CommunicationPipeline or CoreManager registration needs (Sprint
+    4.18). Only task_scheduler and calendar_store are real ManagedModules
+    — reminder_engine/research_engine/source_validator/summarizer are
+    all plain, lifecycle-free collaborators, per each one's own
+    originating sprint (4.15/4.16/4.16/4.17)."""
+
+    task_scheduler: TaskScheduler
+    calendar_store: CalendarStore
+    reminder_engine: ReminderEngine
+    research_engine: ResearchEngine
+    source_validator: SourceValidator
+    summarizer: Summarizer
+
+
 def main() -> int:
     config_loader = ConfigLoader()
     config = config_loader.load()
@@ -138,20 +162,31 @@ def main() -> int:
 
     # Construction order: Level 3 first (no dependency on Level 2/4),
     # then Level 2 (VoiceConfirmationService, built inside Level 4,
-    # needs its session_manager/persona_manager), then Level 4 (needs
-    # both Level 2 and Level 3 objects), then the pipeline itself (needs
-    # all three). Registration order is intentionally different — see
-    # _register_level3_modules()'s and _register_level4_modules()'s own
-    # docstrings for why Level 3 and Level 4 are both registered AFTER
-    # communication_pipeline, keeping the wake_word_detector-to-pipeline
-    # relay-wiring gap as tight as it was before either existed.
+    # needs its session_manager/persona_manager), then Level 4 Part A
+    # (needs both Level 2 and Level 3 objects), then Level 4 Part B
+    # (needs Level 3's priority_queue_manager), then the pipeline itself
+    # (needs all four). Registration order is intentionally different —
+    # see _register_level4_part_b_early()'s, _register_level3_modules()'s,
+    # and _register_level4_modules()'s own docstrings for the two
+    # distinct ordering constraints this project now balances: Level 3/4
+    # Part A/4B's remaining registrations all happen AFTER
+    # communication_pipeline (keeping the wake_word_detector-to-pipeline
+    # relay-wiring gap tight), while task_scheduler/calendar_store are
+    # the one deliberate exception, registered FIRST, before even Level
+    # 2 — CommunicationPipeline.start() (Sprint 4.18) calls
+    # task_scheduler.add_job() directly, which requires task_scheduler
+    # to already be started.
     level3_modules = _construct_level3_modules(config, resource_monitor)
     level2_modules = _construct_level2_modules(config)
     level4_modules = _construct_level4_modules(
         config, resource_monitor, level3_modules, level2_modules
     )
-    pipeline = _construct_pipeline(level2_modules, level3_modules, level4_modules)
+    level4b_modules = _construct_level4_part_b_modules(config, level3_modules)
+    pipeline = _construct_pipeline(
+        level2_modules, level3_modules, level4_modules, level4b_modules, config.scheduler
+    )
 
+    _register_level4_part_b_early(core_manager, level4b_modules)
     _register_level2_modules(core_manager, level2_modules, pipeline)
     _register_level3_modules(core_manager, level3_modules)
     _register_level4_modules(core_manager, level4_modules)
@@ -356,14 +391,73 @@ def _construct_level4_modules(
     )
 
 
+def _construct_level4_part_b_modules(
+    config: AppConfig, level3_modules: _Level3Modules
+) -> _Level4PartBModules:
+    """Construct every Level 4 Part B (Scheduler & Internet Agent)
+    subsystem via DI — construction only, no CoreManager registration
+    (see _register_level4_part_b_early() below). Needs level3_modules
+    (ReminderEngine depends on priority_queue_manager) already
+    constructed.
+
+    Summarizer gets its OWN, separately-constructed OllamaClient rather
+    than reusing Level 3's — internet_config.summarization_model exists
+    specifically to let Summarization use a different model than
+    IntentDetector/ContextAnalyzer (see config/schema.py's
+    InternetConfig docstring); this is the first real wiring decision
+    that actually reads that field, resolving what was previously
+    "purely informational... guide Sprint 4.18's own main.py wiring."
+    None (the default) falls back to model_config.ollama_model exactly
+    as documented."""
+    scheduler_config = config.scheduler
+    internet_config = config.internet
+    model_config = config.models
+    database_config = config.database
+
+    task_scheduler = TaskScheduler()
+
+    calendar_sqlite_client = SqliteClient(database_config.sqlite_path)
+    calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
+    reminder_engine = ReminderEngine(
+        calendar_store, level3_modules.priority_queue_manager, task_scheduler, scheduler_config
+    )
+
+    search_provider = create_search_provider(internet_config)
+    research_engine = ResearchEngine(search_provider, internet_config)
+    source_validator = SourceValidator(internet_config)
+
+    summarizer_model_config = (
+        replace(model_config, ollama_model=internet_config.summarization_model)
+        if internet_config.summarization_model
+        else model_config
+    )
+    summarizer_llm_client = OllamaClient(summarizer_model_config)
+    summarizer = Summarizer(summarizer_llm_client, internet_config, model_config)
+
+    return _Level4PartBModules(
+        task_scheduler=task_scheduler,
+        calendar_store=calendar_store,
+        reminder_engine=reminder_engine,
+        research_engine=research_engine,
+        source_validator=source_validator,
+        summarizer=summarizer,
+    )
+
+
 def _construct_pipeline(
     level2_modules: _Level2Modules,
     level3_modules: _Level3Modules,
     level4_modules: _Level4Modules,
+    level4b_modules: _Level4PartBModules,
+    scheduler_config: SchedulerConfig,
 ) -> CommunicationPipeline:
     """Built last, once every level's prerequisite objects exist —
-    CommunicationPipeline is the one object that needs Level 2, 3, AND 4
-    collaborators at once."""
+    CommunicationPipeline is the one object that needs Level 2, 3, 4,
+    AND 4B collaborators at once. scheduler_config is passed separately
+    (rather than threaded through _Level4PartBModules) since it's a
+    plain config slice, not a constructed object, matching how every
+    other *_config value already reaches this function's own callers
+    directly from AppConfig."""
     return CommunicationPipeline(
         mic=level2_modules.mic,
         wake_word_detector=level2_modules.wake_word_detector,
@@ -385,7 +479,49 @@ def _construct_pipeline(
         action_registry=level4_modules.action_registry,
         workflow_store=level4_modules.workflow_store,
         workflow_executor=level4_modules.workflow_executor,
+        task_scheduler=level4b_modules.task_scheduler,
+        calendar_store=level4b_modules.calendar_store,
+        reminder_engine=level4b_modules.reminder_engine,
+        research_engine=level4b_modules.research_engine,
+        source_validator=level4b_modules.source_validator,
+        summarizer=level4b_modules.summarizer,
+        action_audit_log=level4_modules.action_audit_log,
+        scheduler_config=scheduler_config,
     )
+
+
+def _register_level4_part_b_early(
+    core_manager: CoreManager, level4b_modules: _Level4PartBModules
+) -> None:
+    """Registers task_scheduler and calendar_store BEFORE every other
+    module in the entire graph, including Level 2 — the one deliberate
+    exception to this file's own "Level 3/4 register after
+    communication_pipeline" ordering discipline (see
+    _register_level3_modules()'s own docstring for that discipline's
+    original reasoning).
+
+    Why: CommunicationPipeline.start() (Sprint 4.18) calls
+    task_scheduler.add_job() directly, for the proactive-reminder-
+    announcement job and the three periodic maintenance passes —
+    add_job() raises RuntimeError unless TaskScheduler.start() has
+    already run (scheduler/task_scheduler.py's own _require_scheduler()
+    guard). CoreManager.startup() calls every registered module's
+    start() in registration order, so task_scheduler must be registered
+    (and therefore started) before communication_pipeline is, or this
+    would fail on every real application startup. calendar_store has no
+    such ordering requirement of its own (nothing calls it from within
+    another module's start()) but is grouped here for one clear "Part B
+    storage/scheduling infrastructure, started first" registration
+    step rather than splitting Part B's two ManagedModules across two
+    separate registration calls for no real benefit.
+
+    reminder_engine/research_engine/source_validator/summarizer are not
+    registered here (or anywhere) — none are ManagedModules, per
+    _Level4PartBModules' own docstring; reminder_engine.register()/
+    .unregister() are called directly by CommunicationPipeline.start()/
+    stop() instead (see voice/pipeline.py's own docstring)."""
+    core_manager.register_module("task_scheduler", level4b_modules.task_scheduler)
+    core_manager.register_module("calendar_store", level4b_modules.calendar_store)
 
 
 def _register_level2_modules(

@@ -7,6 +7,8 @@ project's established "real save, real reload" discipline (Sprint 1.8's
 ConfigLoader tests, Sprint 2.7's own conversation-store restart test).
 """
 
+import threading
+
 import pytest
 
 from database.sqlite_client import SqliteClient
@@ -107,3 +109,49 @@ def test_reconnect_after_close_works(db_path):
         client.close()
 
     assert rows == [(1,)]
+
+
+def test_concurrent_execute_and_query_from_multiple_threads_never_corrupts(db_path):
+    """Regression test (Sprint 4.18 Post-Sprint Fix): before this class's
+    own threading.Lock existed, several real threads hammering execute()/
+    query() on the same connection concurrently produced genuine
+    sqlite3 errors (InterfaceError "bad parameter or other API misuse",
+    DatabaseError "another row available") — check_same_thread=False
+    only disables Python's OWN same-thread check, it does not make a
+    single Connection object safe for concurrent multi-threaded use on
+    its own. Confirmed reproducible via this exact shape (multiple
+    threads, hundreds of real operations each) before the fix; this
+    test must stay green after it."""
+    client = SqliteClient(db_path)
+    client.connect()
+    client.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+    for i in range(20):
+        client.execute("INSERT INTO widgets (name) VALUES (?)", (f"n{i}",))
+
+    errors: list[BaseException] = []
+
+    def hammer_query() -> None:
+        for _ in range(200):
+            try:
+                rows = client.query("SELECT id, name FROM widgets")
+                for row in rows:
+                    _ = row[0], row[1]
+            except Exception as exc:
+                errors.append(exc)
+
+    def hammer_write() -> None:
+        for i in range(200):
+            try:
+                client.execute("UPDATE widgets SET name = ? WHERE id = 1", (f"x{i}",))
+            except Exception as exc:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=hammer_query) for _ in range(4)]
+    threads += [threading.Thread(target=hammer_write) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    client.close()
+
+    assert errors == []

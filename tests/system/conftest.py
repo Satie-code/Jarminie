@@ -29,7 +29,9 @@ from config.schema import (
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
+    InternetConfig,
     MemoryConfig,
+    SchedulerConfig,
     SecurityConfig,
     VoiceConfig,
     WorkflowConfig,
@@ -48,6 +50,10 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from internet.research_engine import ResearchEngine
+from internet.search_provider import SearchResult
+from internet.source_validator import SourceValidator
+from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.event_memory import EventMemory
@@ -59,6 +65,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from scheduler.calendar_store import CalendarStore
+from scheduler.reminder_engine import ReminderEngine
+from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
@@ -144,7 +153,13 @@ class FakeLanguageModelClient:
 
     should_raise (Sprint 3.14, re-confirming Sprint 3.13's scenario (a)
     at the system level) simulates Ollama being entirely unreachable —
-    same convention as tests/integration/conftest.py's own fake."""
+    same convention as tests/integration/conftest.py's own fake.
+
+    summary_response (Sprint 4.18) is returned for internet/
+    summarizer.py's own prompt — detected via the literal "Search
+    results:" substring only that prompt template contains, same
+    dispatch discipline as tests/integration/conftest.py's own
+    identical fake."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -152,6 +167,7 @@ class FakeLanguageModelClient:
             "TOPIC: general\nENTITIES: NONE\nREFERENCES_PAST: NO\n"
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
+        self.summary_response = "Here is a summary based on the provided sources."
         self.should_raise = False
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
@@ -161,7 +177,30 @@ class FakeLanguageModelClient:
             raise LlmError("simulated Ollama connection failure")
         if "CATEGORY:" in prompt:
             return self.intent_response
+        if "Search results:" in prompt:
+            return self.summary_response
         return self.context_response
+
+
+class FakeSearchProvider:
+    """Local double implementing the SearchProvider Protocol (Sprint
+    4.18) — same shape as tests/integration/conftest.py's own identical
+    fake, duplicated here per this project's established "each conftest
+    kept self-contained rather than shared across test tiers"
+    convention."""
+
+    def __init__(self) -> None:
+        self.queued_results: list[SearchResult] = []
+        self.calls: list[tuple[str, int]] = []
+        self.should_raise = False
+
+    def search(self, query: str, max_results: int) -> list[SearchResult]:
+        self.calls.append((query, max_results))
+        if self.should_raise:
+            from internet.search_provider import SearchError
+
+            raise SearchError("simulated search provider failure")
+        return self.queued_results
 
 
 class _StartStopWrapper:
@@ -350,6 +389,26 @@ def app_harness(tmp_path, voice_config):
         workflow_store, action_registry, policy_engine, confirmation_service, workflow_config
     )
 
+    # Sprint 4.18 (Scheduler & Internet Agent Integration) — Level 4
+    # Part B. Deliberately REALISTIC (slow, near-production-default)
+    # scheduler intervals here, NOT tuned fast — see tests/integration/
+    # conftest.py's own pipeline_harness fixture docstring for the real,
+    # concretely reproduced background-job/teardown race this avoids.
+    scheduler_config = SchedulerConfig()
+    internet_config = InternetConfig()
+
+    task_scheduler = TaskScheduler()
+    calendar_sqlite_client = SqliteClient(config.database.sqlite_path)
+    calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
+    reminder_engine = ReminderEngine(
+        calendar_store, priority_queue_manager, task_scheduler, scheduler_config
+    )
+
+    fake_search_provider = FakeSearchProvider()
+    research_engine = ResearchEngine(fake_search_provider, internet_config)
+    source_validator = SourceValidator(internet_config)
+    summarizer = Summarizer(llm_client, internet_config, config.models)
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -371,8 +430,26 @@ def app_harness(tmp_path, voice_config):
         action_registry=action_registry,
         workflow_store=workflow_store,
         workflow_executor=workflow_executor,
+        task_scheduler=task_scheduler,
+        calendar_store=calendar_store,
+        reminder_engine=reminder_engine,
+        research_engine=research_engine,
+        source_validator=source_validator,
+        summarizer=summarizer,
+        action_audit_log=audit_log,
+        scheduler_config=scheduler_config,
     )
 
+    # task_scheduler/calendar_store registered FIRST, before even
+    # microphone — the one deliberate exception to this fixture's own
+    # "register in main.py's own real order" discipline (see main.py's
+    # own _register_level4_part_b_early() docstring for the full
+    # reasoning): CommunicationPipeline.start() (Sprint 4.18) calls
+    # task_scheduler.add_job() directly, which requires TaskScheduler.
+    # start() to have already run — CoreManager.startup() below starts
+    # every registered module in registration order.
+    core_manager.register_module("task_scheduler", task_scheduler)
+    core_manager.register_module("calendar_store", calendar_store)
     core_manager.register_module("microphone", mic)
     core_manager.register_module("speech_to_text", _StartStopWrapper(stt))
     core_manager.register_module("text_to_speech", _StartStopWrapper(tts))
@@ -445,6 +522,16 @@ def app_harness(tmp_path, voice_config):
         workflow_store=workflow_store,
         workflow_executor=workflow_executor,
         device_control_config=device_control_config,
+        # Sprint 4.18 (Scheduler & Internet Agent Integration) additions.
+        task_scheduler=task_scheduler,
+        calendar_store=calendar_store,
+        reminder_engine=reminder_engine,
+        fake_search_provider=fake_search_provider,
+        research_engine=research_engine,
+        source_validator=source_validator,
+        summarizer=summarizer,
+        scheduler_config=scheduler_config,
+        internet_config=internet_config,
     )
     try:
         yield harness

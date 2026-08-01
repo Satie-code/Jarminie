@@ -448,6 +448,121 @@ class WorkflowConfig:
 
 
 @dataclass
+class SchedulerConfig:
+    """Scheduler Engine settings (Sprint 4.14 — Calendar & Deadlines Store;
+    Sprint 4.15 — Reminder Engine).
+
+    max_lookahead_days is a defensive bound against an unbounded
+    future-dated query — the same category of guard
+    WorkflowConfig.max_steps_per_workflow already established, config-
+    driven for the identical reason.
+
+    poll_interval_seconds (Sprint 4.15) is how often ReminderEngine's
+    background TaskScheduler job checks CalendarStore for newly-due
+    items. reminder_lookahead_seconds widens that check's own query
+    window into the future by this many seconds, so a reminder can be
+    enqueued slightly ahead of its exact due time rather than strictly
+    only once poll_interval_seconds has already elapsed past it — 0.0
+    (the default) means "due now or overdue only." CommunicationPipeline
+    (Sprint 4.18) also reuses poll_interval_seconds for its own
+    proactive-announcement idle-check job — the two concerns (checking
+    for newly-due items, checking whether it's safe to announce one)
+    are close enough in spirit that a second, separate interval knob
+    would be unwarranted config-surface growth for this project's own
+    scale; see voice/pipeline.py's own docstring.
+
+    maintenance_interval_seconds (Sprint 4.18) is the recurring cadence
+    CommunicationPipeline registers for MemoryLifecycleManager's/
+    ConversationSessionStore's/ActionAuditLog's periodic passes —
+    deliberately a much longer default than poll_interval_seconds
+    (background maintenance work has no reason to run as often as a
+    reminder check), closing backlog/technical_debt.md items 11/15's
+    still-open recurring-cadence half for real.
+    """
+
+    max_lookahead_days: int = 365
+    poll_interval_seconds: float = 30.0
+    reminder_lookahead_seconds: float = 0.0
+    maintenance_interval_seconds: float = 3600.0
+
+
+@dataclass
+class InternetConfig:
+    """Internet Agent settings (Sprint 4.16 — Search & Research; Sprint
+    4.17 — Summarization & Source Validation; 2026-08-01 Post-Sprint
+    Revision — provider-agnostic refactor).
+
+    **The Internet Agent is provider-agnostic by design — Brave is the
+    default, not a required dependency.** search_provider selects which
+    SearchProvider implementation internet/search_provider_registry.py's
+    create_search_provider() actually constructs; "brave" is the only
+    one implemented as of this revision, but ResearchEngine/Summarizer
+    both depend only on the SearchProvider Protocol
+    (internet/search_provider.py), never on any concrete provider class
+    — a new provider (Tavily, SerpAPI, SearXNG, or any future one)
+    needs one new class plus one registry entry, nothing else in this
+    codebase changes. See internet/search_provider_registry.py's own
+    docstring for exactly how, and docs/sprint_book/sprint_4_16.md's
+    Post-Sprint Revision section for the full reasoning behind this
+    change (a direct, explicit user request).
+
+    Deliberately NOT validated against the real provider registry here
+    — config/ is a dependency-direction leaf (nothing in config/
+    imports internet/ or any other subsystem package, the same
+    discipline SecurityConfig.risk_policies already follows for
+    ActionType/RiskLevel) — an unrecognized search_provider value
+    surfaces a clear, loud UnknownSearchProviderError at construction
+    time instead (search_provider_registry.py), not a silent config-
+    load-time guess.
+
+    search_api_key / search_base_url are deliberately GENERIC, not
+    Brave-specific — most keyed providers (Brave, Tavily, SerpAPI) need
+    only a single API key; a self-hosted provider (SearXNG) instead
+    needs a base URL and typically no key at all. Both are optional,
+    and it's each concrete SearchProvider implementation's own job to
+    read whichever of the two (or neither) it actually needs — this
+    dataclass makes no assumption about which fields a given provider
+    requires. search_api_key is deliberately read from the environment
+    (JARMINEI_INTERNET_SEARCH_API_KEY, matching this project's existing
+    JARMINEI_<SECTION>_<FIELD> env-override convention — see
+    config/loader.py's _apply_env_overrides()) rather than ever being
+    committed to defaults.yaml/local.yaml — a real secret, never
+    written to disk anywhere in this repo. This is the first sprint in
+    this project whose whole purpose is making outbound requests to the
+    public internet — see internet/search_provider.py's own docstring
+    for why that's flagged as a real, deliberate boundary crossing.
+
+    max_results_per_query/request_timeout_seconds are defensive bounds,
+    the same category of guard WorkflowConfig.max_steps_per_workflow
+    already established.
+
+    summarization_model (Sprint 4.17) names which Ollama model
+    Summarization should use; None (the default) means "reuse
+    ModelConfig.ollama_model," the same shared-unless-overridden
+    convention every other ModelConfig-adjacent field already follows.
+    Purely informational to this dataclass itself — internet/
+    summarizer.py's Summarizer has no way to act on it directly (its
+    LanguageModelClient is already bound to a model when constructed);
+    it exists to guide Sprint 4.18's own main.py wiring, which concrete
+    OllamaClient to build for the Summarizer it constructs. See
+    internet/summarizer.py's own docstring.
+
+    min_sources_for_corroboration (Sprint 4.17) is an unvalidated,
+    config-driven guess, same caveat class as every other tuned bound
+    in this codebase — see internet/source_validator.py's own
+    docstring for what corroboration actually measures.
+    """
+
+    search_provider: str = "brave"
+    search_api_key: str | None = None
+    search_base_url: str | None = None
+    max_results_per_query: int = 5
+    request_timeout_seconds: float = 10.0
+    summarization_model: str | None = None
+    min_sources_for_corroboration: int = 2
+
+
+@dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
     never the whole AppConfig (see Architecture Notes in sprint_1_2.md)."""
@@ -462,6 +577,8 @@ class AppConfig:
     device_control: DeviceControlConfig = field(default_factory=DeviceControlConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    internet: InternetConfig = field(default_factory=InternetConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -475,6 +592,8 @@ class AppConfig:
         self._validate_device_control()
         self._validate_security()
         self._validate_workflow()
+        self._validate_scheduler()
+        self._validate_internet()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -752,4 +871,45 @@ class AppConfig:
         if not self.workflow.large_workflow_confirmation_prompt_template.strip():
             raise ConfigError(
                 "workflow.large_workflow_confirmation_prompt_template must not be blank"
+            )
+
+    def _validate_scheduler(self) -> None:
+        if self.scheduler.max_lookahead_days <= 0:
+            raise ConfigError(
+                "scheduler.max_lookahead_days must be positive, "
+                f"got {self.scheduler.max_lookahead_days}"
+            )
+        if self.scheduler.poll_interval_seconds <= 0:
+            raise ConfigError(
+                "scheduler.poll_interval_seconds must be positive, "
+                f"got {self.scheduler.poll_interval_seconds}"
+            )
+        if self.scheduler.reminder_lookahead_seconds < 0:
+            raise ConfigError(
+                "scheduler.reminder_lookahead_seconds must not be negative, "
+                f"got {self.scheduler.reminder_lookahead_seconds}"
+            )
+        if self.scheduler.maintenance_interval_seconds <= 0:
+            raise ConfigError(
+                "scheduler.maintenance_interval_seconds must be positive, "
+                f"got {self.scheduler.maintenance_interval_seconds}"
+            )
+
+    def _validate_internet(self) -> None:
+        if not self.internet.search_provider.strip():
+            raise ConfigError("internet.search_provider must not be blank")
+        if self.internet.max_results_per_query <= 0:
+            raise ConfigError(
+                "internet.max_results_per_query must be positive, "
+                f"got {self.internet.max_results_per_query}"
+            )
+        if self.internet.request_timeout_seconds <= 0:
+            raise ConfigError(
+                "internet.request_timeout_seconds must be positive, "
+                f"got {self.internet.request_timeout_seconds}"
+            )
+        if self.internet.min_sources_for_corroboration <= 0:
+            raise ConfigError(
+                "internet.min_sources_for_corroboration must be positive, "
+                f"got {self.internet.min_sources_for_corroboration}"
             )

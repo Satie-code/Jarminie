@@ -17,10 +17,39 @@ never modify this enum):
     INFORM_ONLY              - wired: plain factual answer, no persona flavor
     DEVICE_CONTROL           - wired: CommunicationPipeline._handle_device_control_turn() (4.11)
     WORKFLOW                 - wired: CommunicationPipeline._handle_workflow_turn() (4.11)
-    SCHEDULER                - reserved: Level 4 (Scheduler)
-    INTERNET_AGENT           - reserved: Level 4 (Internet Agent)
+    SCHEDULER                - wired: CommunicationPipeline._handle_scheduler_turn() (4.18)
+    INTERNET_AGENT           - wired: CommunicationPipeline._handle_internet_agent_turn() (4.18)
     WELLNESS                 - reserved: Level 5 (Wellness Engine)
     EMOTION_SUPPORT          - reserved: Level 5 (Emotion Engine)
+
+SCHEDULER/INTERNET_AGENT routing (Sprint 4.18, _determine_engine()),
+the same additive-branch pattern Sprint 4.11 already established for
+DEVICE_CONTROL/WORKFLOW and explicitly named as "the one future work
+is expected to follow":
+- An ACTION_REQUEST naming a schedule-shaped request (a literal
+  "remind me"/"reminder"/"schedule" keyword) AND a resolvable relative
+  time ("in N minutes"/"in N hours" — see _RELATIVE_TIME_HINT_PATTERN)
+  routes to SCHEDULER. Deliberately narrow, matching
+  _resolve_action_engine()'s own "resolve a concrete target or fall
+  back" discipline: no keyword, or a keyword with no resolvable time
+  (e.g. "remind me tomorrow" — no absolute-date parsing exists),
+  falls back to CONVERSATIONAL_RESPONSE with an honest capability-gap
+  explanation, never a guess at what time was meant. Real creation
+  (persisting the ScheduledItem, computing the actual timestamp)
+  happens downstream in CommunicationPipeline, exactly where
+  DEVICE_CONTROL/WORKFLOW's own real enforcement already lives — this
+  method's only job is routing.
+- An INFORMATIONAL intent whose raw transcript names current/external
+  information (a literal "search"/"look up"/"latest"/"current" etc.
+  keyword — see _CURRENT_INFORMATION_KEYWORDS) routes to
+  INTERNET_AGENT instead of the default INFORM_ONLY. No "resolvability"
+  gate is needed here (unlike SCHEDULER) — any query text can be
+  searched, there is no equivalent "no target" failure mode.
+- MEMORY_RECALL-shaped scheduler queries ("what's on my calendar") are
+  NOT routed to SCHEDULER in this sprint — CommunicationPipeline's own
+  _handle_scheduler_turn() is deliberately create-only (see its own
+  docstring), so routing a query there would produce a confusing,
+  unhandled case. A real future consideration, not built speculatively.
 
 DEVICE_CONTROL/WORKFLOW routing (Sprint 4.11, _determine_engine()):
 an ACTION_REQUEST intent routes to one of them only when
@@ -90,6 +119,7 @@ more permissive than clean inputs would have produced. Fail
 safe-DOWN, never safe-up.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -164,6 +194,60 @@ already proves a concrete target exists at all. A small, literal
 keyword set, not NLU — matching this project's consistent plain-match
 discipline for this exact class of routing decision (e.g.
 PersonaManager's trigger phrases, ConfidenceScorer's override phrases)."""
+
+_SCHEDULER_KEYWORDS: tuple[str, ...] = ("remind me", "reminder", "set a reminder", "schedule")
+"""Substrings indicating an ACTION_REQUEST names a reminder/schedule
+request (Sprint 4.18) — same small, literal, non-NLU discipline as
+_WORKFLOW_KEYWORDS above."""
+
+_RELATIVE_TIME_HINT_PATTERN = re.compile(
+    r"in\s+\d+\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b", re.IGNORECASE
+)
+"""Whether the transcript names a RESOLVABLE relative time — this
+method only checks *presence*, not the actual value (routing is cheap;
+CommunicationPipeline._handle_scheduler_turn() does the real parsing
+that computes the timestamp, the same "routing is cheap, real
+resolution happens downstream" split _resolve_action_engine() already
+established for DEVICE_CONTROL/WORKFLOW). Deliberately narrow: only
+"in N minutes"/"in N hours" phrasing resolves — no absolute date/time
+parsing ("tomorrow at 5pm", "next Monday") exists, matching this
+project's real, current NLU capability rather than assuming one."""
+
+_CURRENT_INFORMATION_KEYWORDS: tuple[str, ...] = (
+    "search for",
+    "search the",
+    "look up",
+    "look that up",
+    "latest",
+    "current",
+    "recent news",
+    "what's happening",
+    "look online",
+)
+"""Substrings indicating an INFORMATIONAL intent wants current/external
+information rather than something answerable from the model's own
+knowledge (Sprint 4.18) — same small, literal, non-NLU discipline as
+_WORKFLOW_KEYWORDS/_SCHEDULER_KEYWORDS above."""
+
+
+def _mentions_scheduler_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _SCHEDULER_KEYWORDS)
+
+
+def _is_schedulable_reminder_request(transcript: str) -> bool:
+    """True only when BOTH a scheduler keyword AND a resolvable
+    relative-time phrase are present — either alone falls back to
+    CONVERSATIONAL_RESPONSE (see _build_reasoning())."""
+    if not _mentions_scheduler_keywords(transcript):
+        return False
+    return bool(_RELATIVE_TIME_HINT_PATTERN.search(transcript))
+
+
+def _wants_current_information(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _CURRENT_INFORMATION_KEYWORDS)
+
 
 _ENGINE_DISPLAY_NAMES: dict[EngineSelection, str] = {
     EngineSelection.DEVICE_CONTROL: "Device Control",
@@ -283,8 +367,12 @@ class AuthorityEvaluator:
         self, intent: Intent, context_analysis: ContextAnalysis
     ) -> EngineSelection:
         if intent.category == IntentCategory.INFORMATIONAL:
+            if _wants_current_information(intent.raw_transcript):
+                return EngineSelection.INTERNET_AGENT
             return EngineSelection.INFORM_ONLY
         if intent.category == IntentCategory.ACTION_REQUEST:
+            if _is_schedulable_reminder_request(intent.raw_transcript):
+                return EngineSelection.SCHEDULER
             resolved = self._resolve_action_engine(intent, context_analysis)
             if resolved is not None:
                 return resolved
@@ -352,13 +440,30 @@ def _build_reasoning(
             "This names a stored workflow, so I'll run it directly via "
             f"{_ENGINE_DISPLAY_NAMES[EngineSelection.WORKFLOW]}."
         )
-    elif intent.category is IntentCategory.ACTION_REQUEST:
-        device_control_name = _ENGINE_DISPLAY_NAMES[EngineSelection.DEVICE_CONTROL]
+    elif selected_engine is EngineSelection.SCHEDULER:
         parts.append(
-            f"This looks like a request for {device_control_name}, but I couldn't "
-            "identify a specific target (an application, file, or workflow name) to "
-            "act on, so I'll respond conversationally instead."
+            "This names a specific time, so I'll set a reminder via "
+            f"{_ENGINE_DISPLAY_NAMES[EngineSelection.SCHEDULER]}."
         )
+    elif selected_engine is EngineSelection.INTERNET_AGENT:
+        parts.append(
+            "This needs current or external information, so I'll check "
+            f"{_ENGINE_DISPLAY_NAMES[EngineSelection.INTERNET_AGENT]}."
+        )
+    elif intent.category is IntentCategory.ACTION_REQUEST:
+        if _mentions_scheduler_keywords(intent.raw_transcript):
+            parts.append(
+                "This looks like a reminder request, but I couldn't identify a "
+                "specific time (try phrasing it as 'in N minutes' or 'in N hours'), "
+                "so I'll respond conversationally instead."
+            )
+        else:
+            device_control_name = _ENGINE_DISPLAY_NAMES[EngineSelection.DEVICE_CONTROL]
+            parts.append(
+                f"This looks like a request for {device_control_name}, but I couldn't "
+                "identify a specific target (an application, file, or workflow name) to "
+                "act on, so I'll respond conversationally instead."
+            )
     else:
         future_engine = _INFERRED_FUTURE_ENGINE.get(intent.category)
         if future_engine is not None:

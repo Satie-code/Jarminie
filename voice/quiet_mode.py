@@ -18,13 +18,18 @@ highest priority first, exactly as ActivationReason orders its members:
    session rather than causing a dormant-to-active transition.
 3. Context detection — out of scope; no context-detection subsystem
    exists yet.
-4. Daily routine — reserved for Level 4's Scheduler; no caller exists
-   yet, not wired.
+4. Daily routine — no direct caller; the closest real analog,
+   ActivationReason.SCHEDULED_ALERT, is Sprint 4.18's own proactive
+   reminder announcement (CommunicationPipeline._check_and_announce_
+   due_reminder(), a periodic TaskScheduler job), not a literal
+   calendar-routine trigger Part 2's own wording implies — no such
+   subsystem exists yet.
 
-Only the wake-phrase trigger (ActivationReason.WAKE_WORD) has a real
-caller in Level 2. The other reasons are named now so the state machine
-doesn't need reshaping later, but each is explicitly unwired, not
-implemented.
+Only WAKE_WORD (Level 2) and SCHEDULED_ALERT (Sprint 4.18) have real
+callers as of this revision — EXPLICIT_EMERGENCY remains named but
+unwired, since Level 3's Authority System still has no live caller
+into this controller (CRITICAL_EMERGENCY priority currently only
+degrades to RECOMMEND, per decision/authority.py's own docstring).
 
 Wiring note: WakeWordDetector.on_detected and VoiceSessionManager's
 on_session_ended are both plain callables fixed at *their own*
@@ -110,7 +115,9 @@ class QuietModeController:
     def current_mode(self) -> OperatingMode:
         return self._mode
 
-    def activate(self, reason: ActivationReason) -> None:
+    def activate(
+        self, reason: ActivationReason, announce_first: tuple[str, str] | None = None
+    ) -> None:
         """Transition DORMANT -> ACTIVE and begin a voice session. A no-op
         (logged) if already ACTIVE — activations cannot stack, matching
         "only one session at a time".
@@ -124,14 +131,26 @@ class QuietModeController:
         the inconsistent state health_check() exists to catch, but with
         no way back to DORMANT short of a restart_module() call. The mode
         is rolled back to DORMANT so the system can react to the next
-        wake phrase instead of staying wedged."""
+        wake phrase instead of staying wedged.
+
+        announce_first (Sprint 4.18, additive — None preserves every
+        existing caller's exact prior behavior) is passed straight
+        through to VoiceSessionManager.begin_session() — see that
+        method's own docstring for what it does and why. This is the
+        real entry point CommunicationPipeline's proactive reminder
+        announcement uses: activate(SCHEDULED_ALERT, announce_first=
+        (reminder_text, voice_id)). A failure during the announcement
+        itself (begin_session() re-raising) is caught by this same
+        try/except below, exactly like any other begin_session()
+        failure — rolling back to DORMANT, never leaving a half-spoken
+        announcement's session stuck ACTIVE."""
         if self._mode is OperatingMode.ACTIVE:
             logger.info("activate(%s) ignored — already ACTIVE.", reason.value)
             return
         self._mode = OperatingMode.ACTIVE
         logger.info("Activating (%s): DORMANT -> ACTIVE.", reason.value)
         try:
-            self._session_manager.begin_session()
+            self._session_manager.begin_session(announce_first=announce_first)
         except Exception:
             self._mode = OperatingMode.DORMANT
             logger.exception(

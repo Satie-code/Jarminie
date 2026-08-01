@@ -10,14 +10,23 @@ Each sprint file lives at `docs/sprint_book/sprint_<level>_<index>.md`.
 
 ## Detail Status
 
-Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) and Levels 5–6 remain at roadmap granularity only** — full per-sprint detail will be written when each becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) was expanded to full detail on 2026-07-31**, per an explicit request now that Part A is frozen — see `sprint_4_14.md`–`sprint_4_20.md` and the "Level 4 Part B breakdown changes" note below. **Levels 5–6 remain at roadmap granularity only** — full per-sprint detail will be written when each becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+
+### Level 4 Part B breakdown changes (2026-07-31)
+
+Unlike Level 4 Part A's own expansion (which inserted, renamed, and renumbered several sprints against the original roadmap-granularity plan — see the note below), **Part B's seven sprints (4.14–4.20) are unchanged in name, number, and scope from the original roadmap-granularity plan** — no insertion or renumbering was needed. Two real design decisions, made explicitly during expansion rather than left implicit, worth recording here:
+
+1. **A shared `TaskScheduler` class (introduced within Sprint 4.14/4.15's own detail, not a separate roadmap entry) owns the one real `APScheduler` `BackgroundScheduler` instance**, exposing a generic `add_job()`/`remove_job()` primitive rather than letting `ReminderEngine` own a private scheduler only it can register jobs against. This directly answers the open question this file's own Recommendations section had already raised when `backlog/technical_debt.md` items 11/15 were first logged ("worth deciding... whether one generic periodic-task mechanism can serve both `MemoryLifecycleManager`'s passes and `ConversationSessionStore.purge_older_than()`/`ActionAuditLog.purge_older_than()`, rather than three separate ad hoc timers") — Sprint 4.18 registers all three of those alongside `ReminderEngine`'s own poll and a new proactive-announcement check on the same shared instance, finally closing items 11/15's recurring-cadence gap for real. See [sprint_4_15.md](sprint_4_15.md)'s Engineering Rationale.
+2. **Sprint 4.16 (Search & Research)'s own concrete search-provider choice is deliberately left as an explicit stop-and-ask gate**, not decided in this Sprint Book — Part 3's technology stack names no search provider or HTTP library at all (every other external dependency in this project is explicitly named), and this is the first sprint in JARMINEI's history whose whole purpose is making outbound requests to the public internet on the user's behalf, a real privacy/reliability boundary worth a deliberate decision rather than a default guess. See [sprint_4_16.md](sprint_4_16.md)'s Engineering Rationale.
+
+Sprint 4.18 (Scheduler & Internet Agent Integration) is also where this project's first genuinely *proactive* (not turn-triggered) behavior is built — a due reminder interrupting an idle JARMINEI on its own initiative, via `QuietModeController`'s own `ActivationReason.SCHEDULED_ALERT` (reserved since Sprint 2.6, unused by any real caller until this sprint). See [sprint_4_18.md](sprint_4_18.md)'s Engineering Rationale.
 
 ### Level 4 breakdown changes (2026-07-20)
 
 Level 4 is delivered as **two Sprint Books**, a deliberate scoping decision made explicitly before any Level 4 sprint file was written (not discovered mid-implementation, unlike the Level 2/3 breakdown changes below):
 
 - **Part A — Device Control & Workflow Automation** (this expansion, sprints 4.1–4.13): application/file/window/command control, the shared Action Engine, permission/confirmation, audit/recovery, and workflow definition/execution/integration/hardening/freeze. Corresponds to Part 4's Phase 4.1 (Device Control) and Phase 4.2 (Workflow Engine).
-- **Part B — Scheduler & Internet Agent** (deferred, sprints 4.14–4.20 below, roadmap granularity only): calendar/deadlines, reminders, search/research, summarization/validation, plus their own integration/hardening/freeze sprints, expanded to full detail in a future Sprint Book when Part B becomes current. Corresponds to Part 4's Phase 4.3 (Scheduler) and Phase 4.4 (Internet Agent).
+- **Part B — Scheduler & Internet Agent** (sprints 4.14–4.20 below, fully specified 2026-07-31 — see the "Level 4 Part B breakdown changes" note above): calendar/deadlines, reminders, search/research, summarization/validation, plus their own integration/hardening/freeze sprints. Corresponds to Part 4's Phase 4.3 (Scheduler) and Phase 4.4 (Internet Agent). Not yet implemented.
 
 **`v0.4` ("Complete productivity assistant," per [04_Master_Implementation_Plan.md](../04_Master_Implementation_Plan.md)) is not redefined by this split and is not tagged until both parts freeze** — see `sprint_4_13.md`'s own Purpose section. This mirrors, at the Level-splitting scale, the same "ship a real, verified increment without silently redefining what the release means" discipline `v0.2.0`'s deferred tag (Sprint 2.14) already established at the single-criterion scale.
 
@@ -115,7 +124,7 @@ See the "Level 3 breakdown changes (2026-07-18)" note above for how this table d
 
 ## LEVEL 4 — Productivity → Release v0.4
 
-See the "Level 4 breakdown changes (2026-07-20)" note above for why this table is split into Part A (fully specified) and Part B (roadmap granularity, deferred).
+See the "Level 4 breakdown changes (2026-07-20)" note above for why this table is split into two Sprint Books, and the "Level 4 Part B breakdown changes (2026-07-31)" note for Part B's own expansion — both parts are now fully specified; neither is implemented.
 
 ### Part A — Device Control & Workflow Automation (fully specified 2026-07-20)
 
@@ -135,19 +144,19 @@ See the "Level 4 breakdown changes (2026-07-20)" note above for why this table i
 | 4.12   | Error Handling & Recovery Hardening                        | reliability | 4.11                      | Medium      | [sprint_4_12.md](sprint_4_12.md) — **Complete** |
 | 4.13   | Integration Testing & Level Freeze (Part A)                | level gate  | 4.12                      | Medium–High | [sprint_4_13.md](sprint_4_13.md) — **Complete** |
 
-### Part B — Scheduler & Internet Agent (roadmap granularity only, deferred)
+### Part B — Scheduler & Internet Agent (fully specified 2026-07-31)
 
-Renumbered continuation of the original roadmap's `4.8`–`4.11` entries, plus three new integration/hardening/freeze sprints added here as reserved placeholders (not yet written), following Part A's own precedent — the same "record the decision even before the detail exists" practice this file's Level 3 breakdown note already used.
+Renumbered continuation of the original roadmap's `4.8`–`4.11` entries, plus three new integration/hardening/freeze sprints, following Part A's own precedent — the same "one dedicated wiring/hardening/freeze sprint set" practice every Level's own expansion has now used. See the "Level 4 Part B breakdown changes (2026-07-31)" note above for the two real design decisions made while expanding this table to full detail — no sprint here was renamed, renumbered, or inserted against the original roadmap-granularity plan.
 
-| Sprint | Name                                            | Phase       | Depends On       | Complexity  |
-| ------ | ------------------------------------------------ | ----------- | ----------------- | ----------- |
-| 4.14   | Calendar & Deadlines Store                        | 4.3         | 3.1                | Medium      |
-| 4.15   | Reminder Engine (delay/reschedule/postpone)      | 4.3         | 4.14, 3.10         | Medium–High |
-| 4.16   | Search & Research                                 | 4.4         | 3.11               | Medium      |
-| 4.17   | Summarization & Source Validation                 | 4.4         | 4.16               | Medium–High |
-| 4.18   | Scheduler & Internet Agent Integration            | integration | 4.14–4.17, 4.11    | Medium–High |
-| 4.19   | Error Handling & Recovery Hardening (Part B)      | reliability | 4.18               | Medium      |
-| 4.20   | Integration Testing & Level Freeze (Part B)       | level gate  | 4.19               | Medium–High |
+| Sprint | Name                                            | Phase       | Depends On       | Complexity  | Detail                              |
+| ------ | ------------------------------------------------ | ----------- | ----------------- | ----------- | ------------------------------------ |
+| 4.14   | Calendar & Deadlines Store                        | 4.3         | 3.1                | Medium      | [sprint_4_14.md](sprint_4_14.md) — **Complete** |
+| 4.15   | Reminder Engine (delay/reschedule/postpone)      | 4.3         | 4.14, 3.10         | Medium–High | [sprint_4_15.md](sprint_4_15.md) — **Complete** |
+| 4.16   | Search & Research                                 | 4.4         | 3.11               | Medium      | [sprint_4_16.md](sprint_4_16.md) — **Complete** |
+| 4.17   | Summarization & Source Validation                 | 4.4         | 4.16               | Medium–High | [sprint_4_17.md](sprint_4_17.md) — **Complete** |
+| 4.18   | Scheduler & Internet Agent Integration            | integration | 4.14–4.17, 4.11    | High        | [sprint_4_18.md](sprint_4_18.md) — **Complete** |
+| 4.19   | Error Handling & Recovery Hardening (Part B)      | reliability | 4.18               | Medium      | [sprint_4_19.md](sprint_4_19.md) |
+| 4.20   | Integration Testing & Level Freeze (Part B)       | level gate  | 4.19               | Medium–High | [sprint_4_20.md](sprint_4_20.md) |
 
 ## LEVEL 5 — Companion → Release v0.5
 

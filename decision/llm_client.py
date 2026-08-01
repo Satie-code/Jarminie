@@ -56,9 +56,30 @@ class LlmError(Exception):
 class LanguageModelClient(Protocol):
     """A single-method contract, deliberately minimal to avoid
     over-fitting to Ollama's own client shape (ManagedModule's own
-    "kept deliberately minimal" precedent, Sprint 1.5)."""
+    "kept deliberately minimal" precedent, Sprint 1.5).
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str: ...
+    stop (0.4.3 addition — real, measured latency finding): an optional
+    list of stop sequences the model should halt generation at, once it
+    reaches one. Defaulted to None (generate everything, the original
+    behavior) so this stays additive — every pre-existing caller/fake
+    needs no change unless it wants to opt in. Added after a real,
+    reproducible finding against a live Ollama instance: IntentDetector/
+    ContextAnalyzer's own "respond with exactly N lines and nothing
+    else" prompt instructions are not reliably honored by llama3 — the
+    model correctly emits the requested structured lines, then keeps
+    generating an entire unsolicited extra paragraph afterward, which
+    _parse_response() already discards. That wasted generation measured
+    as roughly two-thirds of ContextAnalyzer's own real per-call latency
+    (~10s of a ~15s call). A real stop sequence is the correct fix (an
+    even stronger prompt instruction was already tried first per the
+    user's own explicit preference and did not reliably work) — the
+    blank line the model inserts between its own structured answer and
+    its own unsolicited rambling ("\\n\\n") is the real, empirically
+    observed boundary, not a guess."""
+
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str: ...
 
 
 class OllamaClient:
@@ -84,16 +105,24 @@ class OllamaClient:
             logger.warning("Ollama host %s is not reachable.", self._host)
             return False
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str:
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str:
         """Raises LlmError on timeout, connection failure, or an
         unpulled model — never a raw ollama/httpx exception, per
         Interface First Design keeping implementation-specific errors
-        out of caller code."""
+        out of caller code. stop (0.4.3) is passed through to Ollama's
+        own real stop-sequence support (options={"stop": [...]}) — a
+        real, server-side generation control, not prompt-text advice
+        the model can choose to ignore."""
         import ollama
 
         try:
             client = ollama.Client(host=self._host, timeout=timeout_seconds)
-            response = client.generate(model=self._model, prompt=prompt, stream=False)
+            options = {"stop": stop} if stop else None
+            response = client.generate(
+                model=self._model, prompt=prompt, stream=False, options=options
+            )
         except Exception as exc:
             raise LlmError(
                 f"Ollama generate() failed for model {self._model!r}: {exc}"

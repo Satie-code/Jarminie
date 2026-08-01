@@ -239,7 +239,9 @@ class FakeLanguageModelClient:
         self.should_raise_for_summary = False
         self.should_raise_for_conversation = False
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str:
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str:
         self.calls.append(prompt)
         if self.should_raise:
             from decision.llm_client import LlmError

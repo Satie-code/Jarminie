@@ -25,10 +25,12 @@ class FakeLanguageModelClient:
     def __init__(self, response: str | None = None, error: Exception | None = None) -> None:
         self._response = response
         self._error = error
-        self.calls: list[tuple[str, float]] = []
+        self.calls: list[tuple[str, float, list[str] | None]] = []
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str:
-        self.calls.append((prompt, timeout_seconds))
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str:
+        self.calls.append((prompt, timeout_seconds, stop))
         if self._error is not None:
             raise self._error
         assert self._response is not None
@@ -235,6 +237,23 @@ def test_analyze_passes_the_configured_timeout(model_config, context):
     analyzer.analyze(make_intent("hello"), context)
 
     assert client.calls[0][1] == model_config.ollama_timeout_seconds
+
+
+def test_analyze_passes_a_real_stop_sequence(model_config, context):
+    """0.4.3 latency fix: a real, measured finding (see decision/
+    llm_client.py's LanguageModelClient docstring) — a real Ollama call
+    for this exact prompt was directly observed emitting the correct 5
+    requested lines, then an entire unsolicited extra paragraph
+    afterward, roughly tripling this stage's own real latency. Confirms
+    analyze() actually asks Ollama to stop, not just hopes the prompt's
+    own "nothing else" wording is obeyed."""
+    response = "TOPIC: x\nENTITIES: NONE\nREFERENCES_PAST: NO\nPERSONA: NONE\nSENTIMENT: NEUTRAL"
+    client = FakeLanguageModelClient(response=response)
+    analyzer = ContextAnalyzer(client, model_config)
+
+    analyzer.analyze(make_intent("hello"), context)
+
+    assert client.calls[0][2] == ["\n\n"]
 
 
 def test_health_check_false_before_start(model_config):

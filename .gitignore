@@ -22,6 +22,8 @@ htmlcov/
 logs/*
 !logs/.gitkeep
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 chroma_data/
 

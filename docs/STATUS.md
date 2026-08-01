@@ -66,9 +66,24 @@ Full Sprint Book written 2026-07-31 (sprints 4.14–4.20: Calendar & Deadlines S
 
 ## Level 5 — Companion (target: v0.5)
 
+Delivered as two Sprint Books, mirroring Level 4's own Part A/Part B split — see [sprint_book/INDEX.md](sprint_book/INDEX.md)'s "Level 5 breakdown changes (2026-08-02)" note for the full reasoning, including the two `AskUserQuestion` decisions made before any Part A sprint file was written (the Part A/Part B split itself, and the renderer's own `Persona Controller -> Presentation State -> Renderer Interface -> {Jarvis Renderer, Minie Renderer}` architecture). **`v0.5` ("Complete personal AI companion") is not tagged until both parts freeze** — the same two-part gating discipline `v0.4` already established.
+
+### Part A — Emotional Intelligence & Presentation Layer — Full Sprint Book written 2026-08-02
+
+Sprints 5.1–5.16 (Emotion Detection Engine, Emotional State Manager, Emotional Memory, Persona Behavioral Adaptation, Presentation State Engine, Presentation Layer Foundation & Renderer Interface, Jarvis Renderer, Minie Renderer & Avatar Renderer Interface, Gesture Engine, Persona Transition Engine, Voice Personality, Adaptive Workspace, Companion Experience, plus Integration/Hardening/Freeze) — see [sprint_book/INDEX.md](sprint_book/INDEX.md). Not yet implemented — every sprint below is `Planned`.
+
+| Phase | Status | Notes |
+|---|---|---|
+| 5.1 Emotion Engine (behavioral) | Planned | Sprints 5.1–5.4 (Emotion Detection Engine, Emotional State Manager, Emotional Memory, Persona Behavioral Adaptation) — see [sprint_5_1.md](sprint_book/sprint_5_1.md)–[sprint_5_4.md](sprint_book/sprint_5_4.md). Resolves a real, long-standing named placeholder: `memory/confidence_scorer.py`'s fixed-neutral `emotional_significance` factor, flagged since Sprint 3.5 as "the single integration point for [this Level] to replace with a real signal." |
+| 5.5 Presentation Layer | Planned | Sprints 5.5–5.13 (Presentation State Engine, Presentation Layer Foundation & Renderer Interface, Jarvis Renderer, Minie Renderer & Avatar Renderer Interface, Gesture Engine, Persona Transition Engine, Voice Personality, Adaptive Workspace, Companion Experience) — see [sprint_5_5.md](sprint_book/sprint_5_5.md)–[sprint_5_13.md](sprint_book/sprint_5_13.md). New scope beyond Part 4's original Level 5 roadmap; introduces a new top-level `presentation/` package (same one-engine-one-folder precedent as `emotion/`, `backlog/technical_debt.md` item 2) and, for Minie's avatar specifically, a real external dependency on a separately-running VTube Studio instance — JARMINEI neither embeds nor redistributes Live2D's own SDK. |
+| — | Planned | Sprints 5.14–5.16 (Presentation Layer Integration, Error Handling & Recovery Hardening, Integration Testing & Level Freeze) — see [sprint_5_14.md](sprint_book/sprint_5_14.md)–[sprint_5_16.md](sprint_book/sprint_5_16.md). Mirrors every prior Level's own integration/hardening/freeze closing sequence. |
+
+### Part B — Companion Intelligence (roadmap granularity only)
+
+Wellness Engine, Analytics, Learning Engine — Part 4's own original Phases 5.2/5.3/5.4, renumbered sprints 5.17–5.23 per [sprint_book/INDEX.md](sprint_book/INDEX.md). Expanded to full detail only once Part A freezes.
+
 | Phase | Status |
 |---|---|
-| 5.1 Emotion Engine | Planned |
 | 5.2 Wellness Engine | Planned |
 | 5.3 Analytics | Planned |
 | 5.4 Learning Engine | Planned |

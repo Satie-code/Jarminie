@@ -33,10 +33,12 @@ class FakeLanguageModelClient:
     def __init__(self, response: str | None = None, error: Exception | None = None) -> None:
         self._response = response
         self._error = error
-        self.calls: list[tuple[str, float]] = []
+        self.calls: list[tuple[str, float, list[str] | None]] = []
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str:
-        self.calls.append((prompt, timeout_seconds))
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str:
+        self.calls.append((prompt, timeout_seconds, stop))
         if self._error is not None:
             raise self._error
         assert self._response is not None
@@ -144,6 +146,21 @@ def test_generate_uses_ollama_timeout_seconds_from_model_config(context):
     generator.generate("hello", context, None, "jarvis")
 
     assert fake.calls[0][1] == 42.0
+
+
+def test_generate_does_not_pass_a_stop_sequence(model_config, context):
+    """Deliberately unlike IntentDetector/ContextAnalyzer (0.4.3's own
+    fix, decision/llm_client.py's LanguageModelClient docstring): a
+    conversational reply is meant to be free-form natural language, not
+    a fixed line format — a blank-line stop condition risks truncating
+    a legitimate multi-sentence/paragraph answer, so this class passes
+    no stop sequence at all (the LanguageModelClient default, None)."""
+    fake = FakeLanguageModelClient(response="ok")
+    generator = ResponseGenerator(fake, model_config)
+
+    generator.generate("hello", context, None, "jarvis")
+
+    assert fake.calls[0][2] is None
 
 
 # --- prompt grounding: transcript / recent turns ---------------------------------------

@@ -28,10 +28,12 @@ class FakeLanguageModelClient:
     def __init__(self, response: str = "A summary.", error: Exception | None = None):
         self._response = response
         self._error = error
-        self.calls: list[tuple[str, float]] = []
+        self.calls: list[tuple[str, float, list[str] | None]] = []
 
-    def generate(self, prompt: str, timeout_seconds: float) -> str:
-        self.calls.append((prompt, timeout_seconds))
+    def generate(
+        self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+    ) -> str:
+        self.calls.append((prompt, timeout_seconds, stop))
         if self._error is not None:
             raise self._error
         return self._response

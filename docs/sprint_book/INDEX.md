@@ -10,7 +10,23 @@ Each sprint file lives at `docs/sprint_book/sprint_<level>_<index>.md`.
 
 ## Detail Status
 
-Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) was expanded to full detail on 2026-07-31**, per an explicit request now that Part A is frozen — see `sprint_4_14.md`–`sprint_4_20.md` and the "Level 4 Part B breakdown changes" note below. **Levels 5–6 remain at roadmap granularity only** — full per-sprint detail will be written when each becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) was expanded to full detail on 2026-07-31**, per an explicit request now that Part A is frozen — see `sprint_4_14.md`–`sprint_4_20.md` and the "Level 4 Part B breakdown changes" note below. **Level 5 Part A (Emotional Intelligence & Presentation Layer) was expanded to full detail on 2026-08-02**, per an explicit request now that Level 4 is complete — see `sprint_5_1.md`–`sprint_5_16.md` and the "Level 5 breakdown changes" note below. **Level 5 Part B and Level 6 remain at roadmap granularity only** — full per-sprint detail will be written when each becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+
+### Level 5 breakdown changes (2026-08-02)
+
+Level 5 is delivered as **two Sprint Books**, mirroring the exact precedent Level 4 already set for itself (see the "Level 4 breakdown changes" note below) — a deliberate scoping decision made explicitly, via `AskUserQuestion`, before any Level 5 sprint file was written:
+
+- **Part A — Emotional Intelligence & Presentation Layer** (this expansion, sprints 5.1–5.16): the behavioral Emotion Engine Part 4's Phase 5.1 already named ("Stress detection. Fatigue detection. Frustration detection... Behavior adapts appropriately. Never performs medical diagnosis.") — plus an entirely new Presentation Layer (Jarvis's holographic-sphere/segmented-ring dashboard; Minie's avatar; gesture, persona-transition, voice-personality, adaptive-workspace, and companion-experience behavior) that neither Part 4's roadmap nor Part 3's technology stack anticipated. Commissioned as new scope in the same conversation that produced this Sprint Book.
+- **Part B — Companion Intelligence** (Wellness Engine, Analytics, Learning Engine — Part 4's Phases 5.2/5.3/5.4): not yet written, kept at roadmap granularity below exactly like Level 4 Part B was before 2026-07-31, renumbered 5.17–5.23 continuing this Level's own sequence (see the renumbered table below) — expanded to full detail only once Part A freezes, per this project's own "expand when current" practice.
+
+**`v0.5` ("Complete personal AI companion," per [04_Master_Implementation_Plan.md](../04_Master_Implementation_Plan.md)) is not redefined by this split and is not tagged until both parts freeze** — identical discipline to `v0.4`'s own two-part gating (see the Milestones table below).
+
+Two further decisions were made explicitly via `AskUserQuestion` before writing any Part A sprint file, not assumed:
+
+1. **The renderer's own architecture.** Part 3's locked tech stack names PySide6 as JARMINEI's only desktop UI technology, with no 3D/animation/avatar SDK named anywhere. Resolved not by picking one rendering technology outright, but by mandating a **renderer abstraction**: `Persona Controller -> Presentation State -> Renderer Interface -> {Jarvis Renderer, Minie Renderer}`, explicitly ruling out committing the whole project to QML or to any single avatar SDK. Jarvis's renderer (sprint 5.7) stays on native PySide6 (`QPainter`/`QGraphicsView`; OpenGL only if profiling later proves necessary — no QML). Minie's renderer (sprint 5.8) is built behind a generic `AvatarRenderer` interface whose first concrete implementation drives a locally-running VTube Studio instance through its own documented WebSocket Plugin API — JARMINEI never embeds or redistributes Live2D's own SDK, and nothing outside `presentation/vtube_studio_renderer.py` imports anything VTube-Studio-specific, so a future Live2D Cubism SDK embed, Unreal, or Unity backend needs only one new class plus one registry entry (mirrors `internet/search_provider_registry.py`'s already-established provider-swap precedent exactly — see that file's own docstring).
+2. **Naming**: the Presentation Layer's own coordinator is named `PresentationController` (sprint 5.6), not `PersonaController` — the codebase already has a `PersonaManager` (`personas/persona_manager.py`, Sprint 2.11) owning *which* persona is active and *why*; a second, presentation-side class named similarly would be a real, avoidable ambiguity. `PresentationController` owns *how* the currently-active persona gets rendered, composing `PersonaManager`'s own active-persona read with Presentation State (sprint 5.5) — it never duplicates or second-guesses switching logic.
+
+Also recorded here, per this project's own "log a real structural deviation rather than let it pass silently" discipline (the same treatment `emotion/`'s own folder addition got at Sprint 1.1 — `backlog/technical_debt.md` item 2): **a new top-level `presentation/` package is added**, not present in Part 3's original repository-structure list, for the identical one-engine-one-folder reason. Sprint 5.6 is where this folder is actually created; recorded here as the point of decision. **A concrete WebSocket client dependency for VTube Studio's API is deliberately left as an explicit stop-and-ask gate at Sprint 5.8**, not decided in this Sprint Book — mirroring Sprint 4.16's own precedent for the search-provider choice — since Part 3 names no WebSocket library at all and more than one reasonable option exists (a plain `websockets` client hand-rolled against VTube Studio's own documented JSON protocol, or a community wrapper such as `pyvts`).
 
 ### Level 4 Part B breakdown changes (2026-07-31)
 
@@ -160,19 +176,40 @@ Renumbered continuation of the original roadmap's `4.8`–`4.11` entries, plus t
 
 ## LEVEL 5 — Companion → Release v0.5
 
-Dependency numbers below on `4.x` sprints were updated 2026-07-20 to match Level 4 Part A's real renumbering (see "Level 4 breakdown changes" note above) — `5.3`'s dependency on the old `4.9 Reminder Engine` now reads `4.15` (Part B), and `5.6`'s dependency on the old `4.4`/`4.1` (System Monitoring/Application Control) now reads `4.6`/`4.2` (Part A). Same "keep cross-level dependency references accurate rather than letting them silently drift" discipline already applied throughout this file.
+See the "Level 5 breakdown changes (2026-08-02)" note above for why this table is split into two Sprint Books, mirroring Level 4's own split — Part A (below) is now fully specified; Part B remains at roadmap granularity, renumbered 5.17–5.23 (continuing this Level's own sequence rather than restarting, the same convention Level 4 Part B's 4.14–4.20 already established) with its dependency numbers on `5.x`/`4.x` sprints corrected to match Part A's real numbering below (the old roadmap's `5.3`'s dependency on `4.15`/old-`5.2` now reads `4.15`/new-`5.2`; the old `5.5`'s dependency on old-`5.4`/old-`5.8` now reads new-`5.18`/new-`5.22`; same "keep cross-level dependency references accurate rather than letting them silently drift" discipline already applied throughout this file).
+
+### Part A — Emotional Intelligence & Presentation Layer (fully specified 2026-08-02)
+
+| Sprint | Name                                                | Phase       | Depends On            | Complexity  | Detail                              |
+| ------ | ---------------------------------------------------- | ----------- | ---------------------- | ----------- | ------------------------------------ |
+| 5.1    | Emotion Detection Engine                             | 5.1         | 2.3, 2.8, 3.8           | Medium      | [sprint_5_1.md](sprint_5_1.md)       |
+| 5.2    | Emotional State Manager                              | 5.1         | 5.1                     | Medium      | [sprint_5_2.md](sprint_5_2.md)       |
+| 5.3    | Emotional Memory                                     | 5.1         | 5.2, 3.1–3.6            | Medium–High | [sprint_5_3.md](sprint_5_3.md)       |
+| 5.4    | Persona Behavioral Adaptation                        | 5.1         | 5.2, 2.9, 2.10, 3.11    | Medium      | [sprint_5_4.md](sprint_5_4.md)       |
+| 5.5    | Presentation State Engine                            | 5.5         | 5.2, 5.4                | Medium      | [sprint_5_5.md](sprint_5_5.md)       |
+| 5.6    | Presentation Layer Foundation & Renderer Interface   | 5.5         | 5.5, 2.11               | Medium–High | [sprint_5_6.md](sprint_5_6.md)       |
+| 5.7    | Jarvis Renderer                                      | 5.5         | 5.6, 1.6, 1.7           | High        | [sprint_5_7.md](sprint_5_7.md)       |
+| 5.8    | Minie Renderer & Avatar Renderer Interface           | 5.5         | 5.6                     | High        | [sprint_5_8.md](sprint_5_8.md)       |
+| 5.9    | Gesture Engine                                       | 5.5         | 5.6, 5.2                | Medium      | [sprint_5_9.md](sprint_5_9.md)       |
+| 5.10   | Persona Transition Engine                            | 5.5         | 5.7, 5.8, 2.11          | Medium–High | [sprint_5_10.md](sprint_5_10.md)     |
+| 5.11   | Voice Personality                                    | 5.5         | 5.5, 2.4, 2.9, 2.10     | Low–Medium  | [sprint_5_11.md](sprint_5_11.md)     |
+| 5.12   | Adaptive Workspace                                   | 5.5         | 5.7, 3.8                | Medium      | [sprint_5_12.md](sprint_5_12.md)     |
+| 5.13   | Companion Experience                                 | 5.5         | 5.3, 5.9, 3.1–3.4       | Medium      | [sprint_5_13.md](sprint_5_13.md)     |
+| 5.14   | Presentation Layer Integration                       | integration | 5.1–5.13, 4.11, 4.18    | High        | [sprint_5_14.md](sprint_5_14.md)     |
+| 5.15   | Error Handling & Recovery Hardening                  | reliability | 5.14                    | Medium      | [sprint_5_15.md](sprint_5_15.md)     |
+| 5.16   | Integration Testing & Level Freeze (Part A)          | level gate  | 5.15                    | Medium–High | [sprint_5_16.md](sprint_5_16.md)     |
+
+### Part B — Companion Intelligence (roadmap granularity only; renumbered 2026-08-02)
 
 | Sprint | Name                                      | Phase | Depends On | Complexity  |
 | ------ | ----------------------------------------- | ----- | ---------- | ----------- |
-| 5.1    | Emotion Signal Collection                 | 5.1   | 2.3, 2.8   | Medium      |
-| 5.2    | Emotion Inference & Contextual Adaptation | 5.1   | 5.1        | Medium–High |
-| 5.3    | Wellness Triggers                         | 5.2   | 4.15, 5.2  | Medium      |
-| 5.4    | Wellness Escalation & Hard Limit          | 5.2   | 5.3        | Medium      |
-| 5.5    | Adaptive Wellness                         | 5.2   | 5.4, 5.8   | Medium–High |
-| 5.6    | Usage & Habit Tracking                    | 5.3   | 4.6, 4.2   | Medium      |
-| 5.7    | Analytics Dashboard Data                  | 5.3   | 5.6        | Low–Medium  |
-| 5.8    | Pattern Recognition                       | 5.4   | 3.2, 5.6   | High        |
-| 5.9    | Preference Learning & Recommendations     | 5.4   | 5.8        | Medium–High |
+| 5.17   | Wellness Triggers                         | 5.2   | 4.15, 5.2  | Medium      |
+| 5.18   | Wellness Escalation & Hard Limit          | 5.2   | 5.17       | Medium      |
+| 5.19   | Adaptive Wellness                         | 5.2   | 5.18, 5.22 | Medium–High |
+| 5.20   | Usage & Habit Tracking                    | 5.3   | 4.6, 4.2   | Medium      |
+| 5.21   | Analytics Dashboard Data                  | 5.3   | 5.20       | Low–Medium  |
+| 5.22   | Pattern Recognition                       | 5.4   | 3.2, 5.20  | High        |
+| 5.23   | Preference Learning & Recommendations     | 5.4   | 5.22       | Medium–High |
 
 ## LEVEL 6 — Stabilization → Release v1.0
 
@@ -198,7 +235,8 @@ Dependency numbers below on `4.x` sprints were updated 2026-07-20 to match Level
 | 0.3     | 3.14         | Intelligent memory and decision system — ✔ **Released 2026-07-20** |
 | —       | 4.13         | Level 4 Part A complete (Device Control & Workflow Automation) — not a semver tag; see `sprint_4_13.md`'s Purpose and the "Level 4 breakdown changes" note above |
 | 0.4     | 4.20         | Complete productivity assistant (gated on BOTH Part A/4.13 AND Part B/4.20 — corrected from the original `4.11`, which predates the Part A/B split) |
-| 0.5     | 5.9          | Complete personal AI companion                        |
+| —       | 5.16         | Level 5 Part A complete (Emotional Intelligence & Presentation Layer) — not a semver tag; see `sprint_5_16.md`'s Purpose and the "Level 5 breakdown changes" note above |
+| 0.5     | 5.23         | Complete personal AI companion (gated on BOTH Part A/5.16 AND Part B/5.23 — corrected from the original `5.9`, which predates the Part A/B split) |
 | 1.0     | 6.8          | Official JARMINEI Release                             |
 
 ## Recommendations (not part of the official roadmap — flagged separately per the Development Guide's constraints)

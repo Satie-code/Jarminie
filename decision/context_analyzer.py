@@ -46,6 +46,16 @@ _REFERENCES_PAST_PATTERN = re.compile(r"REFERENCES_PAST:\s*(YES|NO)", re.IGNOREC
 _PERSONA_PATTERN = re.compile(r"PERSONA:\s*(JARVIS|MINIE|NONE)", re.IGNORECASE)
 _SENTIMENT_PATTERN = re.compile(r"SENTIMENT:\s*([A-Za-z_]+)", re.IGNORECASE)
 
+_STOP_SEQUENCE = ["\n\n"]
+"""0.4.3 latency fix — see decision/llm_client.py's LanguageModelClient
+docstring for the real, measured finding this responds to: a real
+Ollama call for this exact prompt was directly observed emitting the
+correct 5 requested lines, then an entire unsolicited extra paragraph
+afterward (thrown away by _parse_response() below, but still fully
+generated and timed) — roughly two-thirds of this stage's own real
+per-call latency. The model's own blank line between its structured
+answer and its own rambling is the real, observed stop boundary."""
+
 
 class SentimentHint(Enum):
     """A conversational-tone hint only — deliberately coarse, never
@@ -109,7 +119,9 @@ class ContextAnalyzer:
 
         prompt = _build_prompt(intent, context)
         try:
-            response = self._llm_client.generate(prompt, self._timeout_seconds)
+            response = self._llm_client.generate(
+                prompt, self._timeout_seconds, stop=_STOP_SEQUENCE
+            )
         except LlmError:
             logger.warning(
                 "Context analysis call failed; degrading to neutral default.", exc_info=True

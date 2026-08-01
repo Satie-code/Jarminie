@@ -100,7 +100,9 @@ def test_startup_completes_successfully_when_ollama_entirely_unreachable(caplog)
         def is_reachable(self) -> bool:
             return False
 
-        def generate(self, prompt: str, timeout_seconds: float) -> str:
+        def generate(
+            self, prompt: str, timeout_seconds: float, stop: list[str] | None = None
+        ) -> str:
             raise AssertionError("generate() should never be called by this test")
 
     intent_detector = IntentDetector(_UnreachableClient(), ModelConfig())

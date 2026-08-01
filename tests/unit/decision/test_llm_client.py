@@ -34,7 +34,40 @@ def test_generate_returns_the_response_text(model_config):
     assert result == "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
     mock_client_cls.assert_called_once_with(host="http://localhost:11434", timeout=5.0)
     mock_client_cls.return_value.generate.assert_called_once_with(
-        model="llama3", prompt="some prompt", stream=False
+        model="llama3", prompt="some prompt", stream=False, options=None
+    )
+
+
+def test_generate_passes_a_stop_sequence_as_ollama_options(model_config):
+    """0.4.3 latency fix: a real, measured finding — without a real
+    stop sequence, a real model reliably keeps generating well past a
+    prompt's own "respond with exactly N lines" instruction (see this
+    module's own LanguageModelClient docstring). Confirms stop is
+    genuinely forwarded to Ollama's own options={"stop": [...]}
+    mechanism, not just accepted and silently dropped."""
+    client = OllamaClient(model_config)
+    with patch("ollama.Client") as mock_client_cls:
+        mock_client_cls.return_value.generate.return_value = SimpleNamespace(response="ok")
+
+        client.generate("prompt", timeout_seconds=5.0, stop=["\n\n"])
+
+    mock_client_cls.return_value.generate.assert_called_once_with(
+        model="llama3", prompt="prompt", stream=False, options={"stop": ["\n\n"]}
+    )
+
+
+def test_generate_omits_options_when_no_stop_sequence_given(model_config):
+    """The default (stop=None) must stay a true no-op — every caller
+    that existed before 0.4.3 (ResponseGenerator, Summarizer) must see
+    identical behavior to before this change."""
+    client = OllamaClient(model_config)
+    with patch("ollama.Client") as mock_client_cls:
+        mock_client_cls.return_value.generate.return_value = SimpleNamespace(response="ok")
+
+        client.generate("prompt", timeout_seconds=5.0)
+
+    mock_client_cls.return_value.generate.assert_called_once_with(
+        model="llama3", prompt="prompt", stream=False, options=None
     )
 
 

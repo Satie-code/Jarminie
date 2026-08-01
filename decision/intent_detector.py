@@ -40,6 +40,13 @@ _CONFIDENCE_PATTERN = re.compile(r"CONFIDENCE:\s*([0-9]*\.?[0-9]+)", re.IGNORECA
 _CLASSIFIABLE_CATEGORIES = ", ".join(
     c.name for c in IntentCategory if c is not IntentCategory.UNKNOWN
 )
+_STOP_SEQUENCE = ["\n\n"]
+"""0.4.3 latency fix — see decision/llm_client.py's LanguageModelClient
+docstring for the real, measured finding this responds to. The prompt's
+own "CATEGORY: ...\\nCONFIDENCE: ..." format has no blank line between
+its two requested lines, so a real model's own blank line always marks
+the boundary where it would otherwise start rambling past the requested
+format — a genuine stop condition, not a guess."""
 
 
 class IntentDetector:
@@ -91,7 +98,9 @@ class IntentDetector:
 
         prompt = _build_prompt(transcript, context)
         try:
-            response = self._llm_client.generate(prompt, self._timeout_seconds)
+            response = self._llm_client.generate(
+                prompt, self._timeout_seconds, stop=_STOP_SEQUENCE
+            )
         except LlmError:
             logger.warning("Intent detection call failed; degrading to UNKNOWN.", exc_info=True)
             self._healthy = False

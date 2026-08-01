@@ -155,8 +155,8 @@ Renumbered continuation of the original roadmap's `4.8`–`4.11` entries, plus t
 | 4.16   | Search & Research                                 | 4.4         | 3.11               | Medium      | [sprint_4_16.md](sprint_4_16.md) — **Complete** |
 | 4.17   | Summarization & Source Validation                 | 4.4         | 4.16               | Medium–High | [sprint_4_17.md](sprint_4_17.md) — **Complete** |
 | 4.18   | Scheduler & Internet Agent Integration            | integration | 4.14–4.17, 4.11    | High        | [sprint_4_18.md](sprint_4_18.md) — **Complete** |
-| 4.19   | Error Handling & Recovery Hardening (Part B)      | reliability | 4.18               | Medium      | [sprint_4_19.md](sprint_4_19.md) |
-| 4.20   | Integration Testing & Level Freeze (Part B)       | level gate  | 4.19               | Medium–High | [sprint_4_20.md](sprint_4_20.md) |
+| 4.19   | Error Handling & Recovery Hardening (Part B)      | reliability | 4.18               | Medium      | [sprint_4_19.md](sprint_4_19.md) — **Complete** |
+| 4.20   | Integration Testing & Level Freeze (Part B)       | level gate  | 4.19               | Medium–High | [sprint_4_20.md](sprint_4_20.md) — **Complete** |
 
 ## LEVEL 5 — Companion → Release v0.5
 

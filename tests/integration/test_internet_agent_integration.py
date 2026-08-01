@@ -119,6 +119,45 @@ def test_live_turn_with_no_search_results_gets_an_honest_gap_reply(
     wait_for_dormant(h.quiet_mode_controller)
 
 
+def test_live_turn_summarization_llm_failure_degrades_to_an_honest_reply(
+    pipeline_harness, wait_for_active_capture, wait_for_dormant, push_utterance
+):
+    """Sprint 4.19 hardening, scenario (b): a real search succeeds (real
+    SearchResults come back and are validated for real by
+    SourceValidator), but the Summarizer's own LanguageModelClient call
+    fails — Summarizer.summarize() (Sprint 4.17) already degrades to
+    Summarizer._DEGRADED_SUMMARY_TEXT rather than raising, per its own
+    Acceptance Criteria; this is the real regression test proving that
+    holds end-to-end through _handle_internet_agent_turn() (Sprint 4.18),
+    not new production code."""
+    h = pipeline_harness
+    _set_internet_agent_request(h, "JARMINEI project news")
+    h.fake_search_provider.queued_results = [
+        _result(
+            "JARMINEI Project Overview",
+            "https://example.com/jarminei-overview",
+            "JARMINEI is a voice assistant project with a modular architecture.",
+        ),
+    ]
+    h.llm_client.should_raise_for_summary = True
+
+    wait_for_active_capture(h.mic)
+    h.stt.pending_transcripts.append("what's the latest news on the jarminei project")
+    push_utterance(h.audio_backend)
+
+    assert h.tts.spoken_event.wait(timeout=_TURN_TIMEOUT)
+    reply_text, _ = h.tts.speak_calls[0]
+    assert reply_text == (
+        "I found some sources but couldn't summarize them right now. "
+        "(Based on 1 source(s), 0 corroborated.)"
+    )
+
+    # The real search call still happened — only summarization degraded.
+    assert len(h.fake_search_provider.calls) == 1
+
+    wait_for_dormant(h.quiet_mode_controller)
+
+
 def test_live_turn_search_provider_failure_degrades_to_the_same_honest_reply(
     pipeline_harness, wait_for_active_capture, wait_for_dormant, push_utterance
 ):

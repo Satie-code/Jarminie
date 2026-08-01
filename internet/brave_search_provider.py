@@ -71,12 +71,24 @@ class BraveSearchProvider:
             )
             response.raise_for_status()
             payload = response.json()
+            # Sprint 4.20 adversarial re-read finding: parsing must live
+            # INSIDE this same try block, not after it — payload.get(
+            # "web", {}) only falls back to {} when the "web" key is
+            # genuinely absent; a real (if malformed/degraded) response
+            # shaped {"web": null, ...} makes it return None instead,
+            # and .get("results", []) on None raises a raw AttributeError
+            # this method's own docstring already promises never to leak.
+            # ResearchEngine.research()'s own broad `except Exception`
+            # already absorbed this in practice, but that's defense in
+            # depth masking a real gap in this class's own contract, not
+            # a reason to leave the gap itself unfixed.
+            web = payload.get("web") or {}
+            raw_results = web.get("results") or []
         except SearchError:
             raise
         except Exception as exc:
             raise SearchError(f"Brave Search request failed for {query!r}: {exc}") from exc
 
-        raw_results = payload.get("web", {}).get("results", [])
         retrieved_at = datetime.now(UTC)
         return [
             SearchResult(

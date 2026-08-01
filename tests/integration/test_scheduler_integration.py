@@ -290,3 +290,198 @@ def test_periodic_maintenance_jobs_fire_more_than_once_via_real_recurrence(
     assert wait_until(_all_fired_at_least_twice, timeout=_TURN_TIMEOUT), (
         f"Not every maintenance job fired twice within 5s: {maintenance_call_counts}"
     )
+
+
+# --- Sprint 4.19 (Error Handling & Recovery Hardening, Part B) --------------------------
+
+
+@pytest.fixture
+def one_job_failing_call_counts(monkeypatch):
+    """Sprint 4.19 hardening, scenario (c): same class-level monkeypatch
+    technique as maintenance_call_counts above, except ActionAuditLog.
+    purge_older_than fails from its SECOND call onward (after counting
+    its own call) instead of calling through to the real implementation
+    every time — simulating one real job's own repeated runtime
+    exception, so the paired test can prove the other four real jobs
+    registered alongside it (the two MemoryLifecycleManager passes,
+    ConversationSessionStore's purge, and — implicitly, since it's on
+    the same shared TaskScheduler — the reminder poll/announcement
+    check) keep running on their own real schedule regardless.
+    Re-verifies Sprint 4.15's own two-synthetic-job guarantee
+    (test_a_jobs_own_exception_does_not_stop_another_independently_
+    registered_job) against the REAL, fully-wired five-job Sprint 4.18
+    graph instead.
+
+    Letting the FIRST call through unfailed is deliberate, not
+    incidental: ActionAuditLog.start() (Sprint 4.8) itself calls
+    purge_older_than() once as part of its own real startup sequence,
+    with no try/except of its own around that call — an always-raising
+    wrapper here would crash fast_scheduler_harness's own construction
+    before this test's body ever ran (confirmed directly: an earlier
+    draft of this fixture did exactly that). Failing from the second
+    call onward instead tells the more realistic story this scenario is
+    actually about anyway — a store that started up fine and later hit
+    a real, transient failure — not "broken from the very first call,"
+    a meaningfully different and less interesting failure mode."""
+    counts = {
+        "cleanup_pass": 0,
+        "monthly_review": 0,
+        "conversation_purge": 0,
+        "audit_purge": 0,
+    }
+
+    original_cleanup = MemoryLifecycleManager.run_cleanup_pass
+    original_monthly = MemoryLifecycleManager.run_monthly_review
+    original_conversation_purge = ConversationSessionStore.purge_older_than
+    original_audit_purge = ActionAuditLog.purge_older_than
+
+    def counting_cleanup(self):
+        counts["cleanup_pass"] += 1
+        return original_cleanup(self)
+
+    def counting_monthly(self):
+        counts["monthly_review"] += 1
+        return original_monthly(self)
+
+    def counting_conversation_purge(self, days=None):
+        counts["conversation_purge"] += 1
+        return original_conversation_purge(self, days)
+
+    def failing_after_first_call_audit_purge(self, days=None):
+        counts["audit_purge"] += 1
+        if counts["audit_purge"] == 1:
+            return original_audit_purge(self, days)
+        raise RuntimeError("simulated ActionAuditLog.purge_older_than failure")
+
+    monkeypatch.setattr(MemoryLifecycleManager, "run_cleanup_pass", counting_cleanup)
+    monkeypatch.setattr(MemoryLifecycleManager, "run_monthly_review", counting_monthly)
+    monkeypatch.setattr(ConversationSessionStore, "purge_older_than", counting_conversation_purge)
+    monkeypatch.setattr(ActionAuditLog, "purge_older_than", failing_after_first_call_audit_purge)
+
+    return counts
+
+
+def test_one_task_scheduler_jobs_own_exception_does_not_stop_the_other_real_jobs(
+    one_job_failing_call_counts, fast_scheduler_harness, wait_until
+):
+    """Scenario (c). audit_purge's own first call (ActionAuditLog.
+    start()'s real startup purge) always succeeds; every call from the
+    second one onward — genuine TaskScheduler-driven recurrence — fails.
+    Requiring audit_purge to reach 3 (one real success, then at least
+    two real failures) is what actually proves it keeps being CALLED on
+    schedule despite repeatedly raising, not merely that it fired once —
+    APScheduler doesn't disable/remove a job after an exception, it just
+    logs and retries on the job's own next tick — while the other three
+    real jobs keep ticking normally alongside it on the same shared
+    TaskScheduler."""
+    _ = fast_scheduler_harness
+
+    def _all_kept_ticking() -> bool:
+        counts = one_job_failing_call_counts
+        return counts["audit_purge"] >= 3 and all(
+            counts[name] >= 2 for name in ("cleanup_pass", "monthly_review", "conversation_purge")
+        )
+
+    assert wait_until(_all_kept_ticking, timeout=_TURN_TIMEOUT), (
+        f"Not every job kept ticking despite one's own real exception: "
+        f"{one_job_failing_call_counts}"
+    )
+
+
+def test_reminder_becoming_due_during_session_end_never_corrupts_state(
+    fast_scheduler_harness, voice_config, wait_for_active_capture, wait_for_dormant, push_utterance
+):
+    """Scenario (d): a reminder becoming due in the narrow window between
+    VoiceSessionManager's watchdog deciding to end a session and the
+    session actually ending — named as a real, accepted-but-untested
+    edge case in sprint_4_18.md's own Potential Risks.
+
+    Investigation (reading voice/quiet_mode.py/session_manager.py
+    directly, not assuming) found QuietModeController.current_mode()/
+    deactivate() are a single plain attribute read/write each — genuinely
+    atomic at the Python bytecode level, with no possible "torn"
+    intermediate state to observe, only ACTIVE or DORMANT at whichever
+    exact instant _check_and_announce_due_reminder() happens to check.
+    This test proves that holds under real, sustained concurrent
+    pressure rather than only by code inspection: a due reminder sits in
+    the queue for the ENTIRE session lifetime, right through its own
+    timeout transition, while health_check() is sampled continuously and
+    must never once report an inconsistent state (ACTIVE with no real
+    session, or vice versa)."""
+    h = fast_scheduler_harness
+    h.wake_engine.calls = 0
+    wait_for_active_capture(h.mic)
+    h.llm_client.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
+    h.llm_client.context_response = (
+        "TOPIC: general chat\nENTITIES: NONE\nREFERENCES_PAST: NO\n"
+        "PERSONA: NONE\nSENTIMENT: NEUTRAL"
+    )
+    h.stt.pending_transcripts.append("how are you today")
+    push_utterance(h.audio_backend)
+    assert h.tts.spoken_event.wait(timeout=_TURN_TIMEOUT)
+
+    item = _due_item("check the oven")
+    h.calendar_store.save(item)
+
+    inconsistent_states = []
+    deadline = time.monotonic() + voice_config.session_timeout_seconds + _TURN_TIMEOUT
+    while time.monotonic() < deadline:
+        if not h.quiet_mode_controller.health_check():
+            inconsistent_states.append(h.quiet_mode_controller.current_mode())
+        if (
+            h.quiet_mode_controller.current_mode() is OperatingMode.DORMANT
+            and len(h.tts.speak_calls) >= 2
+        ):
+            break
+        time.sleep(0.02)
+
+    assert inconsistent_states == [], f"health_check() went inconsistent: {inconsistent_states}"
+    # The reminder was never lost — it waited through the whole active
+    # session (Part 2's own "Queued" language) and was announced once
+    # the system genuinely went idle, not silently dropped.
+    assert len(h.tts.speak_calls) >= 2
+    assert h.tts.speak_calls[1][0] == "check the oven"
+
+    wait_for_dormant(h.quiet_mode_controller, timeout=_TURN_TIMEOUT)
+
+
+def test_tts_failure_during_proactive_announcement_cleanly_returns_to_dormant(
+    fast_scheduler_harness, wait_until, wait_for_dormant
+):
+    """Scenario (f): VoiceSessionManager/TTS failure mid-proactive-
+    announcement. The speak-first-then-listen sequence Sprint 4.18 built
+    (activate(SCHEDULED_ALERT) -> begin_session() -> immediate
+    speak(announce_first)) is a genuinely new call shape; investigation
+    (reading voice/quiet_mode.py directly) found QuietModeController.
+    activate() ALREADY wraps begin_session() in a broad try/except that
+    rolls _mode back to DORMANT on ANY failure — built during Sprint
+    2.14's own hardening and explicitly re-documented in Sprint 4.18 as
+    covering this exact announce_first path too. No new production code
+    for this scenario; this test proves that existing protection holds
+    for real, through the actual proactive-announcement job, rather than
+    only by reading the docstring's own claim.
+
+    The item having already been popped off PriorityQueueManager before
+    the failed announcement attempt (and therefore not retried) is a
+    real, honest, separate limitation — out of this scenario's own
+    scope, which is exclusively about QuietModeController/
+    VoiceSessionManager state consistency, not about reminder
+    redelivery; named here, not silently assumed away."""
+    h = fast_scheduler_harness
+    wait_for_dormant(h.quiet_mode_controller, timeout=_TURN_TIMEOUT)
+    h.wake_engine.match_on_call = 10**9
+    h.tts.should_raise = True
+
+    item = _due_item("check the oven")
+    h.calendar_store.save(item)
+
+    # The announcement was genuinely attempted — the item was popped off
+    # the real PriorityQueueManager even though speaking it then failed.
+    assert wait_until(
+        lambda: h.priority_queue_manager.peek_next() is None, timeout=_TURN_TIMEOUT
+    ), "The due reminder was never even attempted."
+
+    assert h.quiet_mode_controller.current_mode() is OperatingMode.DORMANT
+    assert h.quiet_mode_controller.health_check() is True
+    assert h.session_manager.health_check() is True
+    assert h.tts.speak_calls == []

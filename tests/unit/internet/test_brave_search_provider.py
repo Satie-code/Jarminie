@@ -150,6 +150,34 @@ def test_search_handles_missing_web_key_gracefully(config):
     assert results == []
 
 
+def test_search_handles_a_null_web_value_gracefully(config):
+    """Sprint 4.20 adversarial re-read finding: {"web": null} is a
+    genuinely different shape from a missing "web" key — payload.get(
+    "web", {}) only falls back to {} when the key is absent; here the
+    key is present with value None, so the old code's un-guarded
+    `.get("results", [])` on that None raised a raw, un-promised
+    AttributeError instead of degrading. Confirmed as a real gap before
+    fixing it (not assumed): ResearchEngine.research()'s own broad
+    `except Exception` was already absorbing it in practice, masking a
+    real violation of this method's own "never a raw requests
+    exception" docstring promise."""
+    provider = BraveSearchProvider(config)
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = _fake_response({"web": None})
+        results = provider.search("test query", max_results=5)
+    assert results == []
+
+
+def test_search_handles_a_null_results_value_gracefully(config):
+    """The same class of gap as test_search_handles_a_null_web_value_
+    gracefully above, one level deeper: {"web": {"results": null}}."""
+    provider = BraveSearchProvider(config)
+    with patch("requests.get") as mock_get:
+        mock_get.return_value = _fake_response({"web": {"results": None}})
+        results = provider.search("test query", max_results=5)
+    assert results == []
+
+
 # --- opt-in/real: the actual Brave Search API -------------------------------------------
 
 

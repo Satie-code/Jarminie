@@ -206,6 +206,57 @@ def test_persistence_survives_close_and_reopen(tmp_path):
     assert fetched.title == item.title
 
 
+# --- Sprint 4.19 hardening (scenario e): Fail Gracefully -----------------------------
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern (tests/unit/memory/test_memory_store.py, Sprint
+    3.14; tests/unit/workflow/test_workflow_store.py, Sprint 4.13) — a
+    real SqliteClient whose query() can be switched to fail on demand,
+    after start() has already succeeded."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_list_due_within_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    calendar_store = CalendarStore(client, SchedulerConfig())
+    calendar_store.start()
+    try:
+        calendar_store.save(make_item(scheduled_at=_NOW))
+        client.raise_on_query = True
+
+        assert calendar_store.list_due_within(_NOW + timedelta(days=1)) == []
+    finally:
+        client.raise_on_query = False
+        calendar_store.stop()
+
+
+def test_list_due_within_max_lookahead_days_check_still_raises_even_while_query_fails(tmp_path):
+    """The ValueError guard for an unreasonable window_end is a real
+    caller-error signal, not a SQLite failure — it must never be
+    silently swallowed into an empty-list degrade, even while the
+    underlying query is also (independently) set to fail."""
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    calendar_store = CalendarStore(client, SchedulerConfig(max_lookahead_days=1))
+    calendar_store.start()
+    try:
+        client.raise_on_query = True
+        with pytest.raises(ValueError, match="max_lookahead_days"):
+            calendar_store.list_due_within(_NOW + timedelta(days=365))
+    finally:
+        client.raise_on_query = False
+        calendar_store.stop()
+
+
 # --- health_check() ------------------------------------------------------------------
 
 

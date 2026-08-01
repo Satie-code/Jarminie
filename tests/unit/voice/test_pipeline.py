@@ -687,6 +687,29 @@ def test_scheduler_turn_with_no_resolvable_time_reports_it_and_never_saves(
     )
 
 
+def test_scheduler_turn_calendar_store_save_failure_degrades_to_an_honest_reply(
+    pipeline, collaborators
+):
+    """Sprint 4.19 hardening, scenario (e): a real SQLite failure inside
+    calendar_store.save() must not fall through to _handle_turn_complete()'s
+    outer catch (which would speak no reply at all and end the session),
+    and must not be silently swallowed into a false "Done" claim either —
+    a narrow catch right here degrades to an honest spoken reply while the
+    session continues normally."""
+    collaborators["decision_trace"].selected_engine = EngineSelection.SCHEDULER
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "remind me to call mom in 20 minutes"
+    collaborators["context_analysis"].primary_topic = "call mom"
+    collaborators["calendar_store"].save.side_effect = RuntimeError("sqlite exploded")
+
+    pipeline._handle_turn_complete("remind me to call mom in 20 minutes", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "I'm sorry, I couldn't save that reminder right now.", "p340"
+    )
+    collaborators["session_manager"].end_session.assert_not_called()
+
+
 # --- INTERNET_AGENT routing (Sprint 4.18) -------------------------------------
 
 
@@ -792,3 +815,168 @@ def test_check_and_announce_due_reminder_announces_a_due_reminder(pipeline, coll
     collaborators["quiet_mode_controller"].activate.assert_called_once_with(
         ActivationReason.SCHEDULED_ALERT, announce_first=("Team standup", "p340")
     )
+
+
+# --- Sprint 4.19 hardening: adversarial sweep -----------------------------------
+#
+# Acceptance Criteria, verbatim: "Every internal call site in
+# _handle_scheduler_turn()/_handle_internet_agent_turn()/_check_and_
+# announce_due_reminder() is covered by the adversarial sweep test."
+# Split into two sweeps rather than one, matching the two genuinely
+# different expected outcomes investigation found — forcing both into
+# one shared parametrize would blur a real, deliberate distinction:
+#
+# (1) _handle_scheduler_turn()/_handle_internet_agent_turn() both run
+#     INSIDE _handle_turn_complete()'s own try/except (Sprint 2.13) — a
+#     collaborator fault here must never propagate out of a live turn;
+#     it degrades to _handle_turn_complete()'s existing outer catch
+#     (ending the session, SessionEndReason.ERROR) unless a narrower
+#     guard already exists (calendar_store.save(), Sprint 4.19
+#     scenario e, tested separately with its own exact reply text above
+#     — included here too for real sweep completeness).
+# (2) _check_and_announce_due_reminder() is a bare TaskScheduler job
+#     body with no try/except of its own, by design (see this module's
+#     docstring) — its collaborators are all in-memory, already-hardened
+#     objects with no real external I/O of their own, so a fault here is
+#     a genuine bug, not an anticipatable environmental failure; adding
+#     a blanket catch would only risk masking that bug rather than
+#     degrading a real failure mode. The CORRECT, expected behavior is
+#     that it RAISES, safely absorbed by the same TaskScheduler/
+#     APScheduler job-isolation guarantee Sprint 4.19 scenario (c)
+#     already re-verifies against the real, fully-wired five-job graph
+#     (tests/integration/test_scheduler_integration.py) — never left
+#     unverified as "presumably fine."
+
+
+def _make_due_reminder_peek_pop(collaborators) -> None:
+    scheduled_item = ScheduledItem(
+        item_id="item-1",
+        item_type=ItemType.EVENT,
+        title="Team standup",
+        scheduled_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+    )
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.SCHEDULED_REMINDER
+    popped = MagicMock()
+    popped.payload = scheduled_item
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+
+@pytest.mark.parametrize(
+    ("selected_engine", "raw_transcript", "primary_topic", "faulty_collaborator", "faulty_method"),
+    [
+        (
+            EngineSelection.SCHEDULER,
+            "remind me to call mom in 20 minutes",
+            "call mom",
+            "calendar_store",
+            "save",
+        ),
+        (
+            EngineSelection.INTERNET_AGENT,
+            "search for the latest Python release",
+            "latest Python release",
+            "research_engine",
+            "research",
+        ),
+        (
+            EngineSelection.INTERNET_AGENT,
+            "search for the latest Python release",
+            "latest Python release",
+            "source_validator",
+            "validate",
+        ),
+        (
+            EngineSelection.INTERNET_AGENT,
+            "search for the latest Python release",
+            "latest Python release",
+            "summarizer",
+            "summarize",
+        ),
+    ],
+    ids=[
+        "calendar_store.save_raises",
+        "research_engine.research_raises",
+        "source_validator.validate_raises",
+        "summarizer.summarize_raises",
+    ],
+)
+def test_live_turn_sweep_every_scheduler_and_internet_agent_call_site_never_propagates(
+    pipeline,
+    collaborators,
+    selected_engine,
+    raw_transcript,
+    primary_topic,
+    faulty_collaborator,
+    faulty_method,
+):
+    """Sweep (1) — see this section's own header comment. A non-empty
+    research_engine.research() result is the default for every
+    INTERNET_AGENT case so source_validator.validate()/summarizer.
+    summarize() are genuinely reached (not short-circuited by the empty-
+    results early return), matching test_internet_agent_turn_speaks_
+    summary_with_citation_count's own setup."""
+    collaborators["decision_trace"].selected_engine = selected_engine
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = raw_transcript
+    collaborators["context_analysis"].primary_topic = primary_topic
+    collaborators["research_engine"].research.return_value = [
+        SearchResult(
+            title="T", url="https://example.com", snippet="s", retrieved_at=datetime.now(UTC)
+        )
+    ]
+    getattr(collaborators[faulty_collaborator], faulty_method).side_effect = RuntimeError(
+        "simulated collaborator failure"
+    )
+
+    pipeline._handle_turn_complete(raw_transcript, "session-1")  # must never raise
+
+    if faulty_collaborator == "calendar_store":
+        # The one call site with its own narrower guard (scenario e) —
+        # the session continues with an honest reply, never ended.
+        collaborators["session_manager"].end_session.assert_not_called()
+    else:
+        # No narrower guard exists for these three — _handle_turn_
+        # complete()'s own outer catch ends the session gracefully
+        # rather than leaving it stuck, the same degrade every other
+        # genuinely unexpected internal bug already gets.
+        collaborators["session_manager"].end_session.assert_called_once_with(
+            SessionEndReason.ERROR
+        )
+        collaborators["session_manager"].speak_reply.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("faulty_collaborator", "faulty_method"),
+    [
+        ("quiet_mode_controller", "current_mode"),
+        ("priority_queue_manager", "peek_next"),
+        ("priority_queue_manager", "pop_next"),
+        ("persona_manager", "active_persona"),
+        ("quiet_mode_controller", "activate"),
+    ],
+    ids=[
+        "quiet_mode_controller.current_mode_raises",
+        "priority_queue_manager.peek_next_raises",
+        "priority_queue_manager.pop_next_raises",
+        "persona_manager.active_persona_raises",
+        "quiet_mode_controller.activate_raises",
+    ],
+)
+def test_check_and_announce_due_reminder_sweep_every_call_site_raises_by_design(
+    pipeline, collaborators, faulty_collaborator, faulty_method
+):
+    """Sweep (2) — see this section's own header comment. Deliberately
+    asserts pytest.raises(), not a graceful degrade: this method has no
+    try/except of its own, on purpose, and relies on the calling
+    TaskScheduler job's own APScheduler-provided isolation instead."""
+    _make_due_reminder_peek_pop(collaborators)
+    getattr(collaborators[faulty_collaborator], faulty_method).side_effect = RuntimeError(
+        "simulated collaborator failure"
+    )
+
+    with pytest.raises(RuntimeError, match="simulated collaborator failure"):
+        pipeline._check_and_announce_due_reminder()

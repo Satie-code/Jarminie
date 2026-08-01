@@ -271,3 +271,50 @@ def test_reminder_lookahead_seconds_widens_the_due_window(
     reminder_engine._poll_due_items()
 
     assert priority_queue_manager.pop_next() is not None
+
+
+# --- Sprint 4.19 hardening (scenario e): CalendarStore failure during poll -------------
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern — see tests/unit/scheduler/test_calendar_store.py's
+    own identical copy for the full rationale (duplicated, not imported,
+    per this project's "tests/ has no __init__.py" convention)."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_poll_due_items_survives_a_real_calendar_store_failure(
+    tmp_path, priority_queue_manager, task_scheduler
+):
+    """Sprint 4.19 hardening, scenario (e): _poll_due_items() has no
+    try/except of its own — it doesn't need one, since CalendarStore.
+    list_due_within() (this sprint's own hardening) already degrades to
+    an empty list on a real SQLite failure rather than raising. This
+    test proves that through the real CalendarStore/ReminderEngine pair,
+    not just CalendarStore in isolation — a poll during an outage simply
+    finds nothing due, never crashes the calling TaskScheduler job."""
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    calendar_store = CalendarStore(client, SchedulerConfig())
+    calendar_store.start()
+    try:
+        calendar_store.save(make_item(scheduled_at=datetime.now(UTC)))
+        reminder_engine = ReminderEngine(
+            calendar_store, priority_queue_manager, task_scheduler, SchedulerConfig()
+        )
+        client.raise_on_query = True
+
+        reminder_engine._poll_due_items()  # must not raise
+
+        assert priority_queue_manager.peek_next() is None
+    finally:
+        client.raise_on_query = False
+        calendar_store.stop()

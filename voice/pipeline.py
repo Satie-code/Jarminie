@@ -638,7 +638,21 @@ class CommunicationPipeline:
         callable with no live turn-based caller yet — the same
         "implemented, tested in isolation, no live caller" shape this
         project already tracks elsewhere (backlog/technical_debt.md
-        item 24's own precedent)."""
+        item 24's own precedent).
+
+        Sprint 4.19 hardening (scenario e): calendar_store.save() is
+        deliberately left unwrapped by CalendarStore itself (see that
+        module's own docstring) — the narrow try/except below is what
+        gives a real SQLite failure here an honest degraded reply
+        instead of two worse alternatives: silently claiming "Done" when
+        nothing was actually saved (if save() swallowed its own
+        failure), or falling through to _handle_turn_complete()'s outer
+        catch, which would speak no reply at all and abruptly end the
+        whole session — coarser than necessary for a failure scoped to
+        this one turn, the same "a narrower catch beats the coarse outer
+        one once a failure mode is specific enough to degrade instead of
+        aborting" reasoning _run_decision_pipeline()'s own Sprint 3.13
+        hardening already established."""
         now = datetime.now(UTC)
         scheduled_at = _parse_relative_time(trace.intent.raw_transcript, now)
         if scheduled_at is None:
@@ -652,7 +666,11 @@ class CommunicationPipeline:
             scheduled_at=scheduled_at,
             created_at=now,
         )
-        self._calendar_store.save(item)
+        try:
+            self._calendar_store.save(item)
+        except Exception:
+            logger.exception("Failed to save scheduled item %r; reporting honestly.", title)
+            return "I'm sorry, I couldn't save that reminder right now."
         return f"Done — I'll remind you about {title} at {scheduled_at.strftime('%H:%M')}."
 
     def _handle_internet_agent_turn(self, trace: DecisionTrace) -> str:

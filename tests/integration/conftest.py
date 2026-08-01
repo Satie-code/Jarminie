@@ -204,7 +204,15 @@ class FakeLanguageModelClient:
     results:" substring that ONLY that prompt template ever contains
     (IntentDetector's own always has "CATEGORY:", ContextAnalyzer's
     never has either), the same "dispatch on a template-unique literal
-    substring" discipline this fake already used for the first two."""
+    substring" discipline this fake already used for the first two.
+
+    should_raise_for_summary (Sprint 4.19 hardening, scenario b) fails
+    ONLY the Summarizer's own call, distinct from should_raise (which
+    fails every call, including the earlier IntentDetector/
+    ContextAnalyzer stages of the same turn and so can never reach
+    Summarizer at all) — this is what actually lets a test exercise "the
+    search succeeded, only summarization failed" instead of the whole
+    turn degrading before routing ever happens."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -215,6 +223,7 @@ class FakeLanguageModelClient:
         self.summary_response = "Here is a summary based on the provided sources."
         self.calls: list[str] = []
         self.should_raise = False
+        self.should_raise_for_summary = False
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
         self.calls.append(prompt)
@@ -222,10 +231,14 @@ class FakeLanguageModelClient:
             from decision.llm_client import LlmError
 
             raise LlmError("simulated Ollama connection failure")
+        if "Search results:" in prompt:
+            if self.should_raise_for_summary:
+                from decision.llm_client import LlmError
+
+                raise LlmError("simulated Ollama connection failure during summarization")
+            return self.summary_response
         if "CATEGORY:" in prompt:
             return self.intent_response
-        if "Search results:" in prompt:
-            return self.summary_response
         return self.context_response
 
 

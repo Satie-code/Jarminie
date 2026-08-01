@@ -272,13 +272,40 @@ def voice_config() -> VoiceConfig:
     )
 
 
-@pytest.fixture
-def app_harness(tmp_path, voice_config):
+def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig):
     """Builds the real Level 2 + Level 3 module graph exactly as main.py's
     _register_level2_modules()/_register_level3_modules() do, registers
     every ManagedModule with a real CoreManager, and drives it through
     startup()/shutdown() — fakes only at the mic/wake-engine/STT/TTS/
-    Ollama boundary."""
+    Ollama boundary.
+
+    scheduler_config is caller-supplied (Sprint 4.20) so app_harness
+    (below) can keep SchedulerConfig()'s realistic 30s/3600s defaults —
+    used by every existing tests/system/ file, none of which need Level
+    4 Part B's background jobs to ever fire — while fast_scheduler_app_
+    harness opts into short intervals for the one new file that needs to
+    observe real recurrence (a proactive reminder announcement, the
+    three maintenance passes firing more than once) within a bounded
+    system test.
+
+    fast_scheduler_app_harness relies on core_manager.shutdown()'s own
+    plain reverse-registration-order stop, unmodified — task_scheduler/
+    calendar_store are registered first (see the real ordering
+    requirement documented at their own registration below), so with
+    short intervals a background job can genuinely still be executing
+    against another store's SqliteClient connection at the exact moment
+    that store's own stop() closes it. This is verified safe, not just
+    assumed: database/sqlite_client.py's own Sprint 4.19 threading.Lock
+    (added to fix a genuine concurrent-corruption bug, not this one)
+    serializes close() against execute()/query() on the same lock —
+    confirmed directly with a standalone reproduction (a background
+    thread hammering execute() while close() runs concurrently from the
+    main thread) before relying on it here: close() returns in ~16ms
+    with no hang, and the background thread's very next call cleanly
+    raises RuntimeError("SqliteClient.connect() must be called before
+    use.") — the same caught-and-logged-without-crashing outcome
+    APScheduler's own default executor already guarantees for any job
+    exception (Sprint 4.15's own established, tested behavior)."""
     config = AppConfig(
         voice=voice_config,
         database=DatabaseConfig(
@@ -390,11 +417,8 @@ def app_harness(tmp_path, voice_config):
     )
 
     # Sprint 4.18 (Scheduler & Internet Agent Integration) — Level 4
-    # Part B. Deliberately REALISTIC (slow, near-production-default)
-    # scheduler intervals here, NOT tuned fast — see tests/integration/
-    # conftest.py's own pipeline_harness fixture docstring for the real,
-    # concretely reproduced background-job/teardown race this avoids.
-    scheduler_config = SchedulerConfig()
+    # Part B. scheduler_config is caller-supplied (Sprint 4.20) — see
+    # this function's own docstring.
     internet_config = InternetConfig()
 
     task_scheduler = TaskScheduler()
@@ -540,6 +564,30 @@ def app_harness(tmp_path, voice_config):
 
 
 @pytest.fixture
+def app_harness(tmp_path, voice_config):
+    """SchedulerConfig() (realistic, slow defaults) — see
+    _app_harness_impl()'s own docstring for why. Every existing system
+    test in this directory uses this fixture; only
+    test_level4_part_b_acceptance.py opts into fast_scheduler_app_
+    harness below instead."""
+    yield from _app_harness_impl(tmp_path, voice_config, SchedulerConfig())
+
+
+@pytest.fixture
+def fast_scheduler_app_harness(tmp_path, voice_config):
+    """Identical object graph to app_harness, but with short
+    poll_interval_seconds/maintenance_interval_seconds (0.3s, matching
+    tests/integration/conftest.py's own fast_scheduler_harness — see its
+    docstring for why 0.3s, not more aggressive) so
+    test_level4_part_b_acceptance.py can observe real recurrence (a
+    proactive reminder announcement, the three maintenance passes firing
+    more than once) within a normal system test's own patience, through
+    the real, complete CoreManager graph."""
+    fast_config = SchedulerConfig(poll_interval_seconds=0.3, maintenance_interval_seconds=0.3)
+    yield from _app_harness_impl(tmp_path, voice_config, fast_config)
+
+
+@pytest.fixture
 def wait_for_active_capture():
     def _wait(mic, timeout: float = WAIT_TIMEOUT) -> None:
         deadline = time.monotonic() + timeout
@@ -572,3 +620,25 @@ def push_utterance():
         audio_backend.frame_queue.extend([QUIET_FRAME] * quiet_frames)
 
     return _push
+
+
+@pytest.fixture
+def wait_until():
+    """Generic bounded-poll helper (Sprint 4.20) — the same "poll a real
+    observable state, never blindly sleep-and-hope" discipline as
+    wait_for_active_capture/wait_for_dormant above, matching tests/
+    integration/conftest.py's own identical fixture, for conditions
+    those two named fixtures don't cover (a priority queue peek, a TTS
+    call count, a maintenance job's own call counter). Returns True/
+    False rather than raising, so a caller can assert with its own
+    descriptive message."""
+
+    def _wait(predicate, timeout: float = WAIT_TIMEOUT, interval: float = 0.02) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return False
+
+    return _wait

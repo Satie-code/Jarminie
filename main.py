@@ -10,6 +10,12 @@ sprint_4_11.md (Level 4 Part A's Workflow & Device Control Integration).
 Startup happens inside ui.app.run_app(); shutdown happens inside
 MainWindow.closeEvent() when the user closes the window — the Qt event
 loop (app.exec()) is what keeps the process alive between the two.
+
+**Runtime stability fix (PySide6 <-> Coqui TTS import-order conflict,
+docs/backlog/technical_debt.md item 29's own resolution)**: `ui.app` is
+therefore deliberately NOT imported at module level here like everything
+else — see `main()`'s own docstring/body for the full root cause and the
+`_prewarm_tts_before_pyside6()` call that must run immediately before it.
 """
 
 import sys
@@ -34,7 +40,7 @@ from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
 from internet.research_engine import ResearchEngine
-from internet.search_provider_registry import create_search_provider
+from internet.search_provider_registry import create_search_provider_with_fallback
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
@@ -54,7 +60,6 @@ from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
-from ui.app import run_app
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, SoundDeviceAudioBackend
@@ -152,6 +157,67 @@ class _Level4PartBModules:
     summarizer: Summarizer
 
 
+def _prewarm_tts_before_pyside6() -> None:
+    """Must run before ANY import that could pull in PySide6, including
+    the local `from ui.app import run_app` immediately below this call
+    in `main()` — root-caused, not guessed: PySide6/shiboken6 installs a
+    global import hook the moment `PySide6.QtWidgets` is first imported
+    anywhere in the process (its own `__feature__`-support machinery),
+    which then intercepts EVERY later import and calls
+    `inspect.getsource()` on the freshly-imported module to check
+    whether it "uses PySide". Coqui TTS transitively imports `six.moves`
+    (TTS -> matplotlib.pyplot -> matplotlib.category -> dateutil.parser
+    -> dateutil.tz -> six.moves) — a synthetic, loader-backed module
+    `six`'s own `_SixMetaPathImporter` constructs. When PySide6's hook's
+    own `inspect.getsource()` check runs against that synthetic module,
+    formatting its own "is a built-in module" error message needs
+    `repr(module)`, which Python 3.12's importlib then fails to compute
+    for this specific loader shape: `AttributeError:
+    '_SixMetaPathImporter' object has no attribute '_path'` (a real gap
+    in the `six` package itself, unrelated to this project, only ever
+    exercised because PySide6's hook forces this otherwise-never-taken
+    code path). Confirmed via direct reproduction before writing this
+    fix, not assumed: `import TTS` alone succeeds; `import
+    PySide6.QtWidgets` then `import TTS` reliably crashes with the exact
+    error above; the reverse order does not crash, and PySide6 itself
+    still works normally afterward (a real `QApplication` constructs
+    fine). See docs/backlog/technical_debt.md item 29's own resolution.
+
+    voice/text_to_speech.py's `CoquiTextToSpeech` already lazy-imports
+    `TTS.api` inside `start()` (Sprint 2.4), specifically so the real,
+    heavy TTS/torch import cost is only ever paid when TTS is actually
+    needed — but that laziness alone does not fix this conflict, since
+    `ui/app.py`'s own `run_app()` imports `PySide6.QtWidgets` and
+    constructs a real `QApplication` BEFORE `core_manager.startup()`
+    ever reaches `CoquiTextToSpeech.start()`'s own lazy import — meaning
+    the conflict was hit every time in the real running app, regardless
+    of that existing laziness. Pre-warming the identical import here —
+    immediately before `ui.app` is imported below, itself deliberately
+    deferred to inside `main()` rather than this module's own top-level
+    imports specifically so this ordering is achievable at all — makes
+    Python cache the real `TTS`/`six.moves` modules in `sys.modules`
+    before PySide6's hook is ever installed; `CoquiTextToSpeech.
+    start()`'s own later, still-lazy call then just reuses what's
+    already imported, unaffected by the hook. This changes WHEN an
+    already-unavoidable import cost is paid (slightly earlier, at
+    process start), not whether it's paid — no new, ongoing cost is
+    introduced.
+
+    Deliberately swallows any failure here: a genuine TTS-import problem
+    (the package missing or broken) must not crash the whole application
+    at startup — that failure is already handled correctly, later, by
+    `CoquiTextToSpeech.start()`'s own `TextToSpeechError` path. This
+    function's only job is import ORDER, never import success — if the
+    pre-warm itself fails, `start()` will attempt (and correctly report)
+    the same import again anyway."""
+    import importlib
+
+    try:
+        importlib.import_module("TTS.api")
+    except Exception:
+        pass
+
+
 def main() -> int:
     config_loader = ConfigLoader()
     config = config_loader.load()
@@ -190,6 +256,15 @@ def main() -> int:
     _register_level2_modules(core_manager, level2_modules, pipeline)
     _register_level3_modules(core_manager, level3_modules)
     _register_level4_modules(core_manager, level4_modules)
+
+    # _prewarm_tts_before_pyside6() must run before this import — see its
+    # own docstring. ui.app is deliberately imported here, locally,
+    # rather than at this module's own top level, precisely so this
+    # ordering is achievable — a module-level import here would already
+    # be too late relative to everything else this file also imports at
+    # module level.
+    _prewarm_tts_before_pyside6()
+    from ui.app import run_app
 
     return run_app(core_manager)
 
@@ -422,7 +497,13 @@ def _construct_level4_part_b_modules(
         calendar_store, level3_modules.priority_queue_manager, task_scheduler, scheduler_config
     )
 
-    search_provider = create_search_provider(internet_config)
+    # create_search_provider_with_fallback() (Runtime Stability & Internet
+    # Layer Refactor, 2026-08-01), not the single-provider create_search_
+    # provider() — the real, live default behavior is now
+    # InternetConfig.search_providers' own multi-provider fallback chain,
+    # not a single hardcoded/configured provider. See internet/
+    # search_provider_registry.py's own docstring.
+    search_provider = create_search_provider_with_fallback(internet_config)
     research_engine = ResearchEngine(search_provider, internet_config)
     source_validator = SourceValidator(internet_config)
 

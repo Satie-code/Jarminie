@@ -551,11 +551,47 @@ class InternetConfig:
     config-driven guess, same caveat class as every other tuned bound
     in this codebase — see internet/source_validator.py's own
     docstring for what corroboration actually measures.
+
+    search_providers (Runtime Stability & Internet Layer Refactor,
+    2026-08-01) is the new multi-provider fallback chain — an ORDERED
+    list of provider names internet/search_provider_registry.py's
+    create_search_provider_with_fallback() tries in sequence, moving to
+    the next on any failure, never depending on any one provider being
+    available. Additive, not a breaking change: search_provider (the
+    original single-provider field) still works exactly as before for
+    any caller using create_search_provider() directly; search_providers
+    is a genuinely separate, higher-level field only
+    create_search_provider_with_fallback() reads. An EMPTY list (not
+    None — deliberately, so this project's existing generic env-override
+    coercion, config/loader.py's _apply_env_overrides(), correctly
+    recognizes it as list-typed; a `list[str] | None` union type does
+    not) means "no fallback chain configured, use search_provider
+    (single) instead" — the same fallback-to-old-behavior semantics
+    `None` would have expressed, chosen instead for this one, purely
+    mechanical env-override reason. Shipped default ["tavily", "searxng",
+    "brave"] tries the two free/self-hostable options first, Brave last
+    and optional, per this project's own explicit "no application logic
+    should depend on Brave specifically" design goal.
+
+    tavily_api_key is Tavily's own dedicated credential (env:
+    JARMINEI_INTERNET_TAVILY_API_KEY, matching search_api_key's own
+    established env-only-never-committed-to-disk convention exactly).
+    Brave continues reading from the existing, generic search_api_key
+    field (unchanged, preserving every existing Brave-only config's own
+    behavior verbatim); SearXNG continues reading from the existing,
+    generic search_base_url field (that field's own docstring already
+    anticipated exactly this use before any SearXNG code existed). Each
+    concrete SearchProvider implementation still owns the decision of
+    which field(s) it actually needs — this dataclass makes no
+    assumption about which provider needs what, unchanged from this
+    class's own original design principle.
     """
 
     search_provider: str = "brave"
     search_api_key: str | None = None
     search_base_url: str | None = None
+    search_providers: list[str] = field(default_factory=lambda: ["tavily", "searxng", "brave"])
+    tavily_api_key: str | None = None
     max_results_per_query: int = 5
     request_timeout_seconds: float = 10.0
     summarization_model: str | None = None

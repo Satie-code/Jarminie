@@ -217,14 +217,35 @@ scheduler:
   maintenance_interval_seconds: 3600.0
 
 internet:
-  # 2026-08-01 Post-Sprint Revision — provider-agnostic refactor. See
-  # internet/search_provider_registry.py for the full list of
-  # registered providers and config/schema.py's InternetConfig
-  # docstring for the full reasoning. search_api_key/search_base_url
-  # are deliberately NOT set here — supply search_api_key via the
-  # JARMINEI_INTERNET_SEARCH_API_KEY environment variable, never
-  # committed to this file; search_base_url is for a self-hosted
-  # provider (e.g. SearXNG), not needed by the default "brave" provider.
+  # 2026-08-01 Post-Sprint Revision — provider-agnostic refactor;
+  # extended 2026-08-01 "Runtime Stability & Internet Layer Refactor"
+  # with a real multi-provider fallback chain. See internet/
+  # search_provider_registry.py for the full list of registered
+  # providers and config/schema.py's InternetConfig docstring for the
+  # full reasoning. search_api_key/tavily_api_key/search_base_url are
+  # deliberately NOT set here — supply search_api_key (Brave) /
+  # tavily_api_key (Tavily) via the JARMINEI_INTERNET_SEARCH_API_KEY /
+  # JARMINEI_INTERNET_TAVILY_API_KEY environment variables, never
+  # committed to this file; search_base_url is a real, self-hosted (or
+  # pre-vetted third-party) SearXNG instance URL — no default is shipped
+  # here on this project's own behalf (a real reliability/privacy
+  # decision, not this project's own to make silently).
+  #
+  # search_providers is the real, live default behavior: main.py calls
+  # create_search_provider_with_fallback(), which tries each name below
+  # in order, moving to the next on any real failure — "no application
+  # logic should depend on Brave specifically," a direct, explicit user
+  # request. Each of tavily/searxng/brave is simply unusable (a missing
+  # key/base_url) until configured above, which is exactly the intended
+  # secure/inert-by-default shape — the chain degrades cleanly rather
+  # than crashing either way. search_provider (below, singular) is kept
+  # for backward compatibility only — it's what create_search_provider()
+  # (the original, single-provider construction path) still uses, and
+  # is what search_providers itself falls back to if ever cleared to [].
+  search_providers:
+    - "tavily"
+    - "searxng"
+    - "brave"
   search_provider: "brave"
   search_base_url: null
   max_results_per_query: 5

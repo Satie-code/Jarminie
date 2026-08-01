@@ -43,6 +43,7 @@ from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
+from decision.response_generator import ResponseGenerator
 from device_control.action_engine import ActionRegistry
 from device_control.action_log import ActionAuditLog
 from device_control.application_manager import ApplicationManager
@@ -159,7 +160,20 @@ class FakeLanguageModelClient:
     summarizer.py's own prompt — detected via the literal "Search
     results:" substring only that prompt template contains, same
     dispatch discipline as tests/integration/conftest.py's own
-    identical fake."""
+    identical fake.
+
+    conversational_response (0.4.2 — Response Generation) is returned
+    for decision/response_generator.py's own prompt — detected via the
+    literal "Reply to the user directly" substring only that prompt
+    template contains, same dispatch discipline as summary_response
+    above and as tests/integration/conftest.py's own identical fake.
+
+    calls (0.4.2 addition, matching tests/integration/conftest.py's own
+    identical fake) records every raw prompt this fake received, in
+    order — lets a test confirm what a specific generation call actually
+    contained (e.g. that a retrieved memory's content really reached the
+    Response Generation prompt), not just what the fake's own canned
+    reply was."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -168,9 +182,12 @@ class FakeLanguageModelClient:
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
         self.summary_response = "Here is a summary based on the provided sources."
+        self.conversational_response = "Here's a real, generated answer to your question."
         self.should_raise = False
+        self.calls: list[str] = []
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
+        self.calls.append(prompt)
         if self.should_raise:
             from decision.llm_client import LlmError
 
@@ -179,6 +196,8 @@ class FakeLanguageModelClient:
             return self.intent_response
         if "Search results:" in prompt:
             return self.summary_response
+        if "Reply to the user directly" in prompt:
+            return self.conversational_response
         return self.context_response
 
 
@@ -359,6 +378,7 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     llm_client = FakeLanguageModelClient()
     intent_detector = IntentDetector(llm_client, config.models)
     context_analyzer = ContextAnalyzer(llm_client, config.models)
+    response_generator = ResponseGenerator(llm_client, config.models)
     priority_queue_manager = PriorityQueueManager(resource_monitor)
     authority_evaluator = AuthorityEvaluator()
 
@@ -445,6 +465,7 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         session_ended_relay=session_ended_relay,
         intent_detector=intent_detector,
         context_analyzer=context_analyzer,
+        response_generator=response_generator,
         memory_retrieval_engine=memory_retrieval_engine,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
@@ -536,6 +557,7 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         llm_client=llm_client,
         intent_detector=intent_detector,
         context_analyzer=context_analyzer,
+        response_generator=response_generator,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
         resource_monitor=resource_monitor,

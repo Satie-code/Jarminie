@@ -32,6 +32,7 @@ from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.llm_client import OllamaClient
 from decision.priority_queue import PriorityQueueManager
+from decision.response_generator import ResponseGenerator
 from device_control.action_engine import ActionRegistry
 from device_control.action_log import ActionAuditLog, ActionRecoveryManager
 from device_control.application_manager import ApplicationManager
@@ -109,6 +110,7 @@ class _Level3Modules:
 
     intent_detector: IntentDetector
     context_analyzer: ContextAnalyzer
+    response_generator: ResponseGenerator
     memory_retrieval_engine: MemoryRetrievalEngine
     priority_queue_manager: PriorityQueueManager
     authority_evaluator: AuthorityEvaluator
@@ -361,6 +363,12 @@ def _construct_level3_modules(
     llm_client = OllamaClient(model_config)
     intent_detector = IntentDetector(llm_client, model_config)
     context_analyzer = ContextAnalyzer(llm_client, model_config)
+    # Reuses the same llm_client/model_config as intent_detector/
+    # context_analyzer above — no second OllamaClient, unlike Summarizer's
+    # own deliberately-separate one (which exists only to honor
+    # InternetConfig.summarization_model's optional model override; a
+    # conversational reply has no equivalent per-engine override need).
+    response_generator = ResponseGenerator(llm_client, model_config)
 
     priority_queue_manager = PriorityQueueManager(resource_monitor)
     authority_evaluator = AuthorityEvaluator()
@@ -368,6 +376,7 @@ def _construct_level3_modules(
     return _Level3Modules(
         intent_detector=intent_detector,
         context_analyzer=context_analyzer,
+        response_generator=response_generator,
         memory_retrieval_engine=memory_retrieval_engine,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
@@ -551,6 +560,7 @@ def _construct_pipeline(
         session_ended_relay=level2_modules.session_ended_relay,
         intent_detector=level3_modules.intent_detector,
         context_analyzer=level3_modules.context_analyzer,
+        response_generator=level3_modules.response_generator,
         memory_retrieval_engine=level3_modules.memory_retrieval_engine,
         priority_queue_manager=level3_modules.priority_queue_manager,
         authority_evaluator=level3_modules.authority_evaluator,

@@ -45,7 +45,7 @@ def test_full_level2_acceptance_scripted_conversation(
     push_utterance(h.audio_backend)
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
     first_reply, first_voice_id = h.tts.speak_calls[0]
-    assert "what time is it right now" in first_reply
+    assert first_reply == h.llm_client.conversational_response  # a real generated reply
     assert h.persona_manager.active_persona().name == "jarvis"
 
     # Phase 2.2: "Natural conversation maintained during session" — a

@@ -18,6 +18,7 @@ import pytest
 
 from config.schema import SchedulerConfig
 from decision.authority import EngineSelection
+from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
 from device_control.action_engine import ActionResult, ActionStatus
 from internet.search_provider import SearchResult
@@ -58,6 +59,9 @@ def collaborators():
     context_analysis.mentioned_entities = []
     context_analyzer = MagicMock()
     context_analyzer.analyze.return_value = context_analysis
+
+    response_generator = MagicMock()
+    response_generator.generate.return_value = "a reply"
 
     memory_retrieval_engine = MagicMock()
     memory_retrieval_engine.retrieve.return_value = []
@@ -108,6 +112,7 @@ def collaborators():
         "session_ended_relay": CallbackRelay(),
         "intent_detector": intent_detector,
         "context_analyzer": context_analyzer,
+        "response_generator": response_generator,
         "memory_retrieval_engine": memory_retrieval_engine,
         "priority_queue_manager": priority_queue_manager,
         "authority_evaluator": authority_evaluator,
@@ -148,6 +153,7 @@ def pipeline(collaborators):
         session_ended_relay=collaborators["session_ended_relay"],
         intent_detector=collaborators["intent_detector"],
         context_analyzer=collaborators["context_analyzer"],
+        response_generator=collaborators["response_generator"],
         memory_retrieval_engine=collaborators["memory_retrieval_engine"],
         priority_queue_manager=collaborators["priority_queue_manager"],
         authority_evaluator=collaborators["authority_evaluator"],
@@ -310,9 +316,10 @@ def test_handle_turn_complete_happy_path(pipeline, collaborators):
     collaborators["context_manager"].current_context.assert_called_once_with(
         "session-1", "jarvis"
     )
-    collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
-        "hello there", collaborators["context"], collaborators["decision_trace"]
+    collaborators["response_generator"].generate.assert_called_once_with(
+        "hello there", collaborators["context"], collaborators["decision_trace"], "jarvis"
     )
+    collaborators["persona_manager"].compose_reply_safely.assert_not_called()
     collaborators["conversation_store"].record_turn.assert_called_once()
     turn = collaborators["conversation_store"].record_turn.call_args[0][0]
     assert turn.session_id == "session-1"
@@ -342,6 +349,57 @@ def test_handle_turn_complete_falls_back_to_select_from_context(pipeline, collab
         collaborators["context_analysis"], "i'm feeling tired"
     )
     collaborators["persona_manager"].select.assert_not_called()
+
+
+# --- Conversational Response Generation (0.4.2) -------------------------------
+#
+# Replaces Sprint 3.12's "compose_reply() IS the pipeline's Response
+# Generation stage" placeholder with a real LLM call (see
+# decision/response_generator.py and docs/changelog/0.4.2-conversational-
+# response-generation.md). PersonaManager.compose_reply_safely() (the old
+# templated acknowledgement) is now reached only via
+# _compose_conversational_reply()'s own two named degrade cases.
+
+
+def test_conversational_turn_calls_response_generator_with_persona_name(pipeline, collaborators):
+    pipeline._handle_turn_complete("what's the capital of France", "session-1")
+
+    collaborators["response_generator"].generate.assert_called_once_with(
+        "what's the capital of France",
+        collaborators["context"],
+        collaborators["decision_trace"],
+        "jarvis",
+    )
+    collaborators["persona_manager"].compose_reply_safely.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+
+
+def test_conversational_turn_skips_the_llm_call_for_an_empty_transcript(pipeline, collaborators):
+    pipeline._handle_turn_complete("   ", "session-1")
+
+    collaborators["response_generator"].generate.assert_not_called()
+    collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
+        "   ", collaborators["context"], collaborators["decision_trace"]
+    )
+
+
+def test_conversational_turn_falls_back_to_the_template_on_llm_error(pipeline, collaborators):
+    collaborators["response_generator"].generate.side_effect = LlmError("ollama unreachable")
+
+    pipeline._handle_turn_complete("what's the capital of France", "session-1")
+
+    collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
+        "what's the capital of France", collaborators["context"], collaborators["decision_trace"]
+    )
+    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+
+
+def test_conversational_turn_llm_error_does_not_end_the_session(pipeline, collaborators):
+    collaborators["response_generator"].generate.side_effect = LlmError("timeout")
+
+    pipeline._handle_turn_complete("what's the capital of France", "session-1")
+
+    collaborators["session_manager"].end_session.assert_not_called()
 
 
 # --- Memory promotion / user override (Sprint 3.12) --------------------------
@@ -438,9 +496,15 @@ def test_decision_pipeline_failure_degrades_gracefully_without_ending_the_sessio
     collaborators["persona_manager"].select_from_context.assert_called_once_with(
         None, "hello there"
     )
-    collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
-        "hello there", collaborators["context"], None
+    # decision_trace=None still reaches ResponseGenerator (it tolerates a
+    # missing trace, generating without trace-derived grounding) — the
+    # templated fallback is reserved for an actual LlmError, not merely a
+    # missing DecisionTrace. See _compose_conversational_reply()'s own
+    # docstring.
+    collaborators["response_generator"].generate.assert_called_once_with(
+        "hello there", collaborators["context"], None, "jarvis"
     )
+    collaborators["persona_manager"].compose_reply_safely.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
     assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)
 
@@ -465,6 +529,7 @@ def test_device_control_turn_dispatches_launch_application_and_speaks_confirmati
     assert request.context.decision_trace is collaborators["decision_trace"]
 
     collaborators["persona_manager"].compose_reply_safely.assert_not_called()
+    collaborators["response_generator"].generate.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
         "Done — I've opened notepad.exe.", "p340"
     )

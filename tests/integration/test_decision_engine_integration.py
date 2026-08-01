@@ -37,11 +37,15 @@ def _reset_wake_detection(h) -> None:
 def test_full_turn_reply_measurably_differs_with_a_matching_stored_memory(
     pipeline_harness, wait_for_active_capture, push_utterance
 ):
-    """Acceptance criterion (sprint_3_12.md): a real conversation turn
-    produces a reply that measurably differs from the Level 2 templated
-    placeholder for a fixture question with a matching stored memory —
-    proving the Decision Engine's DecisionTrace actually reaches and
-    influences compose_reply(), not just exists unused."""
+    """Acceptance criterion (sprint_3_12.md), re-verified for 0.4.2's real
+    Response Generation (docs/changelog/0.4.2-conversational-response-
+    generation.md): a real conversation turn's retrieved memory genuinely
+    reaches the prompt sent to the LLM — proving the Decision Engine's
+    DecisionTrace actually flows into and influences response generation,
+    not just exists unused. The spoken reply itself is now always the
+    fake's own generated text (real generation replaces the old
+    conditionally-appended memory clause), so the meaningful assertion
+    moved from the reply text to the prompt the fake actually received."""
     h = pipeline_harness
     # remember() (a real Chroma embedding call, genuinely CPU/GIL-bound)
     # happens BEFORE wake activation, deliberately — once a session is
@@ -65,16 +69,21 @@ def test_full_turn_reply_measurably_differs_with_a_matching_stored_memory(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert "what's my project deadline" in reply_text  # base acknowledgement still present
-    assert "the project deadline is Friday" in reply_text  # the real memory, newly woven in
+    assert reply_text == h.llm_client.conversational_response  # a real generated reply
+
+    generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
+    assert len(generation_prompts) == 1
+    assert "the project deadline is Friday" in generation_prompts[0]  # the real memory, grounded
+    assert "what's my project deadline" in generation_prompts[0]
 
 
-def test_full_turn_without_a_matching_memory_uses_the_plain_acknowledgement(
+def test_full_turn_without_a_matching_memory_still_gets_a_real_generated_reply(
     pipeline_harness, wait_for_active_capture, push_utterance
 ):
-    """Contrast case: with nothing stored, the reply is the plain
-    acknowledgement — confirming the memory clause only appears when
-    real retrieval actually found something, not unconditionally."""
+    """Contrast case: with nothing stored, the reply is still a real,
+    generated answer (never the Level 2 template) — the prompt sent to
+    the model simply has no memory-grounding block, confirming that
+    block only appears when retrieval actually found something."""
     h = pipeline_harness
     _reset_wake_detection(h)
     wait_for_active_capture(h.mic)
@@ -84,7 +93,11 @@ def test_full_turn_without_a_matching_memory_uses_the_plain_acknowledgement(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what time is it right now".'
+    assert reply_text == h.llm_client.conversational_response
+
+    generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
+    assert len(generation_prompts) == 1
+    assert "Relevant things you remember" not in generation_prompts[0]
 
 
 def test_persona_switches_via_context_analysis_suggested_persona(

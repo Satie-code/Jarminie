@@ -38,7 +38,7 @@ def test_full_wake_to_reply_round_trip(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, voice_id = h.tts.speak_calls[0]
-    assert "what time is it right now" in reply_text
+    assert reply_text == h.llm_client.conversational_response  # a real generated reply
     assert h.persona_manager.active_persona().name == "jarvis"  # default, unswitched
     assert voice_id == h.persona_manager.active_persona().voice_id
     assert h.persona_manager.health_check() is True  # exactly one persona active
@@ -124,5 +124,5 @@ def test_conversation_store_write_failure_does_not_interrupt_the_live_session(
 
     assert h.tts.spoken_event.wait(timeout=5.0)
     reply_text, _ = h.tts.speak_calls[0]
-    assert "what time is it right now" in reply_text
+    assert reply_text == h.llm_client.conversational_response  # a real generated reply
     assert h.session_manager.is_active()  # the turn completed, session still live

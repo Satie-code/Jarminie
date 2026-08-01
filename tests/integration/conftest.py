@@ -54,6 +54,7 @@ from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
+from decision.response_generator import ResponseGenerator
 from device_control.action_engine import ActionRegistry
 from device_control.action_log import ActionAuditLog
 from device_control.application_manager import ApplicationManager
@@ -212,7 +213,18 @@ class FakeLanguageModelClient:
     ContextAnalyzer stages of the same turn and so can never reach
     Summarizer at all) — this is what actually lets a test exercise "the
     search succeeded, only summarization failed" instead of the whole
-    turn degrading before routing ever happens."""
+    turn degrading before routing ever happens.
+
+    conversational_response (0.4.2 — Response Generation) is returned
+    for decision/response_generator.py's own prompt — detected via the
+    literal "Reply to the user directly" substring that ONLY that
+    prompt template contains, same "dispatch on a template-unique
+    literal substring" discipline as summary_response above.
+    should_raise_for_conversation mirrors should_raise_for_summary: it
+    fails ONLY the ResponseGenerator's own call, so a test can exercise
+    "everything upstream succeeded, only response generation failed,
+    degrade to the templated reply for this one turn" without every
+    earlier stage failing too."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -221,9 +233,11 @@ class FakeLanguageModelClient:
             "PERSONA: NONE\nSENTIMENT: NEUTRAL"
         )
         self.summary_response = "Here is a summary based on the provided sources."
+        self.conversational_response = "Here's a real, generated answer to your question."
         self.calls: list[str] = []
         self.should_raise = False
         self.should_raise_for_summary = False
+        self.should_raise_for_conversation = False
 
     def generate(self, prompt: str, timeout_seconds: float) -> str:
         self.calls.append(prompt)
@@ -237,6 +251,12 @@ class FakeLanguageModelClient:
 
                 raise LlmError("simulated Ollama connection failure during summarization")
             return self.summary_response
+        if "Reply to the user directly" in prompt:
+            if self.should_raise_for_conversation:
+                from decision.llm_client import LlmError
+
+                raise LlmError("simulated Ollama connection failure during response generation")
+            return self.conversational_response
         if "CATEGORY:" in prompt:
             return self.intent_response
         return self.context_response
@@ -385,6 +405,7 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
     llm_client = FakeLanguageModelClient()
     intent_detector = IntentDetector(llm_client, model_config)
     context_analyzer = ContextAnalyzer(llm_client, model_config)
+    response_generator = ResponseGenerator(llm_client, model_config)
     resource_monitor = ResourceMonitor(ResourceThresholds())
     priority_queue_manager = PriorityQueueManager(resource_monitor)
     authority_evaluator = AuthorityEvaluator()
@@ -488,6 +509,7 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
         session_ended_relay=session_ended_relay,
         intent_detector=intent_detector,
         context_analyzer=context_analyzer,
+        response_generator=response_generator,
         memory_retrieval_engine=memory_retrieval_engine,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
@@ -554,6 +576,7 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
         llm_client=llm_client,
         intent_detector=intent_detector,
         context_analyzer=context_analyzer,
+        response_generator=response_generator,
         priority_queue_manager=priority_queue_manager,
         authority_evaluator=authority_evaluator,
         action_registry=action_registry,

@@ -126,6 +126,6 @@ def test_device_control_turn_with_no_entity_falls_back_conversationally(
 
     assert h.tts.spoken_event.wait(timeout=5.0)
     reply_text, _ = h.tts.speak_calls[0]
-    assert "do the thing" in reply_text  # the ordinary templated persona reply
+    assert reply_text == h.llm_client.conversational_response  # the ordinary generated reply
     assert h.application_manager.list_tracked() == []
     assert h.audit_log.query(limit=5) == []

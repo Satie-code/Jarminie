@@ -45,8 +45,18 @@ Wiring diagram (matches sprint_3_12.md's own Data Flow):
         INTERNET_AGENT -> _handle_internet_agent_turn(trace)
             -> ResearchEngine.research() -> SourceValidator.validate()
             -> Summarizer.summarize() -> reply text (Sprint 4.18)
-        else -> PersonaManager.compose_reply_safely(transcript, context, decision_trace)
-            -> active_persona.compose_reply(...) -> reply text
+        else -> _compose_conversational_reply(transcript, context, decision_trace, persona.name)
+            -> ResponseGenerator.generate(...) -> a real, persona-toned,
+               memory-grounded reply -> reply text; degrades to
+               PersonaManager.compose_reply_safely(...) (the Level 2
+               templated acknowledgement) only on an empty transcript or
+               an LlmError -- see _compose_conversational_reply()'s own
+               docstring. This is the real Response Generation stage
+               02_System_Architecture.md's own pipeline diagram names,
+               reversing Sprint 3.12's original "compose_reply() IS
+               Response Generation" decision at the user's explicit
+               request (docs/changelog/0.4.2-conversational-response-
+               generation.md).
           |
     ConversationSessionStore.record_turn(...)
           |
@@ -164,7 +174,9 @@ from core.logging_setup import get_logger
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalyzer
 from decision.intent_detector import IntentDetector
+from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel, PriorityQueueManager
+from decision.response_generator import ResponseGenerator
 from device_control.action_engine import (
     ActionContext,
     ActionRegistry,
@@ -280,6 +292,7 @@ class CommunicationPipeline:
         session_ended_relay: CallbackRelay,
         intent_detector: IntentDetector,
         context_analyzer: ContextAnalyzer,
+        response_generator: ResponseGenerator,
         memory_retrieval_engine: MemoryRetrievalEngine,
         priority_queue_manager: PriorityQueueManager,
         authority_evaluator: AuthorityEvaluator,
@@ -307,6 +320,7 @@ class CommunicationPipeline:
         self._persona_manager = persona_manager
         self._intent_detector = intent_detector
         self._context_analyzer = context_analyzer
+        self._response_generator = response_generator
         self._memory_retrieval_engine = memory_retrieval_engine
         self._priority_queue_manager = priority_queue_manager
         self._authority_evaluator = authority_evaluator
@@ -507,8 +521,8 @@ class CommunicationPipeline:
             elif selected_engine is EngineSelection.INTERNET_AGENT:
                 reply = self._handle_internet_agent_turn(decision_trace)
             else:
-                reply = self._persona_manager.compose_reply_safely(
-                    transcript, context, decision_trace
+                reply = self._compose_conversational_reply(
+                    transcript, context, decision_trace, persona.name
                 )
 
             turn = ConversationTurn(
@@ -533,6 +547,46 @@ class CommunicationPipeline:
                 "rather than leaving it stuck."
             )
             self._session_manager.end_session(SessionEndReason.ERROR)
+
+    def _compose_conversational_reply(
+        self,
+        transcript: str,
+        context: ConversationContext,
+        decision_trace: DecisionTrace | None,
+        persona_name: str,
+    ) -> str:
+        """The real Response Generation stage (see this module's own
+        docstring) for the common case: a plain question, a casual
+        remark, or anything else that isn't a device-control/workflow/
+        scheduler/internet-search request. Degrades to
+        PersonaManager.compose_reply_safely() — the Level 2 templated
+        acknowledgement — in exactly two cases, both honest, not
+        silently masking a failure:
+
+        1. An empty/whitespace-only transcript (e.g. Whisper's own
+           no-speech threshold forcing text="", backlog/technical_debt.md
+           item 9): skips the LLM call entirely rather than asking a
+           model to respond to nothing — compose_reply_safely() already
+           returns the correct "I didn't catch anything" reply for this
+           case.
+        2. ResponseGenerator.generate() raises LlmError (Ollama
+           unreachable, a timeout, an unpulled model): the same
+           "narrower catch degrades this one turn rather than the coarse
+           outer catch ending the whole session" reasoning
+           _handle_scheduler_turn()'s own Sprint 4.19 hardening already
+           established for calendar_store.save()."""
+        if not transcript.strip():
+            return self._persona_manager.compose_reply_safely(transcript, context, decision_trace)
+        try:
+            return self._response_generator.generate(
+                transcript, context, decision_trace, persona_name
+            )
+        except LlmError:
+            logger.warning(
+                "Response Generator call failed; falling back to the templated reply.",
+                exc_info=True,
+            )
+            return self._persona_manager.compose_reply_safely(transcript, context, decision_trace)
 
     def _handle_device_control_turn(
         self, trace: DecisionTrace, session_id: str, persona_name: str

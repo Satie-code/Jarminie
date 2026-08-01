@@ -28,6 +28,7 @@ turn, consistent with that finding rather than pretending a live wiring
 exists.
 """
 
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -99,10 +100,12 @@ def test_full_level3_acceptance_scripted_conversation(
     # MemoryRetrievalEngine surfaces the overridden memory via Short-Term
     # Memory's session-scoped keyword-overlap path (deterministic,
     # independent of real embedding-model behavior — see this module's
-    # own docstring), and the reply reflects it (Phase 3.1: "Retrieval
-    # accurate."). PERSONA: JARVIS switches back so the reply's exact
-    # templated shape (personas/jarvis.py) is known for the assertion
-    # below. -----------------------------------------------------------
+    # own docstring), and it genuinely reaches the Response Generation
+    # prompt (Phase 3.1: "Retrieval accurate."; 0.4.2 replaces the old
+    # Level 2 templated placeholder with real generation — see
+    # docs/changelog/0.4.2-conversational-response-generation.md).
+    # PERSONA: JARVIS switches back so the reply's persona is known for
+    # the assertion below. -----------------------------------------------
     h.tts.spoken_event.clear()
     h.llm_client.context_response = (
         "TOPIC: project deadline\nENTITIES: NONE\nREFERENCES_PAST: YES\n"
@@ -113,8 +116,11 @@ def test_full_level3_acceptance_scripted_conversation(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
     assert h.persona_manager.active_persona().name == "jarvis"
     third_reply, _ = h.tts.speak_calls[2]
-    assert 'Understood. You said: "what\'s the project deadline again".' in third_reply
-    assert _OVERRIDE_TRANSCRIPT in third_reply  # the real, retrieved memory content
+    assert third_reply == h.llm_client.conversational_response  # a real generated reply
+
+    generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
+    assert len(generation_prompts) == 3  # one real generation call per turn so far
+    assert _OVERRIDE_TRANSCRIPT in generation_prompts[2]  # the real, retrieved memory content
 
     # --- Simulated critical ResourceMonitor alert (Phase 3.3's Priority
     # Evaluation stage) — exercised directly; see this module's own
@@ -213,24 +219,30 @@ def test_full_level3_acceptance_scripted_conversation(
 
 
 def test_full_conversation_continues_when_ollama_entirely_unreachable(
-    app_harness, wait_for_active_capture, push_utterance
+    app_harness, wait_for_active_capture, push_utterance, caplog
 ):
     """Scenario (a), system level: a full conversation turn through the
     real CoreManager-started graph completes with a degraded-but-present
-    reply when Ollama is entirely unreachable."""
+    reply when Ollama is entirely unreachable. 0.4.2: ResponseGenerator's
+    own call ALSO fails (should_raise makes every call raise), so the
+    reply is genuinely the Level 2 templated fallback, not real
+    generation — confirmed via the log message its own fallback emits,
+    not just the reply text."""
     h = app_harness
     h.llm_client.should_raise = True
     _reset_wake_detection(h)
     wait_for_active_capture(h.mic)
 
-    h.stt.pending_transcripts.append("what time is it right now")
-    push_utterance(h.audio_backend)
-    assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
+    with caplog.at_level(logging.WARNING):
+        h.stt.pending_transcripts.append("what time is it right now")
+        push_utterance(h.audio_backend)
+        assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
     assert reply_text == 'Understood. You said: "what time is it right now".'
     assert h.intent_detector.health_check() is False
     assert h.context_analyzer.health_check() is False
+    assert any("Response Generator call failed" in r.message for r in caplog.records)
 
 
 def test_full_conversation_continues_when_chromadb_entirely_unreachable(
@@ -238,7 +250,10 @@ def test_full_conversation_continues_when_chromadb_entirely_unreachable(
 ):
     """Scenario (b), system level: a previously-stored, genuinely
     relevant memory becomes invisible to retrieval rather than crashing
-    the turn, when ChromaDB is entirely unreachable."""
+    the turn, when ChromaDB is entirely unreachable. Ollama itself is
+    unaffected, so ResponseGenerator still produces a real, generated
+    reply (0.4.2) — the generation prompt simply carries no
+    memory-grounding block."""
     h = app_harness
     h.persona_scoped_memory.remember(MemoryType.JARVIS, "the project deadline is Friday")
 
@@ -255,8 +270,11 @@ def test_full_conversation_continues_when_chromadb_entirely_unreachable(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what\'s my project deadline".'
-    assert "Friday" not in reply_text
+    assert reply_text == h.llm_client.conversational_response
+
+    generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
+    assert len(generation_prompts) == 1
+    assert "Friday" not in generation_prompts[0]
 
 
 def test_unexpected_decision_pipeline_exception_does_not_end_the_session(
@@ -266,7 +284,10 @@ def test_unexpected_decision_pipeline_exception_does_not_end_the_session(
     stage with no fail-safe contract of its own (simulated here as a
     raising MemoryRetrievalEngine.retrieve()) degrades the turn rather
     than ending the session — the conversation continues (a second turn
-    in the SAME session succeeds normally)."""
+    in the SAME session succeeds normally). 0.4.2: ResponseGenerator
+    tolerates decision_trace=None by design, so the reply is still a
+    real, generated one — only the trace-derived grounding was lost, not
+    the reply's realness."""
     h = app_harness
 
     def _raise(*args, **kwargs):
@@ -283,6 +304,6 @@ def test_unexpected_decision_pipeline_exception_does_not_end_the_session(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what time is it right now".'
+    assert reply_text == h.llm_client.conversational_response
     assert h.session_manager.is_active()  # NOT ended — still the same session
     assert h.session_manager._session.session_id == session_id

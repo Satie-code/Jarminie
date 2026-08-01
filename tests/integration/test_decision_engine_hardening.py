@@ -54,7 +54,7 @@ def _all_recorded_user_texts(h) -> list[str]:
 
 
 def test_full_turn_completes_when_ollama_entirely_unreachable(
-    pipeline_harness, wait_for_active_capture, push_utterance
+    pipeline_harness, wait_for_active_capture, push_utterance, caplog
 ):
     """A real conversation turn completes successfully (with a degraded-
     but-present reply) when Ollama is entirely unreachable — Intent
@@ -63,20 +63,27 @@ def test_full_turn_completes_when_ollama_entirely_unreachable(
     Engine pipeline itself never even reaches Sprint 3.13's own new outer
     guard (scenario f) for this particular failure; this proves the
     already-built degrade holds under a genuinely raising client, not
-    just a canned single-call mock."""
+    just a canned single-call mock. 0.4.2 addition: with Ollama entirely
+    unreachable, ResponseGenerator.generate() (ALSO an LlmError, since
+    should_raise makes every call fail regardless of prompt content) now
+    falls back to the Level 2 templated reply too — the placeholder text
+    below is this test's proof that the templated fallback, not real
+    generation, is what actually shipped for this turn."""
     h = pipeline_harness
     h.llm_client.should_raise = True
     _reset_wake_detection(h)
     wait_for_active_capture(h.mic)
 
-    h.stt.pending_transcripts.append("what time is it right now")
-    push_utterance(h.audio_backend)
-    assert h.tts.spoken_event.wait(timeout=5.0)
+    with caplog.at_level(logging.WARNING):
+        h.stt.pending_transcripts.append("what time is it right now")
+        push_utterance(h.audio_backend)
+        assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
     assert reply_text == 'Understood. You said: "what time is it right now".'
     assert h.intent_detector.health_check() is False
     assert h.context_analyzer.health_check() is False
+    assert any("Response Generator call failed" in r.message for r in caplog.records)
 
 
 def test_startup_completes_successfully_when_ollama_entirely_unreachable(caplog):
@@ -126,7 +133,11 @@ def test_full_turn_completes_when_chromadb_entirely_unreachable(
     entirely unreachable: a previously-stored, genuinely relevant memory
     becomes invisible to retrieval (semantic_search() degrades to []
     rather than raising, memory/memory_store.py) rather than crashing the
-    turn — the reply falls back to the plain Level 2 acknowledgement,
+    turn. Ollama itself is unaffected by this specific failure, so
+    ResponseGenerator still produces a real, generated reply (0.4.2) —
+    unlike the Ollama-unreachable scenario above, this degrade is scoped
+    to memory retrieval only: the generation prompt simply has no
+    memory-grounding block, since retrieval genuinely found nothing,
     exactly like the "no matching memory" contrast case in
     test_decision_engine_integration.py, but here because the search
     itself failed, not because nothing matched."""
@@ -146,8 +157,11 @@ def test_full_turn_completes_when_chromadb_entirely_unreachable(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what\'s my project deadline".'
-    assert "Friday" not in reply_text
+    assert reply_text == h.llm_client.conversational_response
+
+    generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
+    assert len(generation_prompts) == 1
+    assert "Friday" not in generation_prompts[0]
 
 
 # --- Scenario (f): the Decision Engine pipeline as a whole must not abort ---
@@ -161,9 +175,12 @@ def test_full_turn_completes_when_an_unexpected_decision_pipeline_exception_occu
     by its own fail-safe contract (simulated here as a raising
     MemoryRetrievalEngine.retrieve() — a stage with no internal try/
     except of its own, see memory/retrieval_engine.py) must not end the
-    session; the turn still completes with a degraded, Level-2-quality
-    reply (decision_trace=None reaching compose_reply_safely(),
-    voice/pipeline.py's own new inner guard)."""
+    session; the turn still completes with a real, generated reply —
+    ResponseGenerator tolerates decision_trace=None by design (0.4.2: it
+    simply generates without trace-derived grounding), so
+    voice/pipeline.py's own inner guard degrading decision_trace to None
+    does not, on its own, degrade the reply to the Level 2 template
+    too — that fallback is reserved for an actual LlmError."""
     h = pipeline_harness
 
     def _raise(*args, **kwargs):
@@ -180,7 +197,7 @@ def test_full_turn_completes_when_an_unexpected_decision_pipeline_exception_occu
         assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what time is it right now".'
+    assert reply_text == h.llm_client.conversational_response
     assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)
     assert not any(
         "Unexpected failure while handling a completed turn" in r.message

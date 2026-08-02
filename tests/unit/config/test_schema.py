@@ -11,6 +11,7 @@ from config.schema import (
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
+    PresentationConfig,
     ResourceThresholds,
     UIConfig,
     VoiceConfig,
@@ -390,3 +391,94 @@ def test_default_tone_adaptation_thresholds_are_valid():
     implicitly via test_config_loads_with_no_overrides()-shaped tests
     elsewhere in this file."""
     AppConfig(emotion=EmotionConfig()).validate()
+
+
+# --- PresentationConfig (Sprint 5.5) -------------------------------------------
+
+
+def test_default_presentation_config_is_valid():
+    AppConfig(presentation=PresentationConfig()).validate()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "jarvis_smile_intensity_min",
+        "jarvis_eye_openness_min",
+        "jarvis_voice_warmth_min",
+        "jarvis_particle_density_min",
+        "jarvis_gesture_probability_min",
+        "minie_smile_intensity_min",
+        "minie_eye_openness_min",
+        "minie_voice_warmth_min",
+        "minie_particle_density_min",
+        "minie_gesture_probability_min",
+    ],
+)
+def test_unit_range_field_below_zero_raises(field_name):
+    config = AppConfig(presentation=PresentationConfig(**{field_name: -0.1}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "jarvis_smile_intensity_max",
+        "minie_smile_intensity_max",
+    ],
+)
+def test_unit_range_field_above_one_raises(field_name):
+    config = AppConfig(presentation=PresentationConfig(**{field_name: 1.1}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+def test_min_greater_than_max_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(
+            jarvis_smile_intensity_min=0.5, jarvis_smile_intensity_max=0.1
+        )
+    )
+    with pytest.raises(ConfigError, match="jarvis_smile_intensity_min"):
+        config.validate()
+
+
+@pytest.mark.parametrize("field_name", ["jarvis_animation_speed_min", "minie_animation_speed_min"])
+def test_animation_speed_below_structural_floor_raises(field_name):
+    config = AppConfig(presentation=PresentationConfig(**{field_name: 0.1}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+@pytest.mark.parametrize("field_name", ["jarvis_animation_speed_max", "minie_animation_speed_max"])
+def test_animation_speed_above_structural_ceiling_raises(field_name):
+    config = AppConfig(presentation=PresentationConfig(**{field_name: 3.0}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["jarvis_lighting_color", "jarvis_ui_accent", "minie_lighting_color", "minie_ui_accent"],
+)
+def test_invalid_hex_color_raises(field_name):
+    config = AppConfig(presentation=PresentationConfig(**{field_name: "not-a-color"}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+def test_hex_color_without_leading_hash_raises():
+    config = AppConfig(presentation=PresentationConfig(jarvis_lighting_color="0A84FF"))
+    with pytest.raises(ConfigError, match="jarvis_lighting_color"):
+        config.validate()
+
+
+def test_jarvis_and_minie_particle_density_ranges_do_not_overlap():
+    """The structural guarantee presentation/jarvis_state_computer.py's/
+    presentation/minie_state_computer.py's own tests rely on for "Jarvis
+    always observably lower than Minie" — verified here at the config
+    level directly, for the shipped defaults."""
+    config = PresentationConfig()
+    assert config.jarvis_particle_density_max < config.minie_particle_density_min
+    assert config.jarvis_smile_intensity_max < config.minie_smile_intensity_min

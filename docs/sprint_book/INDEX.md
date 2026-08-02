@@ -186,8 +186,8 @@ See the "Level 5 breakdown changes (2026-08-02)" note above for why this table i
 | 5.2    | Emotional State Manager                              | 5.1         | 5.1                     | Medium      | [sprint_5_2.md](sprint_5/sprint_5_2.md) — **Complete** |
 | 5.3    | Emotional Memory                                     | 5.1         | 5.2, 3.1–3.6            | Medium–High | [sprint_5_3.md](sprint_5/sprint_5_3.md) — **Complete** |
 | 5.4    | Persona Behavioral Adaptation                        | 5.1         | 5.2, 2.9, 2.10, 3.11    | Medium      | [sprint_5_4.md](sprint_5/sprint_5_4.md) — **Complete** |
-| 5.5    | Presentation State Engine                            | 5.5         | 5.2, 5.4                | Medium      | [sprint_5_5.md](sprint_5_5.md)       |
-| 5.6    | Presentation Layer Foundation & Renderer Interface   | 5.5         | 5.5, 2.11               | Medium–High | [sprint_5_6.md](sprint_5_6.md)       |
+| 5.5    | Presentation State Engine                            | 5.5         | 5.2, 5.4                | Medium      | [sprint_5_5.md](sprint_5/sprint_5_5.md) — **Complete** |
+| 5.6    | Presentation Layer Foundation & Renderer Interface   | 5.5         | 5.5, 2.11               | Medium–High | [sprint_5_6.md](sprint_5/sprint_5_6.md) — **Complete** |
 | 5.7    | Jarvis Renderer                                      | 5.5         | 5.6, 1.6, 1.7           | High        | [sprint_5_7.md](sprint_5_7.md)       |
 | 5.8    | Minie Renderer & Avatar Renderer Interface           | 5.5         | 5.6                     | High        | [sprint_5_8.md](sprint_5_8.md)       |
 | 5.9    | Gesture Engine                                       | 5.5         | 5.6, 5.2                | Medium      | [sprint_5_9.md](sprint_5_9.md)       |

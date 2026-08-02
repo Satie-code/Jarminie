@@ -151,3 +151,74 @@ See Potential Risks above.
 
 - If `Renderer` genuinely needs a `health_check()` of its own once two real implementations exist, add it then (Potential Risks above).
 - A third persona (out of this project's stated scope, per `04_Master_Implementation_Plan.md`'s own Future Roadmap) would need only a new `PresentationStateComputer` + `Renderer` pair registered into `PresentationController`'s two dicts — no change to this sprint's own classes, confirming the abstraction holds.
+
+## Sprint Completion Report (2026-08-02)
+
+Implemented as specified, authorized directly ("continue sprint 5.6") right after Sprint 5.5 closed in the same session.
+
+### Summary
+
+`presentation/renderer.py`'s `Renderer` (a `Protocol`, exactly three methods) is the abstraction Sprint 5.7/5.8's concrete renderers will implement — no method is persona-specific. `presentation/asset_manager.py`'s `AssetManager` resolves paths under `assets/` (Part 3's own existing repository folder), raising a clear `FileNotFoundError` naming the full attempted path for a missing resource; it never loads/decodes an actual asset, by design. `presentation/presentation_controller.py`'s `PresentationController` (a `ManagedModule`) is the coordinator around both: `start()` mounts whichever renderer matches `PersonaManager.active_persona()`; `mount_renderer()` always unmounts the previous renderer (if any) before mounting the new one, and never raises even if `mount()`/`unmount()` itself does; `refresh()` composes `PersonaManager.active_persona()` + `EmotionalStateManager.current_state()` + (see Engineering Decision 1 below) into a fresh `PresentationState`, then renders it through whichever renderer is currently **mounted** — deliberately not necessarily the active persona's own renderer, since the two can briefly diverge mid-transition (Sprint 5.10's own future job); the entire body is wrapped in one broad Fail-Gracefully catch, verified against a fake computer/renderer each independently configured to raise.
+
+Two real spec gaps/ambiguities were resolved explicitly, not guessed silently:
+
+1. **Missing `OperatingMode` source.** `PresentationStateComputer.compute()` (Sprint 5.5) requires an `OperatingMode` as its second parameter, but this sprint's own Expected Classes constructor-DI list for `PresentationController` names only `PersonaManager`/`EmotionalStateManager`/the two dicts — no `OperatingMode` source at all — and the Data Flow diagram's own arrows don't show one either. `voice/quiet_mode.py`'s `QuietModeController` (Sprint 2.6) is this project's own existing, established single source of truth for `OperatingMode` — added as a fifth constructor parameter, read only via `current_mode()` inside `refresh()`. Real unit tests use a minimal fake (`_FakeQuietMode`) rather than a full `VoiceSessionManager` graph, the same "fake the narrow interface you actually need" precedent this Level's other tests already use for `Renderer`/`PresentationStateComputer`.
+2. **Data Flow diagram's `Renderer[active_persona.name]` vs. Architecture Notes' "always render through whatever IS currently mounted."** The diagram's own literal indexing notation reads as if the renderer is selected by the active persona's name; the prose Architecture Notes explicitly say the opposite — `refresh()` must render through the *mounted* renderer, never assuming it matches the active persona, specifically so Sprint 5.10's `TransitionEngine` can observe a genuine momentary mismatch. Resolved in favor of the more detailed, deliberate prose explanation over the diagram's own simplification — `refresh()` selects the `PresentationStateComputer` by `active_persona.name` but the `Renderer` by `self._mounted_persona_name`, proven directly by a new dedicated test (`test_refresh_renders_through_the_mounted_renderer_not_the_active_persona`) that mounts a different persona's renderer than the currently-active one and confirms the correct (mismatched, intentional) routing.
+
+`_clamp`-style module-private naming (this sprint's own Expected Functions doesn't literally name a `_clamp` here, but the same "genuinely shared across modules should be public" reasoning Sprint 5.5 already established) continues to apply — no new instance here needed it, noted only for consistency. `tests/unit/presentation/__init__.py` (again named in this sprint's own Files to Create, identically to Sprint 5.5's) was again deliberately not created, for the same documented "`tests/` has no `__init__.py`" convention reason.
+
+### Files Created
+
+- `presentation/renderer.py`
+- `presentation/presentation_controller.py`
+- `presentation/asset_manager.py`
+- `tests/unit/presentation/test_presentation_controller.py`
+- `tests/unit/presentation/test_asset_manager.py`
+
+**Not created**: `tests/unit/presentation/__init__.py` — see Summary above and Sprint 5.5's own identical precedent.
+
+### Files Modified
+
+None outside `presentation/`/`tests/` — matches this sprint's own stated Files to Modify exactly (`main.py`/`CoreManager` registration is explicitly Sprint 5.14's job).
+
+### Tests Added
+
+- `tests/unit/presentation/test_presentation_controller.py` — 25 tests: `start()`/`stop()`/`health_check()` across bound/unbound-renderer cases; `mount_renderer()` swap ordering (call-log assertion proving unmount-before-mount across two different renderer instances) and its `mount()`/`unmount()`-raises degradation; `refresh()`'s happy path, its Fail-Gracefully behavior against a computer that raises and a renderer that raises, its no-op behavior when nothing is mounted, and its warn-and-skip behavior when no computer is bound for the active persona; the dedicated "mounted renderer vs. active persona" mismatch test (Engineering Decision 2 above); `mounted_persona_name` property correctness.
+- `tests/unit/presentation/test_asset_manager.py` — 6 tests: resolution success for a real file, a real nested file, and a real directory; failure with a clear, path-naming error for a missing file (both a shallow and a nested missing path); the default `assets_root` genuinely points at the project's own `assets/` folder.
+
+### Documentation Updated
+
+- `presentation/renderer.py`'s `Renderer` docstring (the "cheap, non-blocking `render_state()`" contract, stated explicitly).
+- `presentation/presentation_controller.py`'s module/class docstrings (the "mounted renderer vs. active persona" distinction, and both resolved spec gaps above, in full).
+- `presentation/asset_manager.py`'s module/class docstrings.
+- This Sprint Completion Report.
+- `docs/STATUS.md`/`docs/sprint_book/INDEX.md` updated (see below).
+
+### Acceptance Criteria Checklist
+
+- ✔ `PresentationController.refresh()` never raises regardless of computer/renderer failure — verified against a fake computer AND a fake renderer, each independently configured to raise.
+- ✔ `mount_renderer()` always calls the previous renderer's `unmount()` before the new one's `mount()` — verified via a shared call-log list ordering assertion across two distinct renderer instances, not just per-renderer call counts.
+- ✔ `AssetManager.resolve()` succeeds for a real existing file (and, additionally, a real nested file and a real directory) and fails with a clear, specific, path-naming error for a missing one.
+- ✔ `ruff check .` clean; full existing suite unaffected — no file outside `presentation/`/`tests/unit/presentation/`/`tests/unit/config/` was touched, and even that file only gained new, additive tests already covered under Sprint 5.5's own docs (this sprint added no further `config/schema.py` changes of its own).
+
+### Risks
+
+- Same "three-method `Renderer` may prove too thin" and "`refresh()`'s per-tick performance is unverified until a real renderer exists" risks named in the spec — unchanged, both explicitly deferred to Sprint 5.7/5.8's own real implementations to prove or disprove.
+- No live caller yet, and `PresentationController`'s own constructor now has a fifth parameter (`quiet_mode_controller`) beyond what this sprint's own spec named — a real, disclosed, additive change; Sprint 5.14's own wiring will need to supply a real `QuietModeController` (already constructed in `main.py`'s Level 2 graph) alongside the other four.
+
+### Technical Debt
+
+None introduced. Both spec gaps (missing `OperatingMode` source; the diagram/prose tension) were found and resolved within this sprint, not deferred or silently worked around.
+
+### Recommendations
+
+- Once Sprint 5.7/5.8 build real renderers, revisit whether `render_state()`'s "must be cheap/non-blocking" contract needs an enforced timeout inside `PresentationController.refresh()` itself, rather than remaining a documented-only expectation — a real measurement question this sprint's own fake renderer cannot answer (Potential Risks).
+- Sprint 5.10's `TransitionEngine` should read `PresentationController.mounted_persona_name` directly (the property this sprint added specifically for that purpose) rather than re-deriving mount state some other way.
+
+### Verification
+
+Full suite: 1352 passing + 1 pre-existing failure (the same already-established real-Ollama-output nondeterminism flake from Sprint 5.2/5.3/5.5's own verification, in a file this sprint never touches) + 1 skipped + 1 deselected. `ruff check .` clean across the whole repository. A direct, non-mocked smoke script (real `PersonaManager`/`EmotionalStateManager`/`JarvisPresentationStateComputer`/`MiniePresentationStateComputer` instances, a hand-written fake `Renderer`/`QuietModeController`) confirmed `start()`/`refresh()`/`mount_renderer()`/`stop()` all behave as designed end-to-end, including the deliberate mounted-vs-active mismatch during a simulated transition.
+
+**No git commit made** — per this project's own "only commit when explicitly asked" rule, changes left in the working tree; the user has not yet been asked whether to commit.
+
+**Sprint 5.7 (Jarvis Renderer) is next.**

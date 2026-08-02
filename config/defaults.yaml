@@ -320,3 +320,46 @@ emotion:
   jarvis_tone_low_comfort_threshold: 35.0
   minie_tone_low_mood_threshold: -15.0
   minie_tone_low_comfort_threshold: 40.0
+
+presentation:
+  # Sprint 5.5 — Presentation State Engine (Level 5 Part A). Per-persona
+  # output ranges presentation/jarvis_state_computer.py's/
+  # presentation/minie_state_computer.py's own compute() scale an
+  # EmotionalState reading into. Real, disclosed, unvalidated first-pass
+  # numbers. Jarvis: narrow, low ranges (brief's locked "Minimal...
+  # No flashy cyberpunk effects" identity). Minie: wide ranges (brief's
+  # locked "Warm. Comforting. Expressive" identity).
+  jarvis_smile_intensity_min: 0.0
+  jarvis_smile_intensity_max: 0.05
+  jarvis_eye_openness_min: 0.5
+  jarvis_eye_openness_max: 0.7
+  jarvis_voice_warmth_min: 0.2
+  jarvis_voice_warmth_max: 0.4
+  jarvis_animation_speed_min: 0.9
+  jarvis_animation_speed_max: 1.2
+  jarvis_particle_density_min: 0.0
+  jarvis_particle_density_max: 0.05
+  jarvis_gesture_probability_min: 0.05
+  jarvis_gesture_probability_max: 0.2
+  # Locked identity palette (brief: "Dark theme, Electric blue, Cyan
+  # accents") — fixed, not emotion-driven; see PresentationConfig's own
+  # docstring.
+  jarvis_lighting_color: "#0A84FF"
+  jarvis_ui_accent: "#22D3EE"
+
+  minie_smile_intensity_min: 0.15
+  minie_smile_intensity_max: 0.95
+  minie_eye_openness_min: 0.35
+  minie_eye_openness_max: 1.0
+  minie_voice_warmth_min: 0.4
+  minie_voice_warmth_max: 1.0
+  minie_animation_speed_min: 0.6
+  minie_animation_speed_max: 1.6
+  minie_particle_density_min: 0.1
+  minie_particle_density_max: 0.75
+  minie_gesture_probability_min: 0.15
+  minie_gesture_probability_max: 0.65
+  # Locked identity palette (brief: "Lavender, Warm white, Rose gold,
+  # Soft teal") — fixed, not emotion-driven.
+  minie_lighting_color: "#C8A8E9"
+  minie_ui_accent: "#B76E79"

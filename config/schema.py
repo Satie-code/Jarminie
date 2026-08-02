@@ -5,6 +5,7 @@ growth in later sprints/levels stays scoped to whichever subsystem owns it
 (see docs/sprint_book/sprint_1_2.md, Potential Risks: "Schema growth").
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -754,6 +755,99 @@ class EmotionConfig:
     minie_tone_low_comfort_threshold: float = 40.0
 
 
+_HEX_COLOR_PATTERN = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _validate_presentation_range(
+    name: str, low: float, high: float, domain_low: float, domain_high: float
+) -> None:
+    """Shared helper for `AppConfig._validate_presentation()`'s two range
+    families (0.0-1.0 for most `PresentationState` fields, 0.5-2.0 for
+    animation_speed) — same "loop over named pairs" technique
+    `_validate_resources()` already established for warning/critical
+    pairs, factored into a real function here since it's applied to ten
+    (then two) pairs rather than four."""
+    if not (domain_low <= low <= domain_high):
+        raise ConfigError(
+            f"presentation.{name}_min must be in [{domain_low}, {domain_high}], got {low}"
+        )
+    if not (domain_low <= high <= domain_high):
+        raise ConfigError(
+            f"presentation.{name}_max must be in [{domain_low}, {domain_high}], got {high}"
+        )
+    if low > high:
+        raise ConfigError(
+            f"presentation.{name}_min ({low}) must be <= presentation.{name}_max ({high})"
+        )
+
+
+@dataclass
+class PresentationConfig:
+    """Presentation State Engine settings (Sprint 5.5 — Level 5 Part A).
+
+    Per-persona baseline/range values `presentation/jarvis_state_computer.py`'s/
+    `presentation/minie_state_computer.py`'s own `compute()` methods map an
+    `EmotionalState` (5.2) reading into — real, disclosed, unvalidated
+    first-pass numbers, same category as `EmotionConfig`'s own thresholds,
+    correctable via config without a code change.
+
+    Each numeric `PresentationState` field (`presentation/presentation_state.py`)
+    has a `{persona}_{field}_min`/`{persona}_{field}_max` pair here, defining
+    the *actual output range* that persona's computer scales into — not the
+    field's own structural valid range (0.0-1.0 for smile_intensity/
+    eye_openness/voice_warmth/particle_density/gesture_probability, 0.5-2.0
+    for animation_speed; every min/max pair here must itself fall inside that
+    structural range, enforced by `AppConfig._validate_presentation()`).
+
+    Jarvis's own ranges are deliberately narrow and low (the brief's locked
+    "Minimal. Confident... No flashy cyberpunk effects" identity) — his
+    smile_intensity/particle_density ranges sit entirely below Minie's own
+    minimums by construction, so "Jarvis stays observably lower than Minie"
+    (this sprint's own Acceptance Criteria) holds structurally, not just
+    typically. Minie's own ranges are wide (the brief's locked "Warm.
+    Comforting. Expressive" identity).
+
+    `{jarvis,minie}_lighting_color`/`{jarvis,minie}_ui_accent` are the
+    brief's own locked per-persona palettes (Jarvis: electric blue/cyan;
+    Minie: lavender/rose gold) as fixed `#RRGGBB` hex strings — identity,
+    not mood-driven (see `presentation/presentation_state.py`'s own
+    Architecture Notes reference). Exact hex values are a real, reviewable
+    content choice made at this sprint's own implementation time, not
+    fabricated by the spec — any reasonable value within the named color
+    family is acceptable and correctable via config without a code change.
+    """
+
+    jarvis_smile_intensity_min: float = 0.0
+    jarvis_smile_intensity_max: float = 0.05
+    jarvis_eye_openness_min: float = 0.5
+    jarvis_eye_openness_max: float = 0.7
+    jarvis_voice_warmth_min: float = 0.2
+    jarvis_voice_warmth_max: float = 0.4
+    jarvis_animation_speed_min: float = 0.9
+    jarvis_animation_speed_max: float = 1.2
+    jarvis_particle_density_min: float = 0.0
+    jarvis_particle_density_max: float = 0.05
+    jarvis_gesture_probability_min: float = 0.05
+    jarvis_gesture_probability_max: float = 0.2
+    jarvis_lighting_color: str = "#0A84FF"
+    jarvis_ui_accent: str = "#22D3EE"
+
+    minie_smile_intensity_min: float = 0.15
+    minie_smile_intensity_max: float = 0.95
+    minie_eye_openness_min: float = 0.35
+    minie_eye_openness_max: float = 1.0
+    minie_voice_warmth_min: float = 0.4
+    minie_voice_warmth_max: float = 1.0
+    minie_animation_speed_min: float = 0.6
+    minie_animation_speed_max: float = 1.6
+    minie_particle_density_min: float = 0.1
+    minie_particle_density_max: float = 0.75
+    minie_gesture_probability_min: float = 0.15
+    minie_gesture_probability_max: float = 0.65
+    minie_lighting_color: str = "#C8A8E9"
+    minie_ui_accent: str = "#B76E79"
+
+
 @dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
@@ -772,6 +866,7 @@ class AppConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     internet: InternetConfig = field(default_factory=InternetConfig)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
+    presentation: PresentationConfig = field(default_factory=PresentationConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -788,6 +883,7 @@ class AppConfig:
         self._validate_scheduler()
         self._validate_internet()
         self._validate_emotion()
+        self._validate_presentation()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -1190,4 +1286,55 @@ class AppConfig:
             if not (comfort_low <= value <= comfort_high):
                 raise ConfigError(
                     f"emotion.{name} must be in [{comfort_low}, {comfort_high}], got {value}"
+                )
+
+    def _validate_presentation(self) -> None:
+        p = self.presentation
+        unit_range_fields = (
+            ("jarvis_smile_intensity", p.jarvis_smile_intensity_min, p.jarvis_smile_intensity_max),
+            ("jarvis_eye_openness", p.jarvis_eye_openness_min, p.jarvis_eye_openness_max),
+            ("jarvis_voice_warmth", p.jarvis_voice_warmth_min, p.jarvis_voice_warmth_max),
+            (
+                "jarvis_particle_density",
+                p.jarvis_particle_density_min,
+                p.jarvis_particle_density_max,
+            ),
+            (
+                "jarvis_gesture_probability",
+                p.jarvis_gesture_probability_min,
+                p.jarvis_gesture_probability_max,
+            ),
+            ("minie_smile_intensity", p.minie_smile_intensity_min, p.minie_smile_intensity_max),
+            ("minie_eye_openness", p.minie_eye_openness_min, p.minie_eye_openness_max),
+            ("minie_voice_warmth", p.minie_voice_warmth_min, p.minie_voice_warmth_max),
+            (
+                "minie_particle_density",
+                p.minie_particle_density_min,
+                p.minie_particle_density_max,
+            ),
+            (
+                "minie_gesture_probability",
+                p.minie_gesture_probability_min,
+                p.minie_gesture_probability_max,
+            ),
+        )
+        for name, low, high in unit_range_fields:
+            _validate_presentation_range(name, low, high, 0.0, 1.0)
+
+        speed_range_fields = (
+            ("jarvis_animation_speed", p.jarvis_animation_speed_min, p.jarvis_animation_speed_max),
+            ("minie_animation_speed", p.minie_animation_speed_min, p.minie_animation_speed_max),
+        )
+        for name, low, high in speed_range_fields:
+            _validate_presentation_range(name, low, high, 0.5, 2.0)
+
+        for name, value in (
+            ("jarvis_lighting_color", p.jarvis_lighting_color),
+            ("jarvis_ui_accent", p.jarvis_ui_accent),
+            ("minie_lighting_color", p.minie_lighting_color),
+            ("minie_ui_accent", p.minie_ui_accent),
+        ):
+            if not _HEX_COLOR_PATTERN.match(value):
+                raise ConfigError(
+                    f"presentation.{name} must be a #RRGGBB hex color string, got {value!r}"
                 )

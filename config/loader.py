@@ -23,6 +23,7 @@ from config.schema import (
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
+    PresentationConfig,
     ResourceThresholds,
     SchedulerConfig,
     SecurityConfig,
@@ -55,6 +56,7 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "scheduler": SchedulerConfig,
     "internet": InternetConfig,
     "emotion": EmotionConfig,
+    "presentation": PresentationConfig,
 }
 
 

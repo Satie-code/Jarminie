@@ -346,6 +346,11 @@ presentation:
   # docstring.
   jarvis_lighting_color: "#0A84FF"
   jarvis_ui_accent: "#22D3EE"
+  # Sprint 5.7 — Jarvis Renderer. presentation/widgets/segmented_ring_widget.py's
+  # own fixed arc-segment count; presentation/jarvis_renderer.py's own
+  # QTimer interval (~30fps) driving the sphere/ring animation loop.
+  jarvis_ring_segment_count: 12
+  jarvis_animation_tick_ms: 33
 
   minie_smile_intensity_min: 0.15
   minie_smile_intensity_max: 0.95
@@ -363,3 +368,139 @@ presentation:
   # Soft teal") — fixed, not emotion-driven.
   minie_lighting_color: "#C8A8E9"
   minie_ui_accent: "#B76E79"
+
+  # Sprint 5.8 — Minie Renderer & Avatar Renderer Interface. VTube Studio
+  # is a separately-installed, separately-running external application
+  # the user owns and configures independently — JARMINEI neither
+  # embeds nor redistributes Live2D's own SDK, and does not itself
+  # render Minie's avatar. See presentation/vtube_studio_renderer.py's
+  # own module docstring.
+  avatar_backend: "vtube_studio"
+  vtube_studio_host: "localhost"
+  vtube_studio_port: 8001
+  vtube_studio_plugin_name: "JARMINEI"
+  vtube_studio_plugin_developer: "JARMINEI Project"
+  # A real secret (a VTube-Studio-issued plugin auth token), persisted
+  # locally and never committed — see .gitignore and PresentationConfig's
+  # own docstring for the full "why a file path, not an env var" reasoning.
+  vtube_studio_auth_token_path: "config/vtube_studio_token.json"
+  vtube_studio_connection_timeout_seconds: 5.0
+  # PresentationState field name -> Live2D model parameter name. Real,
+  # disclosed, unvalidated first-pass defaults — voice_warmth's default
+  # is a placeholder custom-parameter name with no guaranteed effect;
+  # see PresentationConfig's own docstring.
+  vtube_studio_parameter_mapping:
+    smile_intensity: "ParamMouthForm"
+    eye_openness: "ParamEyeLOpen"
+    voice_warmth: "ParamGlow"
+  # presentation/minie_renderer.py's own _derive_expression_id() table:
+  # expression_id -> minimum (smile_intensity + voice_warmth) / 2
+  # "expressiveness" reading required, highest-threshold match wins.
+  # Real, disclosed, unvalidated first-pass vocabulary — reconfigurable
+  # to match whatever expressions the user's own Live2D model defines.
+  minie_expression_thresholds:
+    neutral: 0.0
+    smile: 0.45
+    big_smile: 0.75
+
+  # Sprint 5.9 — Gesture Engine. GestureTrigger.value -> candidate
+  # gesture_id strings presentation/gesture_engine.py's GestureEngine
+  # round-robins through; shared across both personas (GestureEngine
+  # itself holds no persona-specific logic — each renderer's own
+  # trigger_gesture() decides how a given id renders). Real, disclosed,
+  # unvalidated first-pass vocabulary, reconfigurable without a code
+  # change. An empty/absent list for a trigger is a valid, honest no-op.
+  gesture_vocabulary:
+    notification:
+      - "notification_glance"
+      - "notification_pulse"
+    turn_start:
+      - "attentive_lean"
+      - "focus_pulse"
+    turn_end:
+      - "settle"
+      - "soft_nod"
+    mode_transition_to_active:
+      - "wake_pulse"
+      - "brighten"
+    mode_transition_to_dormant:
+      - "dim_fade"
+      - "settle"
+    listening_posture:
+      - "listening_tilt"
+      - "listen_pulse"
+    speaking_posture:
+      - "speaking_bob"
+      - "speak_pulse"
+    ambient_idle:
+      - "idle_glance"
+      - "idle_blink"
+      - "head_tilt"
+  # How often GestureEngine.maybe_roll_ambient_gesture() can fire at
+  # most, independent of PresentationState.gesture_probability itself.
+  ambient_gesture_roll_interval_seconds: 15.0
+  # presentation/jarvis_renderer.py's own trigger_gesture() accent-pulse
+  # duration (in SegmentedRingWidget ticks) — config-driven rather than
+  # a hardcoded constant.
+  jarvis_gesture_pulse_ticks: 10
+
+  # Sprint 5.10 — Persona Transition Engine. presentation/transition_engine.py's
+  # own TransitionEngine.transition() timing — a whole-sequence budget and
+  # the PARTICLE_TRANSITION phase's own hold duration. Real, disclosed,
+  # unvalidated first-pass timing guesses.
+  transition_max_duration_seconds: 2.5
+  transition_particle_phase_seconds: 0.8
+
+  # Sprint 5.11 — Voice Personality. presentation/voice_personality.py's
+  # VoicePersonalityModulator.shape_pacing(). pacing_pause_marker is an
+  # ellipsis — verified against the real installed coqui-tts (0.27.5)
+  # text pipeline: there is no dedicated SSML pause token, only ordinary
+  # punctuation the model's own tokenizer already treats as
+  # pause-inducing (see PresentationConfig's own docstring).
+  pacing_pause_marker: "..."
+  pacing_low_warmth_pause_weight: 0.3
+  pacing_high_warmth_pause_weight: 0.7
+  # presentation/lip_sync.py's own LipSyncDriver RMS-amplitude sampling
+  # window size.
+  lip_sync_sample_window_ms: 50.0
+
+  # Sprint 5.12 — Adaptive Workspace. presentation/adaptive_workspace.py's
+  # AdaptiveWorkspaceController.select_profile() keyword vocabulary,
+  # keyed by WorkspaceProfile.value. No "general" entry — GENERAL is the
+  # safe-failure default, never matched into. Real, disclosed,
+  # unvalidated first-pass vocabulary, reconfigurable without a code
+  # change.
+  workspace_profile_keywords:
+    coding:
+      - "code"
+      - "coding"
+      - "bug"
+      - "debug"
+      - "function"
+      - "repository"
+      - "compile"
+      - "script"
+    research:
+      - "research"
+      - "article"
+      - "source"
+      - "citation"
+      - "paper"
+      - "investigate"
+    study:
+      - "study"
+      - "exam"
+      - "homework"
+      - "lecture"
+      - "course"
+      - "assignment"
+    projects:
+      - "project"
+      - "deadline"
+      - "milestone"
+      - "roadmap"
+      - "meeting"
+      - "plan"
+  # should_switch()'s own minimum consecutive-matching-turn count before
+  # recommending an actual dashboard rearrangement.
+  workspace_switch_debounce_turns: 2

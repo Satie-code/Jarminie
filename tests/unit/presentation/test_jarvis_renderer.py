@@ -1,0 +1,456 @@
+"""Unit tests for presentation.jarvis_renderer and its two widgets
+(Sprint 5.7).
+
+pytest-qt's own qtbot fixture provides the QApplication every widget
+construction in these tests needs — the same established precedent
+tests/unit/ui/test_status_panel.py/test_main_window.py already use.
+Verifies internal widget state/target values, never rendered pixels
+(this sprint's own Implementation Tasks) — real visual confirmation is
+named explicitly as Sprint 5.16's own manual-verification job, not
+claimed provable by any unit test here.
+"""
+
+import glob
+import os
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+import pytest
+from PySide6.QtGui import QColor
+
+from config.schema import PresentationConfig, UIConfig
+from core.resource_monitor import ResourceSnapshot
+from presentation.adaptive_workspace import WorkspaceProfile
+from presentation.jarvis_renderer import JarvisRenderer, _derive_ring_state
+from presentation.presentation_state import PresentationState
+from presentation.widgets.holographic_sphere_widget import HolographicSphereWidget
+from presentation.widgets.segmented_ring_widget import (
+    _LIT_FRACTION,
+    RingState,
+    SegmentedRingWidget,
+)
+
+
+def _fake_core_manager(module_states=None, interval_ms=3000) -> MagicMock:
+    """Mirrors tests/unit/ui/conftest.py's own mock_core_manager fixture
+    shape — not reused directly since tests/unit/presentation/ is a
+    sibling directory with no shared conftest.py of its own yet (one
+    file's own need doesn't justify adding one, per this project's own
+    "don't build speculatively" discipline)."""
+    manager = MagicMock()
+    manager.module_states.return_value = module_states if module_states is not None else {}
+    manager.check_resources.return_value = ResourceSnapshot(
+        cpu_percent=10.0,
+        ram_percent=20.0,
+        disk_percent=30.0,
+        battery_percent=80.0,
+        timestamp=datetime.now(UTC),
+    )
+    manager.ui_config.return_value = UIConfig(status_refresh_interval_ms=interval_ms)
+    return manager
+
+
+def _sample_state(avatar_focus: str = "user", animation_speed: float = 1.0) -> PresentationState:
+    return PresentationState(
+        smile_intensity=0.0,
+        eye_openness=0.6,
+        voice_warmth=0.3,
+        animation_speed=animation_speed,
+        particle_density=0.0,
+        lighting_color="#0A84FF",
+        ui_accent="#22D3EE",
+        gesture_probability=0.1,
+        avatar_focus=avatar_focus,
+        persona_name="jarvis",
+        computed_at=datetime.now(UTC),
+    )
+
+
+@pytest.fixture
+def config() -> PresentationConfig:
+    return PresentationConfig(jarvis_animation_tick_ms=20)
+
+
+@pytest.fixture
+def core_manager() -> MagicMock:
+    return _fake_core_manager()
+
+
+@pytest.fixture
+def renderer(qtbot, config, core_manager) -> JarvisRenderer:
+    jr = JarvisRenderer(config, core_manager)
+    qtbot.addWidget(jr.widget())
+    return jr
+
+
+# --- mount()/unmount() lifecycle (Acceptance Criteria: idempotent) -----------
+
+
+def test_widget_returns_the_top_level_container_before_mount(renderer):
+    assert renderer.widget() is not None
+
+
+def test_widget_is_the_same_instance_across_calls(renderer):
+    assert renderer.widget() is renderer.widget()
+
+
+def test_mount_starts_the_animation_timer(renderer):
+    renderer.mount()
+    assert renderer._timer.isActive()
+
+
+def test_double_mount_is_idempotent(renderer):
+    renderer.mount()
+    first_timer = renderer._timer
+    renderer.mount()
+
+    assert renderer._timer is first_timer
+    assert renderer._timer.isActive()
+
+
+def test_unmount_stops_the_animation_timer(renderer):
+    renderer.mount()
+    renderer.unmount()
+    assert not renderer._timer.isActive()
+
+
+def test_double_unmount_is_safe(renderer):
+    renderer.mount()
+    renderer.unmount()
+    renderer.unmount()  # must not raise
+    assert not renderer._timer.isActive()
+
+
+def test_unmount_before_mount_is_safe(renderer):
+    renderer.unmount()  # never mounted — must not raise
+    assert renderer._mounted is False
+
+
+def test_remount_after_unmount_restarts_the_timer(renderer):
+    renderer.mount()
+    renderer.unmount()
+    renderer.mount()
+    assert renderer._timer.isActive()
+
+
+def test_remount_reuses_the_existing_widget_hierarchy(renderer):
+    """unmount() does not destroy the widget hierarchy — cheaply
+    re-mountable (this sprint's own Expected Interfaces)."""
+    original_container = renderer.widget()
+    renderer.mount()
+    renderer.unmount()
+    renderer.mount()
+    assert renderer.widget() is original_container
+
+
+# --- render_state() never triggers a synchronous repaint (Acceptance Criteria) --
+
+
+def test_render_state_sets_sphere_and_ring_targets(renderer):
+    renderer.mount()
+    state = _sample_state(avatar_focus="idle", animation_speed=1.5)
+
+    renderer.render_state(state)
+
+    assert renderer._sphere._target_color.name() == "#0a84ff"
+    assert renderer._sphere._animation_speed == 1.5
+    assert renderer._ring._ring_state is RingState.IDLE
+    assert renderer._ring._animation_speed == 1.5
+
+
+def test_render_state_does_not_call_update_on_either_widget(renderer):
+    renderer.mount()
+    renderer._sphere.update = MagicMock()
+    renderer._ring.update = MagicMock()
+
+    renderer.render_state(_sample_state())
+
+    renderer._sphere.update.assert_not_called()
+    renderer._ring.update.assert_not_called()
+
+
+def test_render_state_before_mount_does_not_raise(renderer):
+    """Building the hierarchy via widget() alone (no mount()) must still
+    let render_state() work safely, and calling it before either is a
+    logged no-op, never a crash."""
+    renderer.render_state(_sample_state())  # widget() already built it via the fixture
+
+
+def test_render_state_before_any_widget_build_is_a_safe_noop(qtbot, config, core_manager):
+    bare_renderer = JarvisRenderer(config, core_manager)
+    bare_renderer.render_state(_sample_state())  # must not raise, no widget() call yet
+
+
+# --- animation timer genuinely ticks (bounded real-timer wait) ---------------
+
+
+def test_animation_timer_genuinely_advances_the_sphere_and_ring_phase(qtbot, renderer):
+    renderer.mount()
+    renderer.render_state(_sample_state())
+    phase_before = renderer._sphere._phase
+    rotation_before = renderer._ring._rotation_phase
+
+    qtbot.wait(120)  # several ticks at the fixture's 20ms interval
+
+    assert renderer._sphere._phase != phase_before
+    assert renderer._ring._rotation_phase != rotation_before
+
+
+def test_animation_timer_does_not_advance_after_unmount(qtbot, renderer):
+    renderer.mount()
+    renderer.unmount()
+    phase_before = renderer._sphere._phase
+
+    qtbot.wait(120)
+
+    assert renderer._sphere._phase == phase_before
+
+
+# --- _derive_ring_state() mapping (Testing Checklist) -------------------------
+
+
+def test_derive_ring_state_idle_avatar_focus_maps_to_idle():
+    assert _derive_ring_state(_sample_state(avatar_focus="idle")) is RingState.IDLE
+
+
+@pytest.mark.parametrize("avatar_focus", ["user", "task"])
+def test_derive_ring_state_everything_else_maps_to_processing(avatar_focus):
+    """This sprint's own honestly-narrow mapping (Architecture Notes):
+    PresentationState alone cannot distinguish Listening/Thinking/
+    Speaking, so every non-idle avatar_focus collapses to PROCESSING
+    today. Real per-phase states are Sprint 5.14's own job — documented
+    here as today's actual behavior, not a TODO comment alone."""
+    assert _derive_ring_state(_sample_state(avatar_focus=avatar_focus)) is RingState.PROCESSING
+
+
+# --- trigger_gesture() (Sprint 5.9) -------------------------------------------
+
+
+def test_trigger_gesture_triggers_a_pulse_on_the_ring(renderer):
+    renderer.mount()
+
+    renderer.trigger_gesture("head_tilt")
+
+    assert renderer._ring._pulse_ticks_remaining == renderer._config.jarvis_gesture_pulse_ticks
+
+
+def test_trigger_gesture_applies_the_same_pulse_regardless_of_gesture_id(renderer):
+    """This sprint's own deliberately narrow, honestly-disclosed
+    interpretation (module docstring): Jarvis applies one uniform accent
+    pulse no matter which gesture_id GestureEngine chose upstream."""
+    renderer.mount()
+    renderer.trigger_gesture("some_gesture")
+    first_pulse = renderer._ring._pulse_ticks_remaining
+
+    renderer._ring._pulse_ticks_remaining = 0
+    renderer.trigger_gesture("a_totally_different_gesture")
+    second_pulse = renderer._ring._pulse_ticks_remaining
+
+    assert first_pulse == second_pulse == renderer._config.jarvis_gesture_pulse_ticks
+
+
+def test_trigger_gesture_before_any_widget_build_is_a_safe_noop(qtbot, config, core_manager):
+    bare_renderer = JarvisRenderer(config, core_manager)
+    bare_renderer.trigger_gesture("head_tilt")  # must not raise, no widget() call yet
+
+
+def test_trigger_gesture_pulse_decays_over_real_ticks(qtbot, renderer):
+    renderer.mount()
+    renderer.trigger_gesture("head_tilt")
+    initial_remaining = renderer._ring._pulse_ticks_remaining
+
+    qtbot.wait(120)  # several ticks at the fixture's 20ms interval
+
+    assert renderer._ring._pulse_ticks_remaining < initial_remaining
+
+
+# --- apply_workspace_profile() (Sprint 5.12) -----------------------------------
+
+
+def test_apply_workspace_profile_always_includes_the_system_status_panel(renderer):
+    renderer.apply_workspace_profile(WorkspaceProfile.CODING)
+
+    layout = renderer._panel_container.layout()
+    assert layout.count() == 2  # system status + one profile-specific placeholder
+
+
+def test_apply_workspace_profile_general_has_only_the_system_status_panel(renderer):
+    renderer.apply_workspace_profile(WorkspaceProfile.GENERAL)
+
+    layout = renderer._panel_container.layout()
+    assert layout.count() == 1  # GENERAL's own safe-failure role: no extra placeholder
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        WorkspaceProfile.CODING,
+        WorkspaceProfile.RESEARCH,
+        WorkspaceProfile.STUDY,
+        WorkspaceProfile.PROJECTS,
+    ],
+)
+def test_apply_workspace_profile_each_non_general_profile_has_two_panels(renderer, profile):
+    renderer.apply_workspace_profile(profile)
+
+    layout = renderer._panel_container.layout()
+    assert layout.count() == 2
+
+
+def test_apply_workspace_profile_sets_current_workspace_profile(renderer):
+    renderer.apply_workspace_profile(WorkspaceProfile.RESEARCH)
+    assert renderer._current_workspace_profile is WorkspaceProfile.RESEARCH
+
+
+def test_apply_workspace_profile_switching_profiles_replaces_the_previous_panels(renderer):
+    renderer.apply_workspace_profile(WorkspaceProfile.CODING)
+    renderer.apply_workspace_profile(WorkspaceProfile.STUDY)
+
+    layout = renderer._panel_container.layout()
+    assert layout.count() == 2  # not accumulated across the two calls
+    assert renderer._current_workspace_profile is WorkspaceProfile.STUDY
+
+
+def test_apply_workspace_profile_builds_the_widget_hierarchy_if_not_already_built(
+    qtbot, config, core_manager
+):
+    bare_renderer = JarvisRenderer(config, core_manager)
+    bare_renderer.apply_workspace_profile(WorkspaceProfile.GENERAL)  # no widget()/mount() first
+    assert bare_renderer._panel_container is not None
+
+
+def test_system_status_panel_reflects_the_real_core_manager_data(renderer, core_manager):
+    core_manager.module_states.return_value = {"voice": "running", "memory": "running"}
+
+    renderer.apply_workspace_profile(WorkspaceProfile.GENERAL)
+
+    status_panel = renderer._panel_container.layout().itemAt(0).widget()
+    assert "2/2 modules running" in status_panel._label.text()
+
+
+def test_system_status_panel_survives_a_core_manager_failure(renderer, core_manager):
+    core_manager.module_states.side_effect = RuntimeError("boom")
+
+    renderer.apply_workspace_profile(WorkspaceProfile.GENERAL)  # must not raise
+
+
+# --- no QML anywhere under presentation/ (mechanical check) ------------------
+
+
+def test_no_qml_files_under_presentation():
+    presentation_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "presentation")
+    qml_files = glob.glob(os.path.join(presentation_dir, "**", "*.qml"), recursive=True)
+    assert qml_files == []
+
+
+def test_no_qquick_import_under_presentation():
+    presentation_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "presentation")
+    for path in glob.glob(os.path.join(presentation_dir, "**", "*.py"), recursive=True):
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
+        assert "QQuick" not in content, f"{path} references QQuick*, which is not permitted"
+
+
+# --- HolographicSphereWidget / SegmentedRingWidget, in isolation -------------
+
+
+def test_sphere_widget_paints_without_raising(qtbot):
+    widget = HolographicSphereWidget()
+    qtbot.addWidget(widget)
+    widget.resize(64, 64)
+    widget.set_target(QColor("#0A84FF"), 1.0)
+
+    pixmap = widget.grab()  # forces a real paintEvent() call
+
+    assert not pixmap.isNull()
+
+
+def test_sphere_widget_phase_wraps_within_two_pi(qtbot):
+    widget = HolographicSphereWidget()
+    qtbot.addWidget(widget)
+    widget._animation_speed = 5.0
+
+    for _ in range(1000):
+        widget._on_tick()
+
+    assert 0.0 <= widget._phase < 6.283185307179586  # 2*pi
+
+
+def test_ring_widget_paints_without_raising(qtbot):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget.resize(64, 64)
+    widget.set_ring_state(RingState.PROCESSING, 1.0)
+
+    pixmap = widget.grab()  # forces a real paintEvent() call
+
+    assert not pixmap.isNull()
+
+
+def test_ring_widget_set_ring_state_updates_fields(qtbot):
+    widget = SegmentedRingWidget(segment_count=8)
+    qtbot.addWidget(widget)
+
+    widget.set_ring_state(RingState.SPEAKING, 2.0)
+
+    assert widget._ring_state is RingState.SPEAKING
+    assert widget._animation_speed == 2.0
+
+
+def test_ring_widget_processing_state_lights_more_segments_than_idle(qtbot):
+    assert _LIT_FRACTION[RingState.PROCESSING] > _LIT_FRACTION[RingState.IDLE]
+
+
+def test_ring_widget_zero_size_paint_does_not_raise(qtbot):
+    """A degenerate 0x0 widget (radius <= 0) must not crash paintEvent()
+    — a real edge case before any layout has assigned real geometry."""
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget.resize(0, 0)
+
+    widget.grab()  # must not raise
+
+
+# --- SegmentedRingWidget.trigger_pulse() (Sprint 5.9) -------------------------
+
+
+def test_trigger_pulse_sets_the_remaining_tick_count(qtbot):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+
+    widget.trigger_pulse(5)
+
+    assert widget._pulse_ticks_remaining == 5
+
+
+def test_trigger_pulse_negative_duration_is_a_safe_noop(qtbot):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+
+    widget.trigger_pulse(-3)
+
+    assert widget._pulse_ticks_remaining == 0
+
+
+def test_on_tick_decrements_the_pulse_and_stops_at_zero(qtbot):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget.trigger_pulse(2)
+
+    widget._on_tick()
+    assert widget._pulse_ticks_remaining == 1
+    widget._on_tick()
+    assert widget._pulse_ticks_remaining == 0
+    widget._on_tick()  # must not go negative
+    assert widget._pulse_ticks_remaining == 0
+
+
+def test_ring_widget_paints_without_raising_while_pulsing(qtbot):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget.resize(64, 64)
+    widget.trigger_pulse(5)
+
+    pixmap = widget.grab()  # forces a real paintEvent() call while pulsing
+
+    assert not pixmap.isNull()

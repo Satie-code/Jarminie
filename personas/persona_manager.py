@@ -34,8 +34,23 @@ interruption) is under-specified by Part 2's text and deliberately not
 solved here; if Sprint 3.10's real emergency wiring exposes a genuine
 need for deeper nesting, that is the point to redesign this, not
 something to over-engineer against speculatively now.
+
+on_switch (Sprint 5.10) is a plain callable fixed at construction time —
+the identical Dependency Injection shape WakeWordDetector.on_detected/
+VoiceSessionManager.on_session_ended already established (see those
+classes' own docstrings): invoked as on_switch(old_persona_name,
+new_persona_name) at the end of a successful select()/resume_previous()
+call only, never on a refused/no-op call, and never before _set_active()
+has already committed the switch. PersonaManager gains no knowledge of
+TransitionEngine, Renderer, or anything presentation-related from this —
+it only calls an opaque callback, unguarded, the same way the two
+precedents above are called (the callback's own contract is what
+promises never to raise, not the caller). The real wiring — passing
+TransitionEngine.transition as on_switch — happens at Sprint 5.14's own
+composition-root time, not here.
 """
 
+from collections.abc import Callable
 from enum import Enum
 
 from config.schema import VoiceConfig
@@ -102,7 +117,10 @@ def _priority_rank(reason: SwitchReason) -> int:
 class PersonaManager:
     """Constructor DI per 03_Engineering_Standards.md: receives the two
     Persona instances and the VoiceConfig it reads trigger phrases from,
-    rather than constructing any of them itself.
+    rather than constructing any of them itself. on_switch (Sprint 5.10,
+    optional, defaults to None) is a plain callable invoked at the end of
+    a successful select()/resume_previous() call — see this module's own
+    docstring for the full Dependency Injection reasoning.
 
     Active state is tracked as a per-persona-name boolean flag dict
     (rather than a single reference) specifically so "exactly one active"
@@ -110,9 +128,16 @@ class PersonaManager:
     own defensive Testing Checklist item.
     """
 
-    def __init__(self, jarvis: Persona, minie: Persona, voice_config: VoiceConfig) -> None:
+    def __init__(
+        self,
+        jarvis: Persona,
+        minie: Persona,
+        voice_config: VoiceConfig,
+        on_switch: Callable[[str, str], None] | None = None,
+    ) -> None:
         self._personas: dict[str, Persona] = {jarvis.name: jarvis, minie.name: minie}
         self._voice_config = voice_config
+        self._on_switch = on_switch
         self._active_flags: dict[str, bool] = dict.fromkeys(self._personas, False)
         self._active_name: str | None = None
         self._active_reason: SwitchReason | None = None
@@ -183,11 +208,14 @@ class PersonaManager:
                 self._active_reason.value,
             )
             return False
+        old_name = self._active_name
         self._previous_name = self._active_name
         self._previous_reason = self._active_reason
         self._set_active(persona_name)
         self._active_reason = reason
         logger.info("Persona switched to %s (%s).", persona_name, reason.value)
+        if self._on_switch is not None:
+            self._on_switch(old_name, persona_name)
         return True
 
     def resume_previous(self) -> None:
@@ -197,11 +225,14 @@ class PersonaManager:
         if self._previous_name is None:
             logger.info("resume_previous() called with nothing to resume.")
             return
+        old_name = self._active_name
         self._set_active(self._previous_name)
         self._active_reason = self._previous_reason
         self._previous_name = None
         self._previous_reason = None
         logger.info("Resumed previous persona: %s.", self._active_name)
+        if self._on_switch is not None:
+            self._on_switch(old_name, self._active_name)
 
     def detect_explicit_selection(self, transcript: str) -> str | None:
         """Case-insensitive substring match against configured trigger

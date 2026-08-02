@@ -6,18 +6,19 @@ the brief's own mandated architecture: `Persona Controller ->
 Presentation State -> Renderer Interface -> {Jarvis Renderer, Minie
 Renderer}`.
 
-Deliberately minimal — three methods — mirroring `ManagedModule`'s own
-"kept deliberately minimal... to avoid over-fitting to subsystems that
-don't exist yet" precedent (`core/module_registry.py`, Sprint 1.5). No
+Deliberately minimal — mirroring `ManagedModule`'s own "kept
+deliberately minimal... to avoid over-fitting to subsystems that don't
+exist yet" precedent (`core/module_registry.py`, Sprint 1.5). No
 method is persona-specific: `PresentationController` never asks a
 renderer "are you Jarvis or Minie," it simply always has the currently
 correct one mounted (Sprint 5.10's Persona Transition Engine owns
 swapping which one is mounted).
 
-If two real implementations (Sprint 5.7/5.8) discover a genuine shared
-need this Protocol doesn't anticipate (e.g. a renderer-level
-`health_check()`), extend it then — a normal, low-cost change, not a
-redesign (this sprint's own Potential Risks).
+Started at three methods (Sprint 5.6); Sprint 5.9 extended it with a
+fourth, `trigger_gesture()`, exactly the low-cost extension this
+module's own Sprint 5.6 Potential Risks anticipated — a genuine shared
+need discovered once two real implementations (Sprint 5.7/5.8) existed
+to justify it, not a redesign.
 """
 
 from typing import Protocol
@@ -39,10 +40,21 @@ class Renderer(Protocol):
     synchronously, once per tick, with no timeout of its own; a slow
     renderer stalls every subsequent tick's caller, not just its own
     frame. This is a real constraint every future implementation must
-    honor, not just documentation."""
+    honor, not just documentation.
+
+    trigger_gesture() (Sprint 5.9) fires one discrete, one-shot gesture
+    named by presentation/gesture_engine.py's GestureEngine — a
+    persona-agnostic gesture_id string whose visual meaning is entirely
+    up to the implementing renderer (JarvisRenderer: a brief accent
+    pulse; MinieRenderer: a real AvatarRenderer.trigger_gesture() call).
+    A renderer with nothing meaningful to do for a given gesture_id
+    must no-op, never raise — the same "unsupported input degrades
+    silently" contract render_state() itself already holds."""
 
     def mount(self) -> None: ...
 
     def unmount(self) -> None: ...
 
     def render_state(self, state: PresentationState) -> None: ...
+
+    def trigger_gesture(self, gesture_id: str) -> None: ...

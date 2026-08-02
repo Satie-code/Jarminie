@@ -45,12 +45,43 @@ of this sprint's scope). No concrete Renderer exists yet either
 (Sprint 5.7/5.8's job) — renderers is empty in every real construction
 until then; this sprint's own tests use a minimal in-memory fake. See
 docs/sprint_book/sprint_5/sprint_5_6.md.
+
+**Sprint 5.9 (Gesture Engine)** adds a sixth constructor parameter,
+`gesture_engine` — the same "a real gap in the constructor DI list,
+resolved directly rather than deferred" precedent this class's own
+Sprint 5.6 already used for `quiet_mode_controller`: `dispatch_gesture()`
+routes a `GestureEvent` to the currently-mounted renderer's
+`trigger_gesture()`, and `refresh()` now also rolls (and, if non-None,
+dispatches) one ambient gesture per tick via
+`GestureEngine.maybe_roll_ambient_gesture()`, using the same
+just-computed `PresentationState.gesture_probability` and the active
+persona's own name — both inside `refresh()`'s existing Fail Gracefully
+try/except, so a `GestureEngine`/renderer failure here degrades exactly
+like a `PresentationStateComputer`/`render_state()` failure already
+does.
+
+**Sprint 5.10 (Persona Transition Engine)** adds two small, necessary
+methods beyond that sprint's own stated Files to Modify — its own
+Expected Functions text describes `TransitionEngine`'s `SAVING_STATE`
+phase as capturing "the outgoing renderer's last-known PresentationState
+... from PresentationController," which this class had no way to expose
+until now: `refresh()` now caches each tick's own freshly-computed state
+per persona name; `last_state_for(persona_name)` reads that cache (None
+if `refresh()` has never run for that persona yet — an honest gap, not
+an error); `apply_state(state)` renders a given state directly through
+whatever renderer is currently mounted, bypassing
+`PresentationStateComputer.compute()` for that one call — `TransitionEngine`'s
+own `RESTORING_CONVERSATION` phase uses this to replay a cached state
+onto a freshly-mounted renderer after a resume. The same "found a real
+gap in the sprint's own file list, resolved it directly, disclosed it
+here" precedent this class's own Sprint 5.6/5.9 additions already used.
 """
 
 from core.logging_setup import get_logger
 from emotion.state_manager import EmotionalStateManager
 from personas.persona_manager import PersonaManager
-from presentation.presentation_state import PresentationStateComputer
+from presentation.gesture_engine import GestureEngine, GestureEvent
+from presentation.presentation_state import PresentationState, PresentationStateComputer
 from presentation.renderer import Renderer
 from voice.quiet_mode import QuietModeController
 
@@ -62,10 +93,12 @@ class PresentationController:
     persona_manager (2.11), emotional_state_manager (5.2),
     quiet_mode_controller (2.6 — see this module's own docstring for
     why), state_computers (dict[str, PresentationStateComputer] keyed
-    by persona name, 5.5's two computers), and renderers (dict[str,
+    by persona name, 5.5's two computers), renderers (dict[str,
     Renderer] keyed by persona name — empty/absent bindings degrade
     gracefully, populated for real by main.py at Sprint 5.14, not this
-    sprint's own job to harden fully per Sprint 5.15)."""
+    sprint's own job to harden fully per Sprint 5.15), and
+    gesture_engine (5.9's own GestureEngine — see this module's own
+    docstring for why it was added here)."""
 
     def __init__(
         self,
@@ -74,13 +107,16 @@ class PresentationController:
         quiet_mode_controller: QuietModeController,
         state_computers: dict[str, PresentationStateComputer],
         renderers: dict[str, Renderer],
+        gesture_engine: GestureEngine,
     ) -> None:
         self._persona_manager = persona_manager
         self._emotional_state_manager = emotional_state_manager
         self._quiet_mode_controller = quiet_mode_controller
         self._state_computers = state_computers
         self._renderers = renderers
+        self._gesture_engine = gesture_engine
         self._mounted_persona_name: str | None = None
+        self._last_state_by_persona: dict[str, PresentationState] = {}
 
     @property
     def mounted_persona_name(self) -> str | None:
@@ -144,7 +180,13 @@ class PresentationController:
         Gracefully); full multi-scenario hardening is Sprint 5.15's job,
         the same "some hardening lands with the component, the rest at
         the dedicated hardening sprint" split this project has used
-        before (e.g. Sprint 4.6's resource gate ahead of Sprint 4.12)."""
+        before (e.g. Sprint 4.6's resource gate ahead of Sprint 4.12).
+
+        Sprint 5.9: also rolls one ambient gesture per tick, using the
+        just-computed state's own gesture_probability and the active
+        persona's name — inside this same try/except, so a
+        GestureEngine/renderer failure here degrades exactly like a
+        render_state() failure already does."""
         if self._mounted_persona_name is None:
             return
         try:
@@ -162,9 +204,58 @@ class PresentationController:
             emotional_state = self._emotional_state_manager.current_state()
             operating_mode = self._quiet_mode_controller.current_mode()
             state = computer.compute(emotional_state, operating_mode)
+            self._last_state_by_persona[active_persona.name] = state
             renderer.render_state(state)
+            event = self._gesture_engine.maybe_roll_ambient_gesture(
+                state.gesture_probability, active_persona.name
+            )
+            if event is not None:
+                self.dispatch_gesture(event)
         except Exception:
             logger.exception("PresentationController.refresh() failed; skipping this tick.")
+
+    def dispatch_gesture(self, event: GestureEvent) -> None:
+        """Routes a GestureEvent (from trigger_event()'s own future live
+        caller at Sprint 5.14, or refresh()'s own ambient roll above) to
+        the currently-mounted renderer's trigger_gesture(). A no-op if
+        nothing is mounted or the renderer raises — never propagates,
+        matching every other renderer call site in this class."""
+        if self._mounted_persona_name is None:
+            return
+        renderer = self._renderers.get(self._mounted_persona_name)
+        if renderer is None:
+            return
+        try:
+            renderer.trigger_gesture(event.gesture_id)
+        except Exception:
+            logger.exception(
+                "Renderer.trigger_gesture(%s) failed for a mounted renderer.", event.gesture_id
+            )
+
+    def last_state_for(self, persona_name: str) -> PresentationState | None:
+        """The most recently computed PresentationState for persona_name
+        (Sprint 5.10) — None if refresh() has never run for that persona
+        yet, an honest gap rather than an error. TransitionEngine's own
+        SAVING_STATE phase is the real caller."""
+        return self._last_state_by_persona.get(persona_name)
+
+    def apply_state(self, state: PresentationState) -> None:
+        """Renders a given PresentationState directly through whatever
+        renderer is currently mounted (Sprint 5.10) — bypasses
+        PresentationStateComputer.compute() for this one call.
+        TransitionEngine's own RESTORING_CONVERSATION phase uses this to
+        replay a cached state onto a freshly-mounted renderer. A no-op
+        if nothing is mounted; never raises if the renderer itself
+        raises, matching every other renderer call site in this class."""
+        if self._mounted_persona_name is None:
+            return
+        renderer = self._renderers.get(self._mounted_persona_name)
+        if renderer is None:
+            return
+        try:
+            renderer.render_state(state)
+        except Exception:
+            logger.exception("Renderer.render_state() failed applying a cached state.")
 
     def _unmount_current(self) -> None:
         if self._mounted_persona_name is None:

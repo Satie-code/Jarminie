@@ -165,3 +165,85 @@ See Potential Risks above.
 - A second `AvatarRenderer` implementation (a direct Live2D Cubism SDK embed, or an Unreal/Unity bridge) needs one new class plus one registry entry — not built here, the entire point of this sprint's own abstraction.
 - Real lip-sync (`set_mouth_open()`) driven by actual TTS audio amplitude/timing is Sprint 5.11's job.
 - Real gaze-tracking (`set_eye_target()`) toward, e.g., the user's own on-screen cursor or a notification's screen position is plausible future work once a real signal for "what should Minie be looking at" exists — not built here.
+
+## Sprint Completion Report (2026-08-02)
+
+Implemented as specified, authorized directly ("continue with sprint 5.8") right after Sprint 5.7 closed in the same session. Implementation Task 1's own stop-and-ask gate was resolved first, via `AskUserQuestion`, before any file was written: the user chose a hand-rolled client against the plain `websockets` library over the community `pyvts` wrapper.
+
+### Summary
+
+`presentation/avatar_renderer.py`'s `AvatarRenderer` (a `Protocol` extending Sprint 5.6's `Renderer` with `set_expression`/`set_mouth_open`/`set_eye_target`/`trigger_gesture`) is the interface `presentation/vtube_studio_renderer.py`'s `VTubeStudioAvatarRenderer` (the first, and this sprint's only, concrete implementation) satisfies. `presentation/minie_renderer.py`'s `MinieRenderer` (implements the plain `Renderer` contract, holds an `AvatarRenderer` via constructor DI) is the thin adapter `PresentationController` will actually register — it delegates `render_state()`'s parameter-injection path straight to the held `AvatarRenderer`, and separately derives a coarse `expression_id` from a blended `(smile_intensity + voice_warmth) / 2` "expressiveness" reading against `PresentationConfig.minie_expression_thresholds`, calling `set_expression()` only when that derived id changes from the last one sent. `presentation/avatar_renderer_registry.py`'s `create_avatar_renderer()` mirrors `internet/search_provider_registry.py`'s own established shape exactly — `UnknownAvatarBackendError`, never a silent fallback.
+
+`VTubeStudioAvatarRenderer` connects over `ws://{host}:{port}` via `websockets.sync.client.connect()`, performs VTube Studio's own one-time plugin-authentication handshake (`AuthenticationTokenRequest` → persist → `AuthenticationRequest`, reusing a persisted token on later runs and only requesting a fresh one if the persisted one is rejected), and never raises from any public method regardless of connection state — `mount()`'s own broad catch degrades to `_connected = False` with a logged warning (VTube Studio not running is an expected, common case); every other method checks `_connected` first and no-ops at DEBUG when disconnected; a mid-session send/recv failure on an already-mounted connection is caught per-call, logs a WARNING, and marks the renderer disconnected again (a real reconnection attempt is explicitly named as Sprint 5.15's own job, not built here). A VTube-Studio-side rejection of an injected parameter (a model that doesn't define one of the configured `vtube_studio_parameter_mapping` names) and a locally-misconfigured mapping (a `PresentationState` field name that doesn't exist) each log a warning exactly once per session via a small `_warned_keys` set, never per tick.
+
+Two real implementation-time decisions, not fully spelled out by the spec, were resolved and are worth naming explicitly:
+
+1. **`set_mouth_open()`/`set_eye_target()`'s own Live2D parameter names.** `vtube_studio_parameter_mapping` (the spec's own named config field) only covers the three `PresentationState`-driven fields (`smile_intensity`/`eye_openness`/`voice_warmth`); no config field was named for mouth-open/eye-target's own parameter names. Resolved by using real, disclosed constants (`ParamMouthOpenY`, `ParamEyeBallX`/`ParamEyeBallY` — VTube Studio's own standard built-in parameter names) rather than adding further config surface the spec's own Files to Modify list didn't ask for — these are structural face-tracking concepts unlikely to need per-model reconfiguration the way the `PresentationState`-driven ones genuinely do.
+2. **`MinieRenderer._maybe_set_expression()`'s own threshold table needing to be config-driven.** The spec's own Expected Functions says the expression is derived "via a small, config-driven threshold table" but names no new config field for it. `03_Engineering_Standards.md`'s "no hardcoded... thresholds" rule (the same one Sprint 5.4's `_select_tone_variant()` and Sprint 5.7's animation constants already had to resolve) applies here too — `PresentationConfig.minie_expression_thresholds` was added, validated (including a structural "must include a `0.0`-threshold floor" guarantee so `_derive_expression_id()` always has a reachable fallback), and defaulted to a real, disclosed, first-pass expression vocabulary (`neutral`/`smile`/`big_smile`).
+
+The mechanical "nothing outside the registry imports `VTubeStudioAvatarRenderer`" check (Architecture Notes/Acceptance Criteria) is implemented via real AST parsing, not a substring grep — a grep would have false-flagged this project's own established documentation style, where several files' docstrings *mention* `VTubeStudioAvatarRenderer` by name as the swap-target example (`presentation/renderer.py`, `presentation/avatar_renderer.py`, `presentation/asset_manager.py`, `presentation/minie_renderer.py`, `config/schema.py`'s own `PresentationConfig` docstring all do this, confirmed directly before writing the test) — those are prose, not code dependencies, and the test correctly does not flag them.
+
+### Files Created
+
+- `presentation/avatar_renderer.py`
+- `presentation/vtube_studio_renderer.py`
+- `presentation/avatar_renderer_registry.py`
+- `presentation/minie_renderer.py`
+- `tests/unit/presentation/test_vtube_studio_renderer.py`
+- `tests/unit/presentation/test_minie_renderer.py`
+- `tests/unit/presentation/test_avatar_renderer_registry.py`
+
+### Files Modified
+
+- `config/schema.py` — `PresentationConfig` gains `avatar_backend`/`vtube_studio_host`/`vtube_studio_port`/`vtube_studio_plugin_name`/`vtube_studio_plugin_developer`/`vtube_studio_auth_token_path`/`vtube_studio_connection_timeout_seconds`/`vtube_studio_parameter_mapping` (exactly as spec'd) plus `minie_expression_thresholds` (Engineering Decision 2 above, not explicitly named by the spec's own Files to Modify); `_validate_presentation()` extended for all of them.
+- `config/defaults.yaml` — matching new field defaults.
+- `requirements.txt` — `websockets>=12.0`, per the resolved stop-and-ask gate.
+- `.gitignore` — `config/vtube_studio_token.json` (a real secret, never committed).
+- `tests/unit/config/test_schema.py` — new validation coverage for every new `PresentationConfig` field. **Not named in the sprint file's own Files to Modify** — follows directly from the `config/schema.py` additions above, same pattern every prior Level 5 config-adding sprint has used.
+
+### Tests Added
+
+- `tests/unit/presentation/test_vtube_studio_renderer.py` — 27 tests: connect/authenticate/token-persist/reuse (including the persisted-token-rejected-so-request-a-new-one path) against a fully-controlled fake `websockets.sync.client` connection; `mount()` never raises for a connection failure, an authentication failure, or a token-less response; every method's disconnected-no-op behavior; `render_state()`'s parameter-mapping translation, its own once-per-session warning paths (both an unknown `PresentationState` field and a VTube-Studio-side `APIError` rejection), and its mid-session-disconnect handling; `set_expression()`/`trigger_gesture()`'s `HotkeyTriggerRequest` shape; `set_mouth_open()`/`set_eye_target()`'s own parameter injection; `unmount()`'s idempotency and its own never-raises-even-if-close-fails guarantee; the AST-based mechanical "no file outside the registry imports `VTubeStudioAvatarRenderer`" check.
+- `tests/unit/presentation/test_minie_renderer.py` — 14 tests: `mount()`/`unmount()` delegate straight through; `render_state()` delegates the parameter-mapping path and separately drives expression-change detection (first call always sends, an unchanged derived expression is deduplicated, a genuinely different one re-sends, 20 repeated near-identical states produce exactly one `set_expression()` call while `render_state()` itself is called all 20 times); `unmount()` resets expression memory so a remount always re-sends fresh; `MinieRenderer` itself never calls `set_mouth_open`/`set_eye_target`/`trigger_gesture` (Integration Considerations: no real caller this sprint); `_derive_expression_id()`'s threshold-picking, its blending of both named signals, and its honest fallback for a hand-constructed table missing a floor.
+- `tests/unit/presentation/test_avatar_renderer_registry.py` — 5 tests: default resolution, config passthrough, unknown-backend error (naming both the bad value and every registered option), a typo never silently falling back to the default.
+- `tests/unit/config/test_schema.py` — 15 new tests covering every new `PresentationConfig` field's own validation, plus a shipped-defaults-are-valid sanity check.
+
+### Documentation Updated
+
+- `presentation/vtube_studio_renderer.py`'s module docstring (the VTube-Studio-installed-separately disclosure, the "disconnected, never crash" contract, the best-effort-protocol-implementation disclosure, the synchronous-`websockets`-API rationale).
+- `presentation/avatar_renderer.py`'s docstring (the swap-target guarantee, mirroring `internet/search_provider.py`'s own).
+- `config/schema.py`'s `PresentationConfig` docstring (every new field, including why the token path is a file, not an env var).
+- `backlog/technical_debt.md` — new item 37, recording the stop-and-ask WebSocket-client decision and the disclosed not-verified-against-a-real-instance limitation.
+- This Sprint Completion Report.
+- `docs/STATUS.md`/`docs/sprint_book/INDEX.md` updated (see below).
+
+### Acceptance Criteria Checklist
+
+- ✔ `VTubeStudioAvatarRenderer` never raises for any method call, connected or not — verified against both a working fake transport and multiple deliberately-failing ones (connection failure, auth failure, no-token response, mid-session disconnect, close()-itself-fails).
+- ✔ `MinieRenderer.render_state()` calls `set_expression()` only on a meaningful change — verified via a 20-call repeated-near-identical-state sweep producing exactly one call.
+- ✔ `create_avatar_renderer()` raises a clear, specific `UnknownAvatarBackendError` for an unrecognized `avatar_backend`, never a silent fallback.
+- ✔ Mechanical check: no file outside `presentation/vtube_studio_renderer.py`/`avatar_renderer_registry.py` imports anything VTube-Studio-specific — verified via real AST parsing across the entire repository, not a naive grep.
+- ✔ `ruff check .` clean; full existing suite unaffected.
+
+### Risks
+
+- Same "VTube Studio may not be running/may not match the configured parameter mapping" risk named in the spec — mitigated exactly as designed (a uniform, logged, once-per-session degrade, never a crash).
+- **The exact VTube Studio JSON protocol shapes are unverified against a real instance** — logged as `backlog/technical_debt.md` item 37, the same disclosed-limitation category as item 31's Brave Search response parsing; real verification is explicitly Sprint 5.16's own opt-in job.
+- No live caller of `MinieRenderer` until Sprint 5.14 populates `PresentationController`'s renderer dict with a real `"minie": MinieRenderer(...)` entry.
+
+### Technical Debt
+
+One new item logged (37) — the stop-and-ask WebSocket-client decision and its disclosed real-verification gap, per this sprint's own Documentation Checklist. No other technical debt introduced; the `minie_expression_thresholds` config gap was found and resolved within this sprint, not deferred.
+
+### Recommendations
+
+- Once a real VTube Studio instance with a loaded Live2D model is available, run a real, supervised connection test (Sprint 5.16's own job) to confirm the request/response shapes actually match — see `backlog/technical_debt.md` item 37's own Resolve-by column for the specifics.
+- Whether `set_mouth_open()`'s/`set_eye_target()`'s own hardcoded parameter-name constants should eventually move into `PresentationConfig` too (matching `vtube_studio_parameter_mapping`'s own treatment) is a real, deliberately-deferred question — revisit once Sprint 5.11/5.9 give them a real caller and a real need for per-model reconfiguration is confirmed, not assumed now.
+
+### Verification
+
+Full suite: 1438 passing + 1 pre-existing failure (the same already-established real-Ollama-output nondeterminism flake from Sprint 5.2/5.3/5.5/5.6/5.7's own verification, in a file this sprint never touches) + 1 skipped + 1 deselected. `ruff check .` clean across the whole repository. A direct, non-mocked smoke script (a real `PresentationConfig`, a fully-controlled fake WebSocket connection standing in for VTube Studio) confirmed the entire chain — `create_avatar_renderer()` → `VTubeStudioAvatarRenderer.mount()`/token persistence → `MinieRenderer.render_state()`'s parameter injection and expression-change-detection (a second identical `render_state()` call sent one fewer message than the first, confirming deduplication) → `UnknownAvatarBackendError` for a bad backend name — behaves as designed end-to-end.
+
+**No git commit made** — per this project's own "only commit when explicitly asked" rule, changes left in the working tree; the user has not yet been asked whether to commit.
+
+**Sprint 5.9 (Gesture Engine) is next.**

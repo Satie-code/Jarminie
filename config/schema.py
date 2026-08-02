@@ -781,6 +781,65 @@ def _validate_presentation_range(
         )
 
 
+def _default_vtube_studio_parameter_mapping() -> dict[str, str]:
+    """Sprint 5.8 — real, disclosed, unvalidated first-pass defaults; see
+    PresentationConfig's own docstring for why voice_warmth's default is
+    a placeholder custom-parameter name rather than a real Live2D
+    standard one."""
+    return {
+        "smile_intensity": "ParamMouthForm",
+        "eye_openness": "ParamEyeLOpen",
+        "voice_warmth": "ParamGlow",
+    }
+
+
+def _default_minie_expression_thresholds() -> dict[str, float]:
+    """Sprint 5.8 — real, disclosed, unvalidated first-pass expression
+    vocabulary/thresholds; see PresentationConfig's own docstring."""
+    return {
+        "neutral": 0.0,
+        "smile": 0.45,
+        "big_smile": 0.75,
+    }
+
+
+def _default_workspace_profile_keywords() -> dict[str, list[str]]:
+    """Sprint 5.12 — real, disclosed, unvalidated first-pass keyword
+    vocabulary; keyed by `WorkspaceProfile.value`. Deliberately no
+    "general" entry — GENERAL is `AdaptiveWorkspaceController.
+    select_profile()`'s own safe-failure default, never something a
+    keyword match resolves *into* (see that module's own docstring)."""
+    return {
+        "coding": ["code", "coding", "bug", "debug", "function", "repository", "compile", "script"],
+        "research": ["research", "article", "source", "citation", "paper", "investigate"],
+        "study": ["study", "exam", "homework", "lecture", "course", "assignment"],
+        "projects": ["project", "deadline", "milestone", "roadmap", "meeting", "plan"],
+    }
+
+
+def _default_gesture_vocabulary() -> dict[str, list[str]]:
+    """Sprint 5.9 — real, disclosed, unvalidated first-pass gesture
+    vocabulary, keyed by `GestureTrigger.value` (presentation/
+    gesture_engine.py). Deliberately shared across both personas —
+    `GestureEngine` itself holds no persona-specific logic (that
+    sprint's own Architecture Notes); each renderer's own
+    trigger_gesture() decides how, or whether, a given gesture_id
+    renders differently (JarvisRenderer applies one uniform accent
+    pulse regardless of which id was chosen; MinieRenderer forwards
+    the id verbatim to AvatarRenderer.trigger_gesture(), where it is
+    matched against the user's own loaded Live2D model's real hotkeys)."""
+    return {
+        "notification": ["notification_glance", "notification_pulse"],
+        "turn_start": ["attentive_lean", "focus_pulse"],
+        "turn_end": ["settle", "soft_nod"],
+        "mode_transition_to_active": ["wake_pulse", "brighten"],
+        "mode_transition_to_dormant": ["dim_fade", "settle"],
+        "listening_posture": ["listening_tilt", "listen_pulse"],
+        "speaking_posture": ["speaking_bob", "speak_pulse"],
+        "ambient_idle": ["idle_glance", "idle_blink", "head_tilt"],
+    }
+
+
 @dataclass
 class PresentationConfig:
     """Presentation State Engine settings (Sprint 5.5 — Level 5 Part A).
@@ -815,6 +874,142 @@ class PresentationConfig:
     content choice made at this sprint's own implementation time, not
     fabricated by the spec — any reasonable value within the named color
     family is acceptable and correctable via config without a code change.
+
+    jarvis_ring_segment_count (Sprint 5.7) is `presentation/widgets/
+    segmented_ring_widget.py`'s own fixed arc-segment count for Jarvis's
+    holographic ring. jarvis_animation_tick_ms is `presentation/
+    jarvis_renderer.py`'s own `QTimer` interval driving both the sphere's
+    breathing pulse and the ring's rotation — deliberately modest
+    (~30fps) per this sprint's own Potential Risks ("smooth enough for a
+    'deliberate, purposeful' animation without chasing a high frame rate
+    this class of visual doesn't need"), a real, disclosed, unvalidated
+    first-pass number like every other Level 5 config default so far.
+
+    avatar_backend (Sprint 5.8) names which `AvatarRenderer`
+    `presentation/avatar_renderer_registry.py`'s `create_avatar_renderer()`
+    constructs — `"vtube_studio"` is the only real, registered value this
+    sprint; an unrecognized value raises `UnknownAvatarBackendError` at
+    construction time, never validated here (the same "known-value check
+    lives at the registry, not at config validation" split
+    `internet.search_provider`/`InternetConfig._validate_internet()`
+    already established).
+
+    `vtube_studio_host`/`vtube_studio_port` name the local VTube Studio
+    instance's own WebSocket Plugin API endpoint (`ws://{host}:{port}`,
+    VTube Studio's own documented default port `8001`) —
+    `presentation/vtube_studio_renderer.py`'s `VTubeStudioAvatarRenderer`
+    only ever talks to an already-running, separately-installed VTube
+    Studio process the user owns and configures independently; JARMINEI
+    neither embeds nor redistributes Live2D's own SDK, and does not
+    itself render Minie's avatar (see that module's own docstring).
+    `vtube_studio_plugin_name`/`vtube_studio_plugin_developer` identify
+    this project to VTube Studio's own permission-prompt UI during the
+    one-time authentication handshake. `vtube_studio_connection_timeout_seconds`
+    bounds how long `mount()` waits for that handshake before degrading
+    to a disconnected, no-op state rather than blocking indefinitely.
+
+    `vtube_studio_auth_token_path` is where the VTube-Studio-issued
+    plugin authentication token (requested once, on first successful
+    connect, then reused on every later run) is persisted on disk —
+    deliberately a config-driven local file path, not an environment
+    variable like `InternetConfig.search_api_key`, since VTube Studio's
+    own protocol issues this token interactively at connect time rather
+    than something a user pre-generates and supplies up front. Still a
+    real secret: the default path (`config/vtube_studio_token.json`) is
+    listed in `.gitignore`, never committed, matching
+    `search_api_key`'s own "a real secret, never written to a shared
+    file" discipline even though the storage mechanism differs.
+
+    `vtube_studio_parameter_mapping` maps a `PresentationState` field
+    name (`smile_intensity`/`eye_openness`/`voice_warmth`) to the Live2D
+    model parameter name `VTubeStudioAvatarRenderer.render_state()`
+    injects it into via VTube Studio's own `InjectParameterDataRequest`
+    — a Live2D model's own parameter names are author-defined, never
+    something JARMINEI can assume, so this is deliberately config-driven
+    rather than hardcoded. The shipped defaults name VTube Studio's own
+    commonly-used built-in parameters (`ParamMouthForm`, `ParamEyeLOpen`)
+    for the two fields with an obvious standard-parameter equivalent;
+    `voice_warmth` has no standard Live2D built-in counterpart (it is a
+    JARMINEI-specific concept, not a real face shape) and defaults to a
+    placeholder custom-parameter name (`ParamGlow`) that only has a
+    visible effect if the user's own loaded model happens to define a
+    matching custom parameter — an honest, disclosed limitation, not a
+    guaranteed-to-work mapping.
+
+    `minie_expression_thresholds` (Sprint 5.8) is `presentation/
+    minie_renderer.py`'s own `_derive_expression_id()` threshold table:
+    keys are `expression_id` values passed to `AvatarRenderer.
+    set_expression()` (matched against whatever expressions/hotkeys the
+    user's own loaded Live2D model actually defines inside VTube
+    Studio), values are the minimum `(smile_intensity + voice_warmth) /
+    2` "expressiveness" reading (0.0-1.0) that expression requires —
+    the highest-threshold entry whose value is met wins. Must include a
+    `0.0`-threshold entry as an always-reachable floor; real, disclosed,
+    unvalidated first-pass defaults/vocabulary, not fabricated to match
+    any specific real Live2D model (the user's own model may define a
+    different expression vocabulary entirely — reconfigurable without a
+    code change).
+
+    `gesture_vocabulary`/`ambient_gesture_roll_interval_seconds`
+    (Sprint 5.9) drive `presentation/gesture_engine.py`'s `GestureEngine`:
+    `gesture_vocabulary` maps each `GestureTrigger.value` to a list of
+    candidate `gesture_id` strings `trigger_event()` round-robins
+    through (an empty or absent list is a valid, honest no-op — not a
+    config error); `ambient_gesture_roll_interval_seconds` bounds how
+    often `maybe_roll_ambient_gesture()` can fire, independent of
+    `PresentationState.gesture_probability` itself. `jarvis_gesture_pulse_ticks`
+    is `JarvisRenderer.trigger_gesture()`'s own accent-pulse duration on
+    `SegmentedRingWidget` — added beyond this sprint's own originally-named
+    config fields so that pulse's duration is config-driven rather than a
+    hardcoded constant, the same `03_Engineering_Standards.md` "no
+    hardcoded... thresholds" discipline `EmotionConfig`'s/Sprint 5.4's
+    own tone thresholds already established. All three are real,
+    disclosed, unvalidated first-pass defaults/vocabulary, the same
+    category as every other Level 5 tuned default so far.
+
+    `transition_max_duration_seconds`/`transition_particle_phase_seconds`
+    (Sprint 5.10) drive `presentation/transition_engine.py`'s
+    `TransitionEngine.transition()`: `transition_particle_phase_seconds`
+    is how long the `PARTICLE_TRANSITION` phase is held before moving on;
+    `transition_max_duration_seconds` is the whole seven-phase sequence's
+    own budget, checked between phases (never preempting a phase
+    mid-flight) — a budget overrun skips straight to `LOADING_TARGET`/
+    `COMPLETE`, guaranteeing the renderer swap itself always eventually
+    happens. Both real, disclosed, unvalidated first-pass timing guesses,
+    the same category as every other Level 5 tuned default.
+
+    `pacing_pause_marker`/`pacing_low_warmth_pause_weight`/
+    `pacing_high_warmth_pause_weight` (Sprint 5.11) drive
+    `presentation/voice_personality.py`'s `VoicePersonalityModulator.
+    shape_pacing()`. `pacing_pause_marker` defaults to an ellipsis
+    (`"..."`) — verified against the real installed `coqui-tts` (0.27.5)
+    text pipeline (`TTS.tts.utils.text.cleaners`'s own default
+    `_punctuations = "!'(),-.:;? "`): there is no dedicated SSML-style
+    pause/silence token, only ordinary punctuation characters the model's
+    own tokenizer already treats as pause-inducing (comma/period/etc. are
+    literally in its supported character vocabulary, not stripped before
+    synthesis) — an ellipsis is simply three such characters in a row,
+    a real, working pacing technique, not a "special recognized token."
+    `pacing_low_warmth_pause_weight`/`pacing_high_warmth_pause_weight`
+    bound the fraction of sentence/clause boundaries `shape_pacing()`
+    inserts a marker at, interpolated by `voice_warmth`.
+
+    `lip_sync_sample_window_ms` (Sprint 5.11) is `presentation/lip_sync.py`'s
+    `LipSyncDriver`'s own RMS-amplitude sampling window size. All four
+    real, disclosed, unvalidated first-pass defaults, the same category
+    as every other Level 5 tuned default.
+
+    `workspace_profile_keywords`/`workspace_switch_debounce_turns`
+    (Sprint 5.12) drive `presentation/adaptive_workspace.py`'s
+    `AdaptiveWorkspaceController`: `workspace_profile_keywords` maps each
+    `WorkspaceProfile.value` (deliberately excluding `"general"`, its own
+    safe-failure default — see that module's own docstring) to a list of
+    keywords `select_profile()` substring-matches against a turn's
+    `primary_topic`/`mentioned_entities`; `workspace_switch_debounce_turns`
+    is `should_switch()`'s own minimum consecutive-matching-turn count
+    before recommending an actual dashboard rearrangement. Both real,
+    disclosed, unvalidated first-pass defaults, the same category as
+    every other Level 5 tuned default.
     """
 
     jarvis_smile_intensity_min: float = 0.0
@@ -831,6 +1026,8 @@ class PresentationConfig:
     jarvis_gesture_probability_max: float = 0.2
     jarvis_lighting_color: str = "#0A84FF"
     jarvis_ui_accent: str = "#22D3EE"
+    jarvis_ring_segment_count: int = 12
+    jarvis_animation_tick_ms: int = 33
 
     minie_smile_intensity_min: float = 0.15
     minie_smile_intensity_max: float = 0.95
@@ -846,6 +1043,37 @@ class PresentationConfig:
     minie_gesture_probability_max: float = 0.65
     minie_lighting_color: str = "#C8A8E9"
     minie_ui_accent: str = "#B76E79"
+
+    avatar_backend: str = "vtube_studio"
+    vtube_studio_host: str = "localhost"
+    vtube_studio_port: int = 8001
+    vtube_studio_plugin_name: str = "JARMINEI"
+    vtube_studio_plugin_developer: str = "JARMINEI Project"
+    vtube_studio_auth_token_path: str = "config/vtube_studio_token.json"
+    vtube_studio_connection_timeout_seconds: float = 5.0
+    vtube_studio_parameter_mapping: dict[str, str] = field(
+        default_factory=_default_vtube_studio_parameter_mapping
+    )
+    minie_expression_thresholds: dict[str, float] = field(
+        default_factory=_default_minie_expression_thresholds
+    )
+
+    gesture_vocabulary: dict[str, list[str]] = field(default_factory=_default_gesture_vocabulary)
+    ambient_gesture_roll_interval_seconds: float = 15.0
+    jarvis_gesture_pulse_ticks: int = 10
+
+    transition_max_duration_seconds: float = 2.5
+    transition_particle_phase_seconds: float = 0.8
+
+    pacing_pause_marker: str = "..."
+    pacing_low_warmth_pause_weight: float = 0.3
+    pacing_high_warmth_pause_weight: float = 0.7
+    lip_sync_sample_window_ms: float = 50.0
+
+    workspace_profile_keywords: dict[str, list[str]] = field(
+        default_factory=_default_workspace_profile_keywords
+    )
+    workspace_switch_debounce_turns: int = 2
 
 
 @dataclass
@@ -1337,4 +1565,141 @@ class AppConfig:
             if not _HEX_COLOR_PATTERN.match(value):
                 raise ConfigError(
                     f"presentation.{name} must be a #RRGGBB hex color string, got {value!r}"
+                )
+
+        if p.jarvis_ring_segment_count < 3:
+            raise ConfigError(
+                "presentation.jarvis_ring_segment_count must be at least 3, got "
+                f"{p.jarvis_ring_segment_count}"
+            )
+        if p.jarvis_animation_tick_ms <= 0:
+            raise ConfigError(
+                "presentation.jarvis_animation_tick_ms must be positive, got "
+                f"{p.jarvis_animation_tick_ms}"
+            )
+
+        if not p.avatar_backend.strip():
+            raise ConfigError("presentation.avatar_backend must not be blank")
+        if not p.vtube_studio_host.strip():
+            raise ConfigError("presentation.vtube_studio_host must not be blank")
+        if not (0 < p.vtube_studio_port <= 65535):
+            raise ConfigError(
+                f"presentation.vtube_studio_port must be in (0, 65535], got {p.vtube_studio_port}"
+            )
+        if not p.vtube_studio_plugin_name.strip():
+            raise ConfigError("presentation.vtube_studio_plugin_name must not be blank")
+        if not p.vtube_studio_plugin_developer.strip():
+            raise ConfigError("presentation.vtube_studio_plugin_developer must not be blank")
+        if not p.vtube_studio_auth_token_path.strip():
+            raise ConfigError("presentation.vtube_studio_auth_token_path must not be blank")
+        if p.vtube_studio_connection_timeout_seconds <= 0:
+            raise ConfigError(
+                "presentation.vtube_studio_connection_timeout_seconds must be positive, got "
+                f"{p.vtube_studio_connection_timeout_seconds}"
+            )
+        for state_field, parameter_name in p.vtube_studio_parameter_mapping.items():
+            if not state_field.strip():
+                raise ConfigError(
+                    "presentation.vtube_studio_parameter_mapping must not contain "
+                    "empty-string keys"
+                )
+            if not parameter_name.strip():
+                raise ConfigError(
+                    f"presentation.vtube_studio_parameter_mapping[{state_field!r}] must not "
+                    "be blank"
+                )
+
+        if not p.minie_expression_thresholds:
+            raise ConfigError("presentation.minie_expression_thresholds must not be empty")
+        if 0.0 not in p.minie_expression_thresholds.values():
+            raise ConfigError(
+                "presentation.minie_expression_thresholds must include a 0.0-threshold entry "
+                "as an always-reachable floor"
+            )
+
+        for trigger_name, candidates in p.gesture_vocabulary.items():
+            if not trigger_name.strip():
+                raise ConfigError(
+                    "presentation.gesture_vocabulary must not contain empty-string keys"
+                )
+            for gesture_id in candidates:
+                if not gesture_id or not gesture_id.strip():
+                    raise ConfigError(
+                        f"presentation.gesture_vocabulary[{trigger_name!r}] must not contain "
+                        "empty-string gesture ids"
+                    )
+        if p.ambient_gesture_roll_interval_seconds <= 0:
+            raise ConfigError(
+                "presentation.ambient_gesture_roll_interval_seconds must be positive, got "
+                f"{p.ambient_gesture_roll_interval_seconds}"
+            )
+        if p.jarvis_gesture_pulse_ticks <= 0:
+            raise ConfigError(
+                "presentation.jarvis_gesture_pulse_ticks must be positive, got "
+                f"{p.jarvis_gesture_pulse_ticks}"
+            )
+        if p.transition_max_duration_seconds <= 0:
+            raise ConfigError(
+                "presentation.transition_max_duration_seconds must be positive, got "
+                f"{p.transition_max_duration_seconds}"
+            )
+        if p.transition_particle_phase_seconds <= 0:
+            raise ConfigError(
+                "presentation.transition_particle_phase_seconds must be positive, got "
+                f"{p.transition_particle_phase_seconds}"
+            )
+        if p.transition_particle_phase_seconds > p.transition_max_duration_seconds:
+            raise ConfigError(
+                "presentation.transition_particle_phase_seconds "
+                f"({p.transition_particle_phase_seconds}) must be <= "
+                f"transition_max_duration_seconds ({p.transition_max_duration_seconds})"
+            )
+
+        if not p.pacing_pause_marker:
+            raise ConfigError("presentation.pacing_pause_marker must not be blank")
+        for name, value in (
+            ("pacing_low_warmth_pause_weight", p.pacing_low_warmth_pause_weight),
+            ("pacing_high_warmth_pause_weight", p.pacing_high_warmth_pause_weight),
+        ):
+            if not (0.0 <= value <= 1.0):
+                raise ConfigError(f"presentation.{name} must be in [0.0, 1.0], got {value}")
+        if p.pacing_low_warmth_pause_weight > p.pacing_high_warmth_pause_weight:
+            raise ConfigError(
+                "presentation.pacing_low_warmth_pause_weight "
+                f"({p.pacing_low_warmth_pause_weight}) must be <= "
+                f"pacing_high_warmth_pause_weight ({p.pacing_high_warmth_pause_weight})"
+            )
+        if p.lip_sync_sample_window_ms <= 0:
+            raise ConfigError(
+                "presentation.lip_sync_sample_window_ms must be positive, got "
+                f"{p.lip_sync_sample_window_ms}"
+            )
+
+        for profile_name, keywords in p.workspace_profile_keywords.items():
+            if not profile_name.strip():
+                raise ConfigError(
+                    "presentation.workspace_profile_keywords must not contain "
+                    "empty-string keys"
+                )
+            for keyword in keywords:
+                if not keyword or not keyword.strip():
+                    raise ConfigError(
+                        f"presentation.workspace_profile_keywords[{profile_name!r}] must not "
+                        "contain empty-string keywords"
+                    )
+        if p.workspace_switch_debounce_turns <= 0:
+            raise ConfigError(
+                "presentation.workspace_switch_debounce_turns must be positive, got "
+                f"{p.workspace_switch_debounce_turns}"
+            )
+        for expression_id, threshold in p.minie_expression_thresholds.items():
+            if not expression_id.strip():
+                raise ConfigError(
+                    "presentation.minie_expression_thresholds must not contain "
+                    "empty-string keys"
+                )
+            if not (0.0 <= threshold <= 1.0):
+                raise ConfigError(
+                    f"presentation.minie_expression_thresholds[{expression_id!r}] must be in "
+                    f"[0.0, 1.0], got {threshold}"
                 )

@@ -1,0 +1,393 @@
+"""Unit tests for presentation.vtube_studio_renderer.
+
+Never talks to a real running VTube Studio instance (mirrors
+tests/unit/internet/test_brave_search_provider.py's own "patch the
+transport" precedent, and test_level4_part_b_real_verification.py's
+"real network call is opt-in only" discipline) — every test here
+patches presentation.vtube_studio_renderer.connect with a fake
+connection object whose send()/recv()/close() this file fully
+controls.
+"""
+
+import ast
+import json
+import os
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from config.schema import PresentationConfig
+from presentation.presentation_state import PresentationState
+from presentation.vtube_studio_renderer import VTubeStudioAvatarRenderer
+
+_REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+_ALLOWED_IMPORTERS = {
+    os.path.normpath(os.path.join(_REPO_ROOT, "presentation", "vtube_studio_renderer.py")),
+    os.path.normpath(os.path.join(_REPO_ROOT, "presentation", "avatar_renderer_registry.py")),
+}
+
+
+def _imports_vtube_studio_renderer(path: str) -> bool:
+    """AST-based, not a substring grep — a docstring merely *mentioning*
+    VTubeStudioAvatarRenderer by name (this project's own established
+    documentation style, e.g. presentation/renderer.py's own docstring
+    naming it as the swap-target example) is not a real code dependency
+    and must not be flagged."""
+    with open(path, encoding="utf-8") as handle:
+        try:
+            tree = ast.parse(handle.read(), filename=path)
+        except SyntaxError:
+            return False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and "vtube_studio_renderer" in node.module
+        ):
+            return True
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if "vtube_studio_renderer" in alias.name:
+                    return True
+    return False
+
+
+def test_no_file_outside_the_registry_imports_vtube_studio_renderer():
+    """Mechanical check (Acceptance Criteria/Architecture Notes): the
+    swap-target guarantee holds only if nothing outside
+    presentation/vtube_studio_renderer.py (and the one legitimate
+    exception, avatar_renderer_registry.py, whose whole job is exactly
+    this narrow translation — the same exception
+    internet/search_provider_registry.py already sets for its own
+    concrete providers) imports it directly. Test files are exempt —
+    they legitimately construct/verify the real class."""
+    violations = []
+    for dirpath, _dirnames, filenames in os.walk(_REPO_ROOT):
+        if os.sep + ".venv" + os.sep in dirpath + os.sep or "\\.venv\\" in dirpath:
+            continue
+        if os.sep + "tests" + os.sep in dirpath + os.sep or "\\tests\\" in dirpath:
+            continue
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = os.path.normpath(os.path.join(dirpath, filename))
+            if path in _ALLOWED_IMPORTERS:
+                continue
+            if _imports_vtube_studio_renderer(path):
+                violations.append(path)
+
+    assert violations == []
+
+
+def _sample_state(
+    smile_intensity: float = 0.5, eye_openness: float = 0.6, voice_warmth: float = 0.4
+):
+    return PresentationState(
+        smile_intensity=smile_intensity,
+        eye_openness=eye_openness,
+        voice_warmth=voice_warmth,
+        animation_speed=1.0,
+        particle_density=0.3,
+        lighting_color="#C8A8E9",
+        ui_accent="#B76E79",
+        gesture_probability=0.2,
+        avatar_focus="user",
+        persona_name="minie",
+        computed_at=datetime.now(UTC),
+    )
+
+
+def _fake_connection(responses: list[dict] | None = None) -> MagicMock:
+    """A MagicMock standing in for a websockets.sync.client connection
+    — recv() returns each of `responses` (JSON-encoded) in order."""
+    conn = MagicMock()
+    if responses is not None:
+        conn.recv.side_effect = [json.dumps(r) for r in responses]
+    return conn
+
+
+_AUTH_TOKEN_RESPONSE = {
+    "messageType": "AuthenticationTokenResponse",
+    "data": {"authenticationToken": "fresh-token-123"},
+}
+_AUTH_SUCCESS_RESPONSE = {"messageType": "AuthenticationResponse", "data": {"authenticated": True}}
+_AUTH_FAILURE_RESPONSE = {"messageType": "AuthenticationResponse", "data": {"authenticated": False}}
+_INJECT_OK_RESPONSE = {"messageType": "InjectParameterDataResponse", "data": {}}
+_API_ERROR_RESPONSE = {"messageType": "APIError", "data": {"message": "Unknown parameter."}}
+
+
+@pytest.fixture
+def config(tmp_path) -> PresentationConfig:
+    return PresentationConfig(
+        vtube_studio_auth_token_path=str(tmp_path / "vtube_studio_token.json")
+    )
+
+
+# --- mount(): connect/authenticate/token-persist/reuse ------------------------
+
+
+def test_mount_requests_and_persists_a_fresh_token_when_none_exists(config):
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()
+
+    assert renderer._connected is True
+    saved = json.loads(open(config.vtube_studio_auth_token_path).read())
+    assert saved["authenticationToken"] == "fresh-token-123"
+
+
+def test_mount_reuses_a_persisted_token_without_requesting_a_new_one(config):
+    with open(config.vtube_studio_auth_token_path, "w") as handle:
+        json.dump({"authenticationToken": "already-have-this"}, handle)
+    conn = _fake_connection([_AUTH_SUCCESS_RESPONSE])
+
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()
+
+    assert renderer._connected is True
+    assert conn.send.call_count == 1  # only AuthenticationRequest, no token request
+
+
+def test_mount_requests_a_new_token_when_the_persisted_one_is_rejected(config):
+    with open(config.vtube_studio_auth_token_path, "w") as handle:
+        json.dump({"authenticationToken": "stale-token"}, handle)
+    conn = _fake_connection([_AUTH_FAILURE_RESPONSE, _AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()
+
+    assert renderer._connected is True
+    saved = json.loads(open(config.vtube_studio_auth_token_path).read())
+    assert saved["authenticationToken"] == "fresh-token-123"
+
+
+def test_mount_is_idempotent_when_already_connected(config):
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn) as mock_connect:
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()
+        renderer.mount()
+
+    mock_connect.assert_called_once()
+
+
+# --- mount() never raises (Acceptance Criteria) -------------------------------
+
+
+def test_mount_never_raises_when_the_connection_itself_fails(config):
+    with patch(
+        "presentation.vtube_studio_renderer.connect", side_effect=OSError("no route to host")
+    ):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()  # must not raise
+
+    assert renderer._connected is False
+
+
+def test_mount_never_raises_when_authentication_ultimately_fails(config):
+    conn = _fake_connection(
+        [_AUTH_TOKEN_RESPONSE, _AUTH_FAILURE_RESPONSE]  # fresh token still rejected
+    )
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()  # must not raise
+
+    assert renderer._connected is False
+
+
+def test_mount_never_raises_when_vts_returns_no_token(config):
+    conn = _fake_connection([{"messageType": "AuthenticationTokenResponse", "data": {}}])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()  # must not raise
+
+    assert renderer._connected is False
+
+
+# --- disconnected-no-op behavior for every method (Testing Checklist) --------
+
+
+def test_render_state_is_a_noop_when_disconnected(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.render_state(_sample_state())  # never mounted — must not raise
+
+
+def test_set_expression_is_a_noop_when_disconnected(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.set_expression("smile")  # must not raise
+
+
+def test_set_mouth_open_is_a_noop_when_disconnected(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.set_mouth_open(0.5)  # must not raise
+
+
+def test_set_eye_target_is_a_noop_when_disconnected(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.set_eye_target(0.2, -0.3)  # must not raise
+
+
+def test_trigger_gesture_is_a_noop_when_disconnected(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.trigger_gesture("wave")  # must not raise
+
+
+def test_unmount_is_a_noop_when_never_mounted(config):
+    renderer = VTubeStudioAvatarRenderer(config)
+    renderer.unmount()  # must not raise
+
+
+# --- render_state()'s parameter-mapping translation ---------------------------
+
+
+def _mounted_renderer(
+    config, extra_responses: list[dict]
+) -> tuple[VTubeStudioAvatarRenderer, MagicMock]:
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE, *extra_responses])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config)
+        renderer.mount()
+    return renderer, conn
+
+
+def test_render_state_sends_every_mapped_parameter(config):
+    renderer, conn = _mounted_renderer(config, [_INJECT_OK_RESPONSE])
+
+    renderer.render_state(_sample_state(smile_intensity=0.7, eye_openness=0.8, voice_warmth=0.6))
+
+    sent_payload = json.loads(conn.send.call_args.args[0])
+    assert sent_payload["messageType"] == "InjectParameterDataRequest"
+    sent_params = {p["id"]: p["value"] for p in sent_payload["data"]["parameterValues"]}
+    assert sent_params["ParamMouthForm"] == 0.7
+    assert sent_params["ParamEyeLOpen"] == 0.8
+    assert sent_params["ParamGlow"] == 0.6
+
+
+def test_render_state_never_raises_when_vts_rejects_the_injection(config):
+    renderer, _conn = _mounted_renderer(config, [_API_ERROR_RESPONSE])
+
+    renderer.render_state(_sample_state())  # must not raise
+
+
+def test_render_state_warns_only_once_for_a_repeated_api_error(config, caplog):
+    renderer, conn = _mounted_renderer(config, [_API_ERROR_RESPONSE])
+    conn.recv.side_effect = [json.dumps(_API_ERROR_RESPONSE)] * 5
+
+    with caplog.at_level("WARNING"):
+        renderer.render_state(_sample_state())
+        renderer.render_state(_sample_state())
+        renderer.render_state(_sample_state())
+
+    mismatch_warnings = [r for r in caplog.records if "rejected a parameter injection" in r.message]
+    assert len(mismatch_warnings) == 1
+
+
+def test_render_state_warns_once_for_an_unknown_presentation_state_field(config, caplog):
+    bad_config = PresentationConfig(
+        vtube_studio_auth_token_path=config.vtube_studio_auth_token_path,
+        vtube_studio_parameter_mapping={"not_a_real_field": "ParamSomething"},
+    )
+    renderer, conn = _mounted_renderer(bad_config, [])
+    conn.recv.side_effect = None
+    conn.reset_mock()  # discard the two mount()-time sends (token + auth requests)
+
+    with caplog.at_level("WARNING"):
+        renderer.render_state(_sample_state())
+        renderer.render_state(_sample_state())
+
+    unknown_field_warnings = [r for r in caplog.records if "unknown" in r.message.lower()]
+    assert len(unknown_field_warnings) == 1
+    assert conn.send.call_count == 0  # nothing valid to send — InjectParameterDataRequest skipped
+
+
+def test_render_state_marks_disconnected_when_the_connection_is_lost_mid_session(config):
+    renderer, conn = _mounted_renderer(config, [])
+    conn.recv.side_effect = ConnectionError("connection lost")
+
+    renderer.render_state(_sample_state())  # must not raise
+
+    assert renderer._connected is False
+
+
+# --- set_expression()/set_mouth_open()/set_eye_target()/trigger_gesture() ----
+
+
+def test_set_expression_sends_a_hotkey_trigger_request(config):
+    renderer, conn = _mounted_renderer(
+        config, [{"messageType": "HotkeyTriggerResponse", "data": {}}]
+    )
+
+    renderer.set_expression("big_smile")
+
+    sent_payload = json.loads(conn.send.call_args.args[0])
+    assert sent_payload["messageType"] == "HotkeyTriggerRequest"
+    assert sent_payload["data"]["hotkeyID"] == "big_smile"
+
+
+def test_trigger_gesture_sends_a_hotkey_trigger_request(config):
+    renderer, conn = _mounted_renderer(
+        config, [{"messageType": "HotkeyTriggerResponse", "data": {}}]
+    )
+
+    renderer.trigger_gesture("wave")
+
+    sent_payload = json.loads(conn.send.call_args.args[0])
+    assert sent_payload["messageType"] == "HotkeyTriggerRequest"
+    assert sent_payload["data"]["hotkeyID"] == "wave"
+
+
+def test_set_mouth_open_injects_the_mouth_open_parameter(config):
+    renderer, conn = _mounted_renderer(config, [_INJECT_OK_RESPONSE])
+
+    renderer.set_mouth_open(0.9)
+
+    sent_payload = json.loads(conn.send.call_args.args[0])
+    params = {p["id"]: p["value"] for p in sent_payload["data"]["parameterValues"]}
+    assert params["ParamMouthOpenY"] == 0.9
+
+
+def test_set_eye_target_injects_both_axis_parameters(config):
+    renderer, conn = _mounted_renderer(config, [_INJECT_OK_RESPONSE])
+
+    renderer.set_eye_target(0.4, -0.6)
+
+    sent_payload = json.loads(conn.send.call_args.args[0])
+    params = {p["id"]: p["value"] for p in sent_payload["data"]["parameterValues"]}
+    assert params["ParamEyeBallX"] == 0.4
+    assert params["ParamEyeBallY"] == -0.6
+
+
+# --- unmount() ------------------------------------------------------------------
+
+
+def test_unmount_closes_the_connection_and_clears_connected_state(config):
+    renderer, conn = _mounted_renderer(config, [])
+
+    renderer.unmount()
+
+    conn.close.assert_called_once()
+    assert renderer._connected is False
+
+
+def test_unmount_never_raises_even_if_close_itself_fails(config):
+    renderer, conn = _mounted_renderer(config, [])
+    conn.close.side_effect = RuntimeError("socket already dead")
+
+    renderer.unmount()  # must not raise
+
+    assert renderer._connected is False
+
+
+def test_methods_no_op_again_after_unmount(config):
+    renderer, conn = _mounted_renderer(config, [])
+    renderer.unmount()
+    conn.reset_mock()
+
+    renderer.render_state(_sample_state())
+    renderer.set_expression("smile")
+
+    conn.send.assert_not_called()

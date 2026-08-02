@@ -482,3 +482,95 @@ def test_jarvis_and_minie_particle_density_ranges_do_not_overlap():
     config = PresentationConfig()
     assert config.jarvis_particle_density_max < config.minie_particle_density_min
     assert config.jarvis_smile_intensity_max < config.minie_smile_intensity_min
+
+
+# --- VTube Studio / avatar backend (Sprint 5.8) --------------------------------
+
+
+def test_blank_avatar_backend_raises():
+    config = AppConfig(presentation=PresentationConfig(avatar_backend="  "))
+    with pytest.raises(ConfigError, match="avatar_backend"):
+        config.validate()
+
+
+def test_blank_vtube_studio_host_raises():
+    config = AppConfig(presentation=PresentationConfig(vtube_studio_host=""))
+    with pytest.raises(ConfigError, match="vtube_studio_host"):
+        config.validate()
+
+
+@pytest.mark.parametrize("port", [0, -1, 70000])
+def test_vtube_studio_port_out_of_range_raises(port):
+    config = AppConfig(presentation=PresentationConfig(vtube_studio_port=port))
+    with pytest.raises(ConfigError, match="vtube_studio_port"):
+        config.validate()
+
+
+def test_blank_vtube_studio_plugin_name_raises():
+    config = AppConfig(presentation=PresentationConfig(vtube_studio_plugin_name=" "))
+    with pytest.raises(ConfigError, match="vtube_studio_plugin_name"):
+        config.validate()
+
+
+def test_blank_vtube_studio_plugin_developer_raises():
+    config = AppConfig(presentation=PresentationConfig(vtube_studio_plugin_developer=" "))
+    with pytest.raises(ConfigError, match="vtube_studio_plugin_developer"):
+        config.validate()
+
+
+def test_blank_vtube_studio_auth_token_path_raises():
+    config = AppConfig(presentation=PresentationConfig(vtube_studio_auth_token_path=" "))
+    with pytest.raises(ConfigError, match="vtube_studio_auth_token_path"):
+        config.validate()
+
+
+def test_non_positive_vtube_studio_connection_timeout_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(vtube_studio_connection_timeout_seconds=0.0)
+    )
+    with pytest.raises(ConfigError, match="vtube_studio_connection_timeout_seconds"):
+        config.validate()
+
+
+def test_vtube_studio_parameter_mapping_blank_key_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(vtube_studio_parameter_mapping={" ": "ParamX"})
+    )
+    with pytest.raises(ConfigError, match="vtube_studio_parameter_mapping"):
+        config.validate()
+
+
+def test_vtube_studio_parameter_mapping_blank_value_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(vtube_studio_parameter_mapping={"smile_intensity": " "})
+    )
+    with pytest.raises(ConfigError, match="vtube_studio_parameter_mapping"):
+        config.validate()
+
+
+def test_minie_expression_thresholds_empty_raises():
+    config = AppConfig(presentation=PresentationConfig(minie_expression_thresholds={}))
+    with pytest.raises(ConfigError, match="minie_expression_thresholds"):
+        config.validate()
+
+
+def test_minie_expression_thresholds_missing_zero_floor_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(minie_expression_thresholds={"smile": 0.5})
+    )
+    with pytest.raises(ConfigError, match="minie_expression_thresholds"):
+        config.validate()
+
+
+def test_minie_expression_thresholds_out_of_range_value_raises():
+    config = AppConfig(
+        presentation=PresentationConfig(
+            minie_expression_thresholds={"neutral": 0.0, "bogus": 1.5}
+        )
+    )
+    with pytest.raises(ConfigError, match="minie_expression_thresholds"):
+        config.validate()
+
+
+def test_default_vtube_studio_config_is_valid():
+    AppConfig(presentation=PresentationConfig()).validate()

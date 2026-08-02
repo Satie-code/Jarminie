@@ -31,6 +31,23 @@ def manager(voice_config):
     return persona_manager
 
 
+@pytest.fixture
+def on_switch_calls():
+    return []
+
+
+@pytest.fixture
+def manager_with_on_switch(voice_config, on_switch_calls):
+    persona_manager = PersonaManager(
+        JarvisPersona(voice_config),
+        MiniePersona(voice_config),
+        voice_config,
+        on_switch=lambda old, new: on_switch_calls.append((old, new)),
+    )
+    persona_manager.start()
+    return persona_manager
+
+
 def test_starts_with_jarvis_active_by_default(manager):
     assert manager.active_persona().name == "jarvis"
 
@@ -263,6 +280,60 @@ def test_compose_reply_safely_defaults_emotional_state_to_none(
 
     assert reply == 'Understood. You said: "fix the bug".'
     assert "hello there" not in reply
+
+
+# --- on_switch (Sprint 5.10) --------------------------------------------------
+
+
+def test_on_switch_called_with_old_and_new_names_on_a_real_switch(
+    manager_with_on_switch, on_switch_calls
+):
+    manager_with_on_switch.select("minie", SwitchReason.EXPLICIT_SELECTION)
+    assert on_switch_calls == [("jarvis", "minie")]
+
+
+def test_on_switch_not_called_when_select_is_refused_by_priority(
+    manager_with_on_switch, on_switch_calls
+):
+    manager_with_on_switch.select("minie", SwitchReason.EXPLICIT_SELECTION)
+    on_switch_calls.clear()
+
+    switched = manager_with_on_switch.select("jarvis", SwitchReason.CONTEXT_DETECTION)
+
+    assert switched is False
+    assert on_switch_calls == []
+
+
+def test_on_switch_not_called_when_select_targets_an_unknown_persona(
+    manager_with_on_switch, on_switch_calls
+):
+    switched = manager_with_on_switch.select("nonexistent", SwitchReason.EXPLICIT_SELECTION)
+
+    assert switched is False
+    assert on_switch_calls == []
+
+
+def test_on_switch_called_on_a_real_resume_previous(manager_with_on_switch, on_switch_calls):
+    manager_with_on_switch.select("minie", SwitchReason.EXPLICIT_SELECTION)
+    on_switch_calls.clear()
+
+    manager_with_on_switch.resume_previous()
+
+    assert on_switch_calls == [("minie", "jarvis")]
+
+
+def test_on_switch_not_called_when_resume_previous_has_nothing_to_resume(
+    manager_with_on_switch, on_switch_calls
+):
+    manager_with_on_switch.resume_previous()
+    assert on_switch_calls == []
+
+
+def test_a_manager_with_no_on_switch_configured_still_switches_normally(manager):
+    """The default None on_switch must not break select() itself."""
+    switched = manager.select("minie", SwitchReason.EXPLICIT_SELECTION)
+    assert switched is True
+    assert manager.active_persona().name == "minie"
 
 
 # --- select_from_context() (Sprint 3.12) -------------------------------------

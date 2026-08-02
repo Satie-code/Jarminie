@@ -30,6 +30,7 @@ chroma_data/
 # Local configuration / secrets
 .env
 config/local.*
+config/vtube_studio_token.json
 
 # OS / editor
 .DS_Store

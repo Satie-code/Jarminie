@@ -52,3 +52,18 @@ Send2Trash>=1.8
 # sprint is its first direct caller, per this project's own "explicit
 # declaration for anything directly imported" convention.
 requests>=2.31
+
+# Sprint 5.8 — Minie Renderer & Avatar Renderer Interface. WebSocket
+# transport for presentation/vtube_studio_renderer.py's own hand-rolled
+# client against VTube Studio's documented local Plugin API — a plain
+# transport library, not a VTube-Studio-specific wrapper, per the
+# stop-and-ask decision made with the user before this sprint's own
+# implementation began (see backlog/technical_debt.md). Already an
+# indirect dependency of this project (pulled in transitively) and
+# confirmed present in this environment; declared here explicitly since
+# this sprint is its first direct caller. Uses websockets.sync.client
+# (the synchronous API) — this codebase has no asyncio event loop
+# running anywhere, and Renderer.render_state()'s own "cheap,
+# non-blocking, called synchronously" contract (Sprint 5.6) has no
+# use for one.
+websockets>=12.0

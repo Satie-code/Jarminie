@@ -20,6 +20,7 @@ from emotion.state_manager import EmotionalStateManager
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from presentation.gesture_engine import GestureEvent, GestureTrigger
 from presentation.presentation_controller import PresentationController
 from presentation.presentation_state import PresentationState
 from voice.quiet_mode import OperatingMode
@@ -61,6 +62,30 @@ class _FakeRenderer:
         self._call_log.append((self.name, "render_state"))
         if "render_state" in self._raise_on:
             raise RuntimeError(f"{self.name}.render_state() exploded")
+
+    def trigger_gesture(self, gesture_id: str) -> None:
+        self.calls.append("trigger_gesture")
+        self._call_log.append((self.name, "trigger_gesture"))
+        if "trigger_gesture" in self._raise_on:
+            raise RuntimeError(f"{self.name}.trigger_gesture() exploded")
+
+
+class _FakeGestureEngine:
+    """Configurable stand-in for GestureEngine — records every
+    maybe_roll_ambient_gesture() call's own arguments and returns
+    whatever result was configured (a GestureEvent | None), so refresh()'s
+    own dispatch-when-non-None behavior can be tested deterministically
+    without depending on real randomness/timing."""
+
+    def __init__(self, result: GestureEvent | None = None) -> None:
+        self.result = result
+        self.calls: list[tuple[float, str]] = []
+
+    def maybe_roll_ambient_gesture(
+        self, gesture_probability: float, persona_name: str
+    ) -> GestureEvent | None:
+        self.calls.append((gesture_probability, persona_name))
+        return self.result
 
 
 class _FakeComputer:
@@ -113,6 +138,7 @@ def _make_controller(
     quiet_mode=None,
     state_computers=None,
     renderers=None,
+    gesture_engine=None,
 ) -> PresentationController:
     return PresentationController(
         persona_manager,
@@ -120,6 +146,7 @@ def _make_controller(
         quiet_mode if quiet_mode is not None else _FakeQuietMode(),
         state_computers if state_computers is not None else {"jarvis": _FakeComputer()},
         renderers if renderers is not None else {},
+        gesture_engine if gesture_engine is not None else _FakeGestureEngine(),
     )
 
 
@@ -331,6 +358,215 @@ def test_refresh_warns_and_skips_when_no_computer_bound_for_active_persona(
     controller.refresh()
 
     assert "render_state" not in renderer.calls
+
+
+# --- last_state_for()/apply_state() (Sprint 5.10) -----------------------------
+
+
+def test_last_state_for_is_none_before_any_refresh(persona_manager, emotional_state_manager):
+    controller = _make_controller(persona_manager, emotional_state_manager)
+    assert controller.last_state_for("jarvis") is None
+
+
+def test_last_state_for_returns_the_most_recently_computed_state(
+    persona_manager, emotional_state_manager
+):
+    state = _sample_state("jarvis")
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer(result=state)},
+        renderers={"jarvis": _FakeRenderer("jarvis")},
+    )
+    controller.start()
+
+    controller.refresh()
+
+    assert controller.last_state_for("jarvis") is state
+
+
+def test_last_state_for_is_still_none_when_refresh_never_ran_for_that_persona(
+    persona_manager, emotional_state_manager
+):
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer(result=_sample_state("jarvis"))},
+        renderers={"jarvis": _FakeRenderer("jarvis")},
+    )
+    controller.start()
+    controller.refresh()
+
+    assert controller.last_state_for("minie") is None
+
+
+def test_apply_state_renders_through_the_mounted_renderer(
+    persona_manager, emotional_state_manager
+):
+    renderer = _FakeRenderer("jarvis")
+    controller = _make_controller(
+        persona_manager, emotional_state_manager, renderers={"jarvis": renderer}
+    )
+    controller.start()
+    state = _sample_state("jarvis")
+
+    controller.apply_state(state)
+
+    assert renderer.calls == ["mount", "render_state"]
+
+
+def test_apply_state_is_a_noop_when_nothing_is_mounted(persona_manager, emotional_state_manager):
+    controller = _make_controller(persona_manager, emotional_state_manager, renderers={})
+    controller.apply_state(_sample_state("jarvis"))  # must not raise
+
+
+def test_apply_state_never_raises_when_the_renderer_raises(
+    persona_manager, emotional_state_manager
+):
+    broken_renderer = _FakeRenderer("jarvis", raise_on={"render_state"})
+    controller = _make_controller(
+        persona_manager, emotional_state_manager, renderers={"jarvis": broken_renderer}
+    )
+    controller.start()
+
+    controller.apply_state(_sample_state("jarvis"))  # must not raise
+
+
+# --- dispatch_gesture() (Sprint 5.9) ------------------------------------------
+
+
+def test_dispatch_gesture_calls_trigger_gesture_on_the_mounted_renderer(
+    persona_manager, emotional_state_manager
+):
+    renderer = _FakeRenderer("jarvis")
+    controller = _make_controller(
+        persona_manager, emotional_state_manager, renderers={"jarvis": renderer}
+    )
+    controller.start()
+    event = GestureEvent(
+        trigger=GestureTrigger.NOTIFICATION,
+        gesture_id="glance",
+        persona_name="jarvis",
+        triggered_at=datetime.now(UTC),
+    )
+
+    controller.dispatch_gesture(event)
+
+    assert "trigger_gesture" in renderer.calls
+
+
+def test_dispatch_gesture_is_a_noop_when_nothing_is_mounted(
+    persona_manager, emotional_state_manager
+):
+    controller = _make_controller(persona_manager, emotional_state_manager, renderers={})
+    event = GestureEvent(
+        trigger=GestureTrigger.NOTIFICATION,
+        gesture_id="glance",
+        persona_name="jarvis",
+        triggered_at=datetime.now(UTC),
+    )
+
+    controller.dispatch_gesture(event)  # must not raise
+
+
+def test_dispatch_gesture_never_raises_when_the_renderer_raises(
+    persona_manager, emotional_state_manager
+):
+    broken_renderer = _FakeRenderer("jarvis", raise_on={"trigger_gesture"})
+    controller = _make_controller(
+        persona_manager, emotional_state_manager, renderers={"jarvis": broken_renderer}
+    )
+    controller.start()
+    event = GestureEvent(
+        trigger=GestureTrigger.NOTIFICATION,
+        gesture_id="glance",
+        persona_name="jarvis",
+        triggered_at=datetime.now(UTC),
+    )
+
+    controller.dispatch_gesture(event)  # must not raise
+
+
+# --- refresh() ambient-gesture rolling (Sprint 5.9) ---------------------------
+
+
+def test_refresh_rolls_an_ambient_gesture_using_the_computed_states_own_values(
+    persona_manager, emotional_state_manager
+):
+    state = _sample_state("jarvis")
+    state.gesture_probability = 0.42
+    gesture_engine = _FakeGestureEngine()
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer(result=state)},
+        renderers={"jarvis": _FakeRenderer("jarvis")},
+        gesture_engine=gesture_engine,
+    )
+    controller.start()
+
+    controller.refresh()
+
+    assert gesture_engine.calls == [(0.42, "jarvis")]
+
+
+def test_refresh_dispatches_a_non_none_ambient_gesture(persona_manager, emotional_state_manager):
+    renderer = _FakeRenderer("jarvis")
+    event = GestureEvent(
+        trigger=GestureTrigger.AMBIENT_IDLE,
+        gesture_id="idle_blink",
+        persona_name="jarvis",
+        triggered_at=datetime.now(UTC),
+    )
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer()},
+        renderers={"jarvis": renderer},
+        gesture_engine=_FakeGestureEngine(result=event),
+    )
+    controller.start()
+
+    controller.refresh()
+
+    assert renderer.calls == ["mount", "render_state", "trigger_gesture"]
+
+
+def test_refresh_does_not_dispatch_when_no_ambient_gesture_fires(
+    persona_manager, emotional_state_manager
+):
+    renderer = _FakeRenderer("jarvis")
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer()},
+        renderers={"jarvis": renderer},
+        gesture_engine=_FakeGestureEngine(result=None),
+    )
+    controller.start()
+
+    controller.refresh()
+
+    assert renderer.calls == ["mount", "render_state"]
+
+
+def test_refresh_never_raises_when_the_gesture_engine_raises(
+    persona_manager, emotional_state_manager
+):
+    class _BrokenGestureEngine:
+        def maybe_roll_ambient_gesture(self, gesture_probability, persona_name):
+            raise RuntimeError("gesture engine exploded")
+
+    controller = _make_controller(
+        persona_manager,
+        emotional_state_manager,
+        state_computers={"jarvis": _FakeComputer()},
+        renderers={"jarvis": _FakeRenderer("jarvis")},
+        gesture_engine=_BrokenGestureEngine(),
+    )
+    controller.start()
+
+    controller.refresh()  # must not raise
 
 
 # --- mounted renderer vs. active persona (Architecture Notes) ----------------

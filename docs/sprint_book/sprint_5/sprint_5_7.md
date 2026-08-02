@@ -154,3 +154,73 @@ See Potential Risks above.
 
 - Real per-phase (`LISTENING`/`THINKING`/`SPEAKING`) ring states — named as Sprint 5.14's job, not built here.
 - If profiling at Sprint 5.16 (Integration Testing & Level Freeze) shows `QPainter`-based rendering is genuinely too slow on the real target machine, revisit the OpenGL option the rendering-decision explicitly left open ("OpenGL only where profiling shows it is necessary for performance") — not assumed necessary now.
+
+## Sprint Completion Report (2026-08-02)
+
+Implemented as specified, authorized directly ("continue with sprint 5.7") right after Sprint 5.6 closed in the same session.
+
+### Summary
+
+`presentation/widgets/holographic_sphere_widget.py`'s `HolographicSphereWidget` and `presentation/widgets/segmented_ring_widget.py`'s `SegmentedRingWidget` (plus its own `RingState` enum, the exact five brief-named states) are both real, complete `QPainter`-based widgets — no QML, no `QGraphicsView`/`QGraphicsScene`. Each keeps its own continuously-advancing animation *phase* strictly private, moved only by its own `_on_tick()`; `set_target()`/`set_ring_state()` (called from `render_state()`) set what to animate *toward*, never an instant jump. `presentation/jarvis_renderer.py`'s `JarvisRenderer` composes both plus an empty placeholder dashboard-panel container (Sprint 5.12's future job) behind a single shared `QTimer` (`PresentationConfig.jarvis_animation_tick_ms`) that calls both widgets' `_on_tick()` every interval — one timer, not two, per this sprint's own Potential Risks resource-cost concern. `mount()`/`unmount()`/`widget()` all funnel through one lazy `_ensure_widgets_built()` so the widget hierarchy is constructed exactly once, on whichever of `mount()`/`widget()` is called first — never at `__init__` time, since `JarvisRenderer` is constructed at `main.py`'s composition-root time, before a real `QApplication` exists.
+
+`_derive_ring_state()` is this sprint's own honestly-narrow mapping, exactly as its own Architecture Notes predicted before implementation: `avatar_focus == "idle"` maps to `RingState.IDLE`, everything else collapses to `RingState.PROCESSING` — `PresentationState` alone has no way to distinguish Listening/Thinking/Speaking, and this sprint does not invent a signal to fake it. The widget-level `RingState` handling itself is complete for all five states (verified: `SegmentedRingWidget.set_ring_state()` accepts and correctly drives lit-fraction/rotation-speed for every value), so Sprint 5.14's real turn-phase wiring only ever needs to change `_derive_ring_state()`'s own body, never the widget.
+
+One real implementation-time decision, not spelled out by the spec, was resolved and is worth naming explicitly: **widget construction ordering relative to `mount()` vs. `widget()`.** The spec's Expected Interfaces says `mount()` "constructs the widget hierarchy (lazily, not at `__init__` time)," which read literally would mean `widget()` — the accessor Sprint 5.14's `MainWindow` needs to embed this renderer into a fixed UI slot at startup — might have nothing to return if called before `mount()`. Since a real embedding sequence plausibly calls `widget()` first (build the UI once) and `mount()`/`unmount()` later (toggle whichever persona is active), both methods were routed through the same one-time `_ensure_widgets_built()` lazy-build helper, so neither has to be called first. Verified directly: a dedicated test calls `widget()` before `mount()` and confirms it returns a real, usable container.
+
+### Files Created
+
+- `presentation/jarvis_renderer.py`
+- `presentation/widgets/__init__.py`
+- `presentation/widgets/holographic_sphere_widget.py`
+- `presentation/widgets/segmented_ring_widget.py`
+- `tests/unit/presentation/test_jarvis_renderer.py`
+
+**Not created**: `tests/unit/presentation/__init__.py` — see Sprint 5.5/5.6's own identical, documented-convention precedent.
+
+### Files Modified
+
+- `config/schema.py` — `PresentationConfig.jarvis_ring_segment_count`/`jarvis_animation_tick_ms` fields + validation. **Not explicitly named as a file to modify beyond the sprint's own Expected Classes text** ("PresentationConfig... jarvis_ring_segment_count, default a real, config-driven value") — a real, necessary addition following directly from that text, same category as Sprint 5.5's own original `PresentationConfig` work.
+- `config/defaults.yaml` — matching new field defaults.
+
+### Tests Added
+
+- `tests/unit/presentation/test_jarvis_renderer.py` — 30 tests: `mount()`/`unmount()`/`widget()` lifecycle (idempotency in both directions, out-of-order safety, widget-hierarchy reuse across an unmount/remount cycle); `render_state()` correctly sets both widgets' own targets and — verified directly via a mocked `.update()` — never triggers a synchronous repaint itself; the animation timer genuinely advances both widgets' own phase across a bounded real-timer wait, and genuinely stops advancing after `unmount()`; `_derive_ring_state()`'s both currently-real cases (`idle`, and `user`/`task` both collapsing to `PROCESSING`); a mechanical, file-content-scanning check that no `.qml` file or `QQuick*` import exists anywhere under `presentation/`; direct, isolated widget-level tests (`HolographicSphereWidget`/`SegmentedRingWidget` paint without raising via a real `.grab()` render, phase wrapping stays bounded within `[0, 2*pi)`, `set_ring_state()` sets fields correctly, `PROCESSING` lights strictly more segments than `IDLE`, a degenerate 0×0-sized ring widget's `paintEvent()` doesn't crash).
+
+### Documentation Updated
+
+- `presentation/jarvis_renderer.py`'s module docstring (the ring-state granularity gap named explicitly, pointing at Sprint 5.14; the widget-construction-ordering resolution above).
+- `presentation/widgets/holographic_sphere_widget.py`'s/`segmented_ring_widget.py`'s own docstrings (the target-vs-animated-phase distinction, stated explicitly in both).
+- `config/schema.py`'s `PresentationConfig` docstring (new fields).
+- This Sprint Completion Report.
+- `docs/STATUS.md`/`docs/sprint_book/INDEX.md` updated (see below).
+
+### Acceptance Criteria Checklist
+
+- ✔ `mount()`/`unmount()` are idempotent and safe to call multiple times or out of order — verified directly (double-mount, double-unmount, unmount-before-mount, remount-after-unmount all covered).
+- ✔ `render_state()` never directly triggers a synchronous repaint — verified by mocking `.update()` on both child widgets and asserting zero calls.
+- ✔ The animation timer is genuinely stopped on `unmount()` — verified by a bounded real-timer wait (`qtbot.wait()`) confirming the phase does not advance afterward, not merely by checking `.isActive()`.
+- ✔ No QML/`QQuick*` import exists anywhere under `presentation/` — verified mechanically (a real filesystem scan + file-content grep), not merely asserted in prose.
+- ✔ `ruff check .` clean; full existing suite unaffected.
+
+### Risks
+
+- Same "`QPainter`-based custom animation has no automated way to verify visual correctness" and "timer-driven repainting has a real performance/resource cost" risks named in the spec — the former is explicitly deferred to Sprint 5.16's own manual verification; the latter is mitigated as designed (one shared timer, a config-driven modest tick rate, genuinely stopped on `unmount()` — all three verified directly, not just documented).
+- The exact pulse-range/rotation-multiplier/lit-fraction numeric constants (`_MIN_PULSE_SCALE`/`_MAX_PULSE_SCALE`, `_LIT_FRACTION`, `_ROTATION_MULTIPLIER`, `_BASE_PHASE_STEP`, `_BASE_ROTATION_STEP`) are real, disclosed, unvalidated first-pass content choices — same category as every other Level 5 visual/config default so far, correctable without a code change where they live in `PresentationConfig`, or with a small, localized code change for the ones that don't (a real, disclosed scope choice: only segment count/tick rate were made config fields this sprint, not every animation constant — see Recommendations below).
+- Not embedded into `MainWindow` yet, and `trigger_gesture()` deliberately does not exist yet — both explicitly named as later sprints' own jobs (5.14, 5.9 respectively), not silently deferred.
+
+### Technical Debt
+
+None introduced. The `PresentationConfig` additions were made within this sprint, not deferred or found later.
+
+### Recommendations
+
+- Whether the remaining animation constants (`_MIN_PULSE_SCALE`/`_MAX_PULSE_SCALE`/`_LIT_FRACTION`/`_ROTATION_MULTIPLIER`/`_BASE_PHASE_STEP`/`_BASE_ROTATION_STEP`) should also move into `PresentationConfig` is a real open question — deferred here since none of them are tunable per-persona or per-deployment in a way this sprint's own two config additions (segment count, tick rate) already are; revisit if Sprint 5.16's manual visual verification finds a specific one needs frequent tuning.
+- Once Sprint 5.14 wires a real `CommunicationPipeline` turn-phase signal through, `_derive_ring_state()` is the only function that needs to change — confirmed structurally sound by this sprint's own widget-level `RingState` test coverage already exercising all five states.
+
+### Verification
+
+Full suite: 1378 passing + 1 pre-existing failure (the same already-established real-Ollama-output nondeterminism flake from Sprint 5.2/5.3/5.5/5.6's own verification, in a file this sprint never touches) + 1 skipped + 1 deselected. `ruff check .` clean across the whole repository. A direct, non-mocked smoke script (a real `QApplication`, a real `JarvisRenderer` against a real `PresentationConfig`) confirmed `widget()`/`mount()`/`render_state()`/`_on_tick()`/`unmount()`/remount all behave as designed end-to-end, including the target-vs-phase separation (calling `_on_tick()` twice measurably advances both widgets' own private phase).
+
+**No git commit made** — per this project's own "only commit when explicitly asked" rule, changes left in the working tree; the user has not yet been asked whether to commit.
+
+**Sprint 5.8 (Minie Renderer & Avatar Renderer Interface) is next.**

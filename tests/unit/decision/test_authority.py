@@ -168,6 +168,57 @@ def test_emotional_support_never_actually_selects_wellness(evaluator):
     assert "Wellness Engine" in trace.reasoning_text
 
 
+# --- EMOTION_SUPPORT routing (Sprint 5.4) --------------------------------------
+
+
+def test_emotional_support_at_recommend_authority_selects_emotion_support(evaluator):
+    """Reachable via CRITICAL_EMERGENCY priority with the default empty
+    procedure whitelist — that combination already resolves to RECOMMEND
+    (never EMERGENCY_ASSIST) for any intent category, the same mechanism
+    test_non_empty_whitelist_without_matching_procedure_still_recommends()
+    exercises for IntentCategory.EMERGENCY above."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.EMOTIONAL_SUPPORT),
+        make_context_analysis(),
+        [],
+        PriorityLevel.CRITICAL_EMERGENCY,
+    )
+
+    assert trace.authority_level is AuthorityLevel.RECOMMEND
+    assert trace.selected_engine is EngineSelection.EMOTION_SUPPORT
+    assert "emotional support" in trace.reasoning_text.lower()
+
+
+def test_emotional_support_at_inform_authority_does_not_select_emotion_support(evaluator):
+    """Negative case: the same EMOTIONAL_SUPPORT category at ordinary
+    (non-emergency) priority stays at INFORM authority and must NOT
+    route to EMOTION_SUPPORT."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.EMOTIONAL_SUPPORT),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+
+    assert trace.authority_level is AuthorityLevel.INFORM
+    assert trace.selected_engine is not EngineSelection.EMOTION_SUPPORT
+    assert trace.selected_engine is EngineSelection.CONVERSATIONAL_RESPONSE
+
+
+def test_emotional_support_with_approved_procedure_selects_emotion_support_at_emergency_assist():
+    """authority_level != INFORM covers EMERGENCY_ASSIST too, not just
+    RECOMMEND — proven directly rather than assumed from the RECOMMEND
+    case alone."""
+    evaluator = AuthorityEvaluator(approved_emergency_procedures=frozenset({"panic"}))
+    intent = make_intent(IntentCategory.EMOTIONAL_SUPPORT)
+    context = make_context_analysis(primary_topic="panic")
+
+    trace = evaluator.evaluate(intent, context, [], PriorityLevel.CRITICAL_EMERGENCY)
+
+    assert trace.authority_level is AuthorityLevel.EMERGENCY_ASSIST
+    assert trace.selected_engine is EngineSelection.EMOTION_SUPPORT
+
+
 def test_informational_intent_selects_inform_only(evaluator):
     trace = evaluator.evaluate(
         make_intent(IntentCategory.INFORMATIONAL),

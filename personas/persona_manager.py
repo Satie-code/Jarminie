@@ -42,6 +42,7 @@ from config.schema import VoiceConfig
 from core.logging_setup import get_logger
 from decision.authority import DecisionTrace
 from decision.context_analyzer import ContextAnalysis
+from emotion.state_manager import EmotionalState
 from personas.base import Persona
 from voice.context_manager import ConversationContext
 
@@ -144,15 +145,21 @@ class PersonaManager:
         transcript: str,
         context: ConversationContext,
         decision_trace: DecisionTrace | None,
+        emotional_state: EmotionalState | None = None,
     ) -> str:
         """Compose a reply through the active persona, catching any
         failure so a bug in Persona.compose_reply() can never abort a
         live conversation turn (Fail Gracefully Rule) — see
         docs/sprint_book/sprint_2_13.md scenario (e). The caller
         (CommunicationPipeline, Sprint 2.12/3.12) should call this
-        instead of active_persona().compose_reply() directly."""
+        instead of active_persona().compose_reply() directly.
+        emotional_state (Sprint 5.4) is passed straight through unchanged
+        — this method has no opinion on tone, only on failure isolation;
+        no real caller supplies anything but None until Sprint 5.14."""
         try:
-            return self.active_persona().compose_reply(transcript, context, decision_trace)
+            return self.active_persona().compose_reply(
+                transcript, context, decision_trace, emotional_state
+            )
         except Exception:
             logger.exception("Persona.compose_reply() raised; using a safe fallback reply.")
             return _FALLBACK_REPLY

@@ -153,3 +153,81 @@ See Potential Risks above.
 
 - A richer tone-variant template library (more than the small starting set this sprint ships) is real future content work, not an architecture change — flagged for whoever next touches persona phrasing.
 - Whether `WELLNESS`-shaped replies (Part B's own future job) should reuse this sprint's `ToneVariant` mechanism is a real open question for whichever Part B sprint first needs it — not decided here.
+
+## Sprint Completion Report (2026-08-02)
+
+Implemented as specified, authorized directly ("continue with sprint 5.4") right after Sprint 5.3 closed in the same session.
+
+### Summary
+
+`personas/base.py`'s `Persona.compose_reply()` gains a new optional `emotional_state: EmotionalState | None = None` parameter — an additive-in-effect, breaking-in-signature change, the identical shape Sprint 3.12's `decision_trace` parameter already used — plus a new shared `ToneVariant` enum (`NEUTRAL`/`CONCISE`/`ENCOURAGING`). `personas/jarvis.py`/`personas/minie.py` each gain a private `_select_tone_variant()` picking among a small, fixed set of already-existing phrasing templates (`_ACKNOWLEDGEMENT_TEMPLATES`) — a warmer `ENCOURAGING` opening when mood/comfort reads low, a shorter `CONCISE` one when stress reads high, `NEUTRAL` (byte-identical to every pre-Sprint-5.4 reply) whenever `emotional_state` is `None` or unremarkable. Minie's own thresholds lean into `ENCOURAGING` more readily than Jarvis's, matching her "casual, comfort, wellness" identity as this sprint's primary, not sole, beneficiary. `PersonaManager.compose_reply_safely()` passes `emotional_state` straight through unchanged. `decision/authority.py`'s `_determine_engine()` gained a real, narrow `EMOTION_SUPPORT` branch and its own signature grew a third `authority_level` parameter to read it.
+
+**A real gap beyond the sprint's own stated Files to Modify was found and fixed**: this sprint's own Expected Functions named plain module-level threshold constants for `_select_tone_variant()`, but `03_Engineering_Standards.md`'s own "no hardcoded... thresholds" rule — and `emotion/detection_engine.py`'s own established precedent, a pure function (`_match_lexical_markers(text, config)`) reading its tunable numbers from an injected `EmotionConfig` rather than a literal — both require these to be config-driven instead. `config/schema.py`'s `EmotionConfig` gained `tone_high_stress_threshold` (shared) and `{jarvis,minie}_tone_low_mood_threshold`/`{jarvis,minie}_tone_low_comfort_threshold` (per-persona), all validated against `_EMOTIONAL_STATE_DIMENSION_RANGES`, with defaults matching this sprint's own originally-specified numbers exactly — so real behavior is unchanged, only where the numbers live. `JarvisPersona`/`MiniePersona` each gained an optional `emotion_config: EmotionConfig | None = None` constructor parameter, defaulting internally to `EmotionConfig()` when omitted — additive, so every existing call site (both harness `conftest.py` files, every pre-Sprint-5.4 test) continues to work unmodified; `main.py` was updated to pass the real `config.emotion` through explicitly rather than rely on the silent default.
+
+Two spec ambiguities were resolved explicitly, not guessed silently:
+
+1. **Reachability of `EMOTION_SUPPORT` without widening `_determine_authority()`.** The spec's own Expected Functions names the gating condition as `authority_level != AuthorityLevel.INFORM`, but `IntentCategory.EMOTIONAL_SUPPORT` is not a member of `_RECOMMEND_INTENT_CATEGORIES`, so no ordinary-priority path produces a non-`INFORM` authority for it. Resolved in favor of leaving `_determine_authority()`/`_RECOMMEND_INTENT_CATEGORIES` untouched (not named in this sprint's own Files to Modify) — the branch is genuinely reachable only via the same `CRITICAL_EMERGENCY`-priority-with-no-matching-procedure path that already produces `RECOMMEND` for any category (the identical mechanism the existing `EMERGENCY_ASSIST`-whitelist tests already exercise), proven directly with three new dedicated tests rather than assumed. This keeps `test_other_categories_are_inform`/`test_emotional_support_never_actually_selects_wellness`/`test_selected_engine_is_always_conversational_or_inform_only` — three pre-existing tests that explicitly assert `EMOTIONAL_SUPPORT` stays `INFORM`/`CONVERSATIONAL_RESPONSE` at ordinary priority — passing completely unmodified.
+2. **`_select_tone_variant()`'s "module-private" framing vs. needing config.** The spec calls it module-private and names it as if bound to the persona class (`JarvisPersona._select_tone_variant(...)`). Once thresholds moved to `EmotionConfig` (point above), a pure module-level function taking `config` as an explicit second parameter — mirroring `_match_lexical_markers(text, config)` exactly — was chosen over an instance method reading `self._emotion_config` internally, keeping it directly unit-testable without constructing a full persona, the same testability the spec's own Testing Checklist asked for.
+
+`decision/authority.py`'s module docstring needed more than the one-line "reserved → wired" update the Documentation Checklist named: the pre-existing "EMERGENCY_ASSIST... `_determine_engine()` below always returns CONVERSATIONAL_RESPONSE/INFORM_ONLY regardless of authority_level" paragraph became literally false once `_determine_engine()` gained a real `authority_level`-reading branch (for an unrelated, non-emergency reason) — corrected to carve out the exception rather than leave a self-contradicting docstring. The "selected_engine is CONVERSATIONAL_RESPONSE, INFORM_ONLY, DEVICE_CONTROL, or WORKFLOW... never one of the four still-reserved values" paragraph (already stale since Sprint 4.18 added SCHEDULER/INTERNET_AGENT, pre-dating this sprint) was also corrected specifically where this sprint's own change made its `EMOTIONAL_SUPPORT`-belongs-to-Wellness example newly inaccurate, without attempting a full unrelated rewrite of that paragraph's other pre-existing drift.
+
+### Files Modified
+
+- `personas/base.py` — `ToneVariant` enum; `Persona.compose_reply()` signature + docstring.
+- `personas/jarvis.py` — `_ACKNOWLEDGEMENT_TEMPLATES` (three variants), thresholds removed in favor of `EmotionConfig` reads, `_select_tone_variant()`, constructor gains `emotion_config`, `compose_reply()` wired.
+- `personas/minie.py` — same shape as `personas/jarvis.py`, warmer-leaning thresholds.
+- `personas/persona_manager.py` — `compose_reply_safely()` gains `emotional_state` passthrough.
+- `decision/authority.py` — `_determine_engine()` signature + `EMOTION_SUPPORT` branch; `evaluate()`'s call site; `_build_reasoning()` new branch; module docstring updates (Summary above).
+- `config/schema.py` — `EmotionConfig.tone_high_stress_threshold`/`{jarvis,minie}_tone_low_mood_threshold`/`{jarvis,minie}_tone_low_comfort_threshold` + validation. **Not named in the sprint file's own Files to Modify** — a real, necessary addition (Summary above).
+- `config/defaults.yaml` — matching new field defaults.
+- `main.py` — `JarvisPersona`/`MiniePersona` construction passes `config.emotion` explicitly. **Not named in the sprint file's own Files to Modify** — see Summary above.
+- `tests/unit/personas/test_jarvis.py`, `tests/unit/personas/test_minie.py`, `tests/unit/personas/test_persona_manager.py`, `tests/unit/decision/test_authority.py` — new coverage (see Tests Added).
+- `tests/unit/config/test_schema.py` — new `EmotionConfig` threshold-validation coverage. **Not named in the sprint file's own Files to Modify** — follows directly from the `config/schema.py` addition above.
+
+### Tests Added
+
+- `tests/unit/personas/test_jarvis.py` — 11 new tests: `_select_tone_variant()` across `None`/neutral/high-stress/low-mood/low-comfort/both-present-prefers-CONCISE fixtures, config-driven-not-hardcoded proof, `emotional_state=None` regression-matches-pre-5.4 output, high-stress/low-comfort produce the exact expected reply text, tone variant composes correctly alongside an authority prefix, never-raises with a state and no trace.
+- `tests/unit/personas/test_minie.py` — 13 new tests: the same shape as `test_jarvis.py` plus Minie-leans-into-`ENCOURAGING`-more-readily-than-Jarvis (direct cross-persona comparison) and a full adversarial sweep (every `AuthorityLevel` × five representative `EmotionalState`s × both personas × trace-or-no-trace) proving `compose_reply()` never raises.
+- `tests/unit/personas/test_persona_manager.py` — 2 new tests: `compose_reply_safely()` genuinely forwards `emotional_state` (not silently dropped, mirroring the existing `decision_trace` forwarding proof) and defaults it to `None`.
+- `tests/unit/decision/test_authority.py` — 3 new tests: `EMOTIONAL_SUPPORT` at `RECOMMEND` authority (via `CRITICAL_EMERGENCY` priority, no matching procedure) selects `EMOTION_SUPPORT`; the negative case at `INFORM` authority does not; `EMOTION_SUPPORT` is also reachable at `EMERGENCY_ASSIST` authority (an approved procedure), proving the gate is genuinely `!= INFORM`, not just `== RECOMMEND`.
+- `tests/unit/config/test_schema.py` — 5 new tests: each new threshold field's out-of-range case raises with the field name in the message (parametrized across both personas for mood/comfort), plus a defaults-are-valid sanity check.
+
+### Documentation Updated
+
+- `personas/base.py`'s `Persona`/module docstrings (new parameter, "adaptation, not generation" boundary).
+- `personas/jarvis.py`/`personas/minie.py`'s module docstrings.
+- `decision/authority.py`'s module docstring (`EngineSelection` table, new EMOTION_SUPPORT routing paragraph, two corrected stale paragraphs — see Summary above).
+- `config/schema.py`'s `EmotionConfig` docstring.
+- This Sprint Completion Report.
+- `docs/STATUS.md`/`docs/sprint_book/INDEX.md` updated (see below).
+
+### Acceptance Criteria Checklist
+
+- ✔ `compose_reply()` never raises regardless of `emotional_state` being `None` or populated — verified directly via a parametrized adversarial sweep, not just inferred.
+- ✔ A constructed `EmotionalState` fixture at each of several distinct configurations produces observably different tone-variant selection in both `JarvisPersona` and `MiniePersona`.
+- ✔ `EMOTION_SUPPORT` is reachable from a real `EMOTIONAL_SUPPORT`-category `Intent` at `RECOMMEND` authority or above, and only then — both directions proven.
+- ✔ No code path introduces a first-person emotional claim or a flat "you are X" assertion — every new template string spot-checked directly (`_ACKNOWLEDGEMENT_TEMPLATES` in both personas), none exists.
+- ✔ `ruff check .` clean; full existing suite passes with the new optional parameter in place.
+
+### Risks
+
+- Same "small, fixed template set risks repetitiveness" and "presumptuous tone variant" risks named in the spec — unchanged, mitigated the same way (conservative thresholds, `EmotionalState`'s own gradual-evolution design upstream).
+- `EMOTION_SUPPORT`'s narrow real-pipeline reachability (only via the `CRITICAL_EMERGENCY`-priority path, per Engineering Decision 1 above) means the engine-selection half of this sprint is largely symbolic until either a future sprint widens `_RECOMMEND_INTENT_CATEGORIES` or `PriorityQueueManager.classify()` gains a richer signal — the tone-adaptation half (this sprint's actual user-facing deliverable) is fully real and unconditional regardless, so this doesn't block anything downstream.
+- No live caller of `emotional_state` yet beyond direct unit-test construction — Sprint 5.14's job, same precedent as 5.1–5.3.
+
+### Technical Debt
+
+None introduced. The `EmotionConfig`/`main.py` gaps were found and fixed within this sprint, not deferred.
+
+### Recommendations
+
+- Once Sprint 5.14 wires a live `EmotionalStateManager` caller, sanity-check the shipped tone thresholds against real conversation sessions before considering them tuned (same "real usage before tuning further" recommendation Sprints 5.1–5.3 already made for their own first-pass numbers).
+- Whether `_RECOMMEND_INTENT_CATEGORIES` should eventually include `EMOTIONAL_SUPPORT` (making `EMOTION_SUPPORT` reachable from ordinary conversational distress, not just `CRITICAL_EMERGENCY`-priority) is a real, deliberately-deferred design question — flagged for whoever next revisits Engine Selection routing, not decided here per this sprint's own narrow-and-additive scope.
+
+### Verification
+
+Full suite: 1236 passing + 2 pre-existing failures (both individually confirmed unrelated to this sprint — `test_full_level3_acceptance_scripted_conversation` is the same already-established host-load timing flake documented since Sprint 4.6, reconfirmed passing standalone this session; `test_context_analyzer_extracts_a_nonempty_topic_for_real_input` is the same real-Ollama-output nondeterminism flake from Sprint 5.2/5.3's own verification, in a file this sprint never touches) + 1 skipped + 1 deselected. `ruff check .` clean across the whole repository. A real, non-mocked config-load smoke test (`ConfigLoader().load()`) confirmed the new `EmotionConfig` threshold fields genuinely load end-to-end with their shipped defaults.
+
+**No git commit made** — per this project's own "only commit when explicitly asked" rule, changes left in the working tree; the user has not yet been asked whether to commit.
+
+**Sprint 5.5 (Presentation State Engine) is next.**

@@ -4,9 +4,12 @@ Uses real JarvisPersona/MiniePersona instances (both are simple, hardware-
 free value-and-template objects — no need for fakes) throughout.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from config.schema import VoiceConfig
+from emotion.state_manager import EmotionalState
 from memory.models import MemoryRecord, MemoryType
 from memory.retrieval_engine import RetrievedMemory
 from personas.jarvis import JarvisPersona
@@ -225,7 +228,7 @@ def test_compose_reply_safely_falls_back_when_the_persona_raises(
         name = "jarvis"
         voice_id = "p340"
 
-        def compose_reply(self, transcript, context, decision_trace):
+        def compose_reply(self, transcript, context, decision_trace, emotional_state=None):
             raise RuntimeError("persona logic exploded")
 
         def describe(self):
@@ -237,6 +240,28 @@ def test_compose_reply_safely_falls_back_when_the_persona_raises(
     reply = manager.compose_reply_safely("hello there", context, None)
 
     assert reply  # a non-empty fallback, not a raised exception
+
+
+def test_compose_reply_safely_forwards_emotional_state(manager, conversation_context_factory):
+    """Sprint 5.4: compose_reply_safely() must actually pass
+    emotional_state through to the active persona, not silently drop it
+    — the same forwarding proof already established for decision_trace."""
+    context = conversation_context_factory()
+    high_stress = replace(EmotionalState(), stress=90.0)
+
+    reply = manager.compose_reply_safely("fix the bug", context, None, high_stress)
+
+    assert reply == 'Understood: "fix the bug".'
+
+
+def test_compose_reply_safely_defaults_emotional_state_to_none(
+    manager, conversation_context_factory
+):
+    context = conversation_context_factory()
+
+    reply = manager.compose_reply_safely("fix the bug", context, None)
+
+    assert reply == 'Understood. You said: "fix the bug".'
     assert "hello there" not in reply
 
 

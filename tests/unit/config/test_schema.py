@@ -7,6 +7,7 @@ from config.schema import (
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
+    EmotionConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
@@ -303,3 +304,89 @@ def test_blank_large_workflow_confirmation_prompt_template_raises():
     )
     with pytest.raises(ConfigError, match="large_workflow_confirmation_prompt_template"):
         config.validate()
+
+
+# --- EmotionConfig (Sprint 5.1) ----------------------------------------------------
+
+
+def test_blank_lexical_marker_keyword_raises():
+    config = AppConfig(emotion=EmotionConfig(lexical_markers={"happy": ["  "]}))
+    with pytest.raises(ConfigError, match="lexical_markers"):
+        config.validate()
+
+
+def test_non_positive_speaking_rate_baseline_raises():
+    config = AppConfig(emotion=EmotionConfig(speaking_rate_baseline_wpm=0.0))
+    with pytest.raises(ConfigError, match="speaking_rate_baseline_wpm"):
+        config.validate()
+
+
+def test_non_positive_long_pause_threshold_raises():
+    config = AppConfig(emotion=EmotionConfig(long_pause_threshold_seconds=-1.0))
+    with pytest.raises(ConfigError, match="long_pause_threshold_seconds"):
+        config.validate()
+
+
+def test_confidence_field_out_of_range_raises():
+    config = AppConfig(emotion=EmotionConfig(min_estimate_confidence=1.5))
+    with pytest.raises(ConfigError, match="min_estimate_confidence"):
+        config.validate()
+
+
+def test_state_smoothing_alpha_out_of_range_raises():
+    config = AppConfig(emotion=EmotionConfig(state_smoothing_alpha=0.0))
+    with pytest.raises(ConfigError, match="state_smoothing_alpha"):
+        config.validate()
+
+
+def test_non_positive_baseline_decay_half_life_raises():
+    config = AppConfig(emotion=EmotionConfig(baseline_decay_half_life_seconds=0.0))
+    with pytest.raises(ConfigError, match="baseline_decay_half_life_seconds"):
+        config.validate()
+
+
+def test_label_state_targets_unknown_dimension_raises():
+    config = AppConfig(emotion=EmotionConfig(label_state_targets={"happy": {"bogus": 1.0}}))
+    with pytest.raises(ConfigError, match="label_state_targets"):
+        config.validate()
+
+
+def test_label_state_targets_out_of_range_value_raises():
+    config = AppConfig(emotion=EmotionConfig(label_state_targets={"happy": {"mood": 999.0}}))
+    with pytest.raises(ConfigError, match="label_state_targets"):
+        config.validate()
+
+
+# --- EmotionConfig tone-adaptation thresholds (Sprint 5.4) --------------------
+
+
+def test_tone_high_stress_threshold_out_of_range_raises():
+    config = AppConfig(emotion=EmotionConfig(tone_high_stress_threshold=150.0))
+    with pytest.raises(ConfigError, match="tone_high_stress_threshold"):
+        config.validate()
+
+
+@pytest.mark.parametrize(
+    "field_name", ["jarvis_tone_low_mood_threshold", "minie_tone_low_mood_threshold"]
+)
+def test_tone_low_mood_threshold_out_of_range_raises(field_name):
+    config = AppConfig(emotion=EmotionConfig(**{field_name: -200.0}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+@pytest.mark.parametrize(
+    "field_name", ["jarvis_tone_low_comfort_threshold", "minie_tone_low_comfort_threshold"]
+)
+def test_tone_low_comfort_threshold_out_of_range_raises(field_name):
+    config = AppConfig(emotion=EmotionConfig(**{field_name: -5.0}))
+    with pytest.raises(ConfigError, match=field_name):
+        config.validate()
+
+
+def test_default_tone_adaptation_thresholds_are_valid():
+    """The shipped defaults themselves must pass validation — the same
+    sanity check every other EmotionConfig default already gets
+    implicitly via test_config_loads_with_no_overrides()-shaped tests
+    elsewhere in this file."""
+    AppConfig(emotion=EmotionConfig()).validate()

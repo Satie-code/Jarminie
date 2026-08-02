@@ -18,6 +18,7 @@ from config.schema import (
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
+    EmotionConfig,
     InternetConfig,
     LoggingConfig,
     MemoryConfig,
@@ -53,6 +54,7 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "workflow": WorkflowConfig,
     "scheduler": SchedulerConfig,
     "internet": InternetConfig,
+    "emotion": EmotionConfig,
 }
 
 

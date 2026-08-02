@@ -88,8 +88,8 @@ memory:
     routine: 0.6
     preference: 0.7
   category_default_weight: 0.5
-  # Applied against a fixed neutral placeholder value until Sprint 5.2
-  # (Emotion Inference) exists.
+  # Applied against a real, derived signal (MemoryRecord.emotional_
+  # significance) as of Sprint 5.3 — Emotional Memory.
   emotional_weight: 0.15
   # User Override Rule triggers — matched case-insensitively as plain
   # substrings, no NLU.
@@ -104,6 +104,10 @@ memory:
   retrieval_similarity_weight: 0.6
   retrieval_confidence_weight: 0.4
   max_retrieval_results: 5
+  # Sprint 5.3 — Emotional Memory. Minimum emotional_significance a
+  # record must meet for EmotionalMemory.recall_recent_moments() to
+  # surface it.
+  emotional_moment_recall_threshold: 0.6
 
 models:
   # Changed from "gemma3" to "llama3" during Sprint 3.14 — "gemma3" was
@@ -254,3 +258,65 @@ internet:
   # models.ollama_model."
   summarization_model: null
   min_sources_for_corroboration: 2
+
+emotion:
+  # Sprint 5.1 — Emotion Detection Engine (Level 5 Part A). A deliberately
+  # crude, English-only, config-driven keyword heuristic — same "documented
+  # starting point, correctable via config" discipline as voice's trigger
+  # phrases. Keyed by EmotionLabel.value (emotion/models.py); UNKNOWN has
+  # no entry by design (it's the fallback, never a match target).
+  lexical_markers:
+    happy: ["happy", "glad", "great news", "wonderful", "so good"]
+    calm: ["calm", "relaxed", "at ease", "peaceful"]
+    stressed: ["stressed", "overwhelmed", "so much pressure", "can't keep up", "anxious"]
+    tired: ["tired", "exhausted", "sleepy", "worn out", "drained"]
+    excited: ["excited", "can't wait", "thrilled", "pumped"]
+    frustrated: ["frustrated", "annoyed", "this is ridiculous", "fed up", "irritated"]
+    confused: ["confused", "not sure", "don't understand", "i'm lost", "unclear"]
+    curious: ["curious", "i wonder", "wonder if", "interested to know"]
+    focused: ["focused", "in the zone", "concentrating", "deep work"]
+  # Unvalidated numeric baselines, used only as tie-breakers among matched
+  # lexical markers — see config/schema.py's EmotionConfig docstring.
+  speaking_rate_baseline_wpm: 150.0
+  long_pause_threshold_seconds: 4.0
+  # EmotionDetectionEngine.estimate()'s confidence-weighting knobs.
+  sentiment_hint_base_confidence: 0.65
+  lexical_marker_agreement_bonus: 0.2
+  lexical_only_base_confidence: 0.45
+  numeric_tie_break_bonus: 0.1
+  # Below this, estimate() discounts to EmotionLabel.UNKNOWN/0.0 rather
+  # than assert a guess it isn't confident in.
+  min_estimate_confidence: 0.35
+  # Sprint 5.2 — Emotional State Manager. Bounded EMA smoothing weight —
+  # small by default so EmotionalState evolves gradually, never
+  # snapping to one turn's own read.
+  state_smoothing_alpha: 0.15
+  # Half-life (seconds) for decay_toward_baseline()'s pull back toward
+  # each dimension's neutral midpoint. 1800s = 30 minutes.
+  baseline_decay_half_life_seconds: 1800.0
+  # Per-EmotionLabel.value target VALUES apply_estimate() pulls each named
+  # dimension toward — a label's own entry names only the dimensions it
+  # meaningfully moves; conversation_momentum is never driven from here
+  # (see emotion/state_manager.py's own docstring). Real, disclosed,
+  # unvalidated first-pass defaults.
+  label_state_targets:
+    happy: {mood: 60.0, comfort: 70.0}
+    calm: {stress: 20.0, comfort: 65.0, energy: 40.0}
+    stressed: {stress: 85.0, comfort: 25.0, mood: -30.0}
+    tired: {energy: 15.0, focus: 30.0, mood: -10.0}
+    excited: {energy: 85.0, mood: 55.0, social_energy: 75.0}
+    frustrated: {stress: 75.0, mood: -45.0, comfort: 30.0}
+    confused: {focus: 25.0, stress: 60.0}
+    curious: {focus: 70.0, energy: 60.0, social_energy: 60.0}
+    focused: {focus: 90.0, energy: 55.0}
+  # Sprint 5.4 — Persona Behavioral Adaptation. personas/jarvis.py's/
+  # personas/minie.py's own _select_tone_variant() thresholds. Real,
+  # disclosed, unvalidated first-pass defaults, same category as
+  # speaking_rate_baseline_wpm above. Stress is shared; mood/comfort are
+  # per-persona (Minie's own looser thresholds lean into ENCOURAGING
+  # more readily, matching her "casual, comfort, wellness" identity).
+  tone_high_stress_threshold: 70.0
+  jarvis_tone_low_mood_threshold: -25.0
+  jarvis_tone_low_comfort_threshold: 35.0
+  minie_tone_low_mood_threshold: -15.0
+  minie_tone_low_comfort_threshold: 40.0

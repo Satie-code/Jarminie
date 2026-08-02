@@ -28,6 +28,17 @@ only code that ever advances it, and only on an actual band change. This
 is what lets run_monthly_review() correctly distinguish "been sitting in
 Monthly-review for a while" from "just decayed into it a moment ago" —
 see docs/sprint_book/sprint_3_6.md's Engineering Decisions.
+
+emotional_significance (added Sprint 5.3 — Emotional Memory, Level 5 Part
+A) is a real, derived 0.0-1.0 signal replacing ConfidenceScorer.score()'s
+own long-standing _NEUTRAL_EMOTIONAL_SIGNIFICANCE placeholder. Defaults to
+0.0 (not the old placeholder's 0.5) — a real, disclosed behavior change
+for every record NOT written through memory/emotional_memory.py's
+EmotionalMemory.record_significant_moment(), documented in full in
+docs/sprint_book/sprint_5/sprint_5_3.md's own Architecture Notes: 0.0
+correctly states "not assessed as emotionally significant" for the
+overwhelming majority of ordinary records, rather than 0.5's false claim
+of moderate significance for content nobody ever actually assessed.
 """
 
 from dataclasses import dataclass, field
@@ -54,6 +65,7 @@ class MemoryRecord:
     content: str
     category: str | None = None
     confidence_score: float = 0.0
+    emotional_significance: float = 0.0
     is_permanent: bool = False
     user_override: bool = False
     source_session_id: str | None = None

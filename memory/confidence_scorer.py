@@ -26,10 +26,17 @@ user override or Event Memory's separate is_permanent flag (Sprint 3.3),
 never the ordinary formula alone. See config/schema.py's MemoryConfig
 docstring and docs/sprint_book/sprint_3_5.md's Engineering Decisions.
 
-Emotional significance is a fixed neutral placeholder (_NEUTRAL_EMOTIONAL_
-SIGNIFICANCE below), not a real signal — Level 5's Emotion Engine (Phase
-5.1) doesn't exist yet. Documented here plainly so no score is mistaken
-for being emotionally informed before Sprint 5.2 exists.
+Emotional significance (Sprint 5.3 — Emotional Memory, Level 5 Part A)
+is now a real signal: emotional_factor reads record.emotional_significance
+directly, a real, derived 0.0-1.0 value memory/emotional_memory.py's
+EmotionalMemory computes from an actual EmotionalState snapshot (Sprint
+5.2) at write time. This resolves the placeholder this module carried
+since Sprint 3.5 — see _NEUTRAL_EMOTIONAL_SIGNIFICANCE below for its own,
+now-retired role, and docs/sprint_book/sprint_5/sprint_5_3.md's own
+Architecture Notes for the full "who resolves this and when" history
+(the original comment named "Sprint 5.2," written before this Sprint
+Book's final numbering existed — the real resolution needed Sprint 5.2's
+own EmotionalState to derive a value from, landing in 5.3 instead).
 """
 
 from dataclasses import replace
@@ -39,10 +46,16 @@ from enum import Enum
 from config.schema import MemoryConfig
 from memory.models import MemoryRecord
 
-# "No information available" — the deliberate midpoint of the [0, 1] range
-# every other factor is expressed in, not a real emotional assessment.
-# The single integration point for Sprint 5.2 (Emotion Inference) to
-# replace with a real signal.
+# Retired Sprint 5.3 (Emotional Memory) — kept only as a historical marker
+# of the pre-Sprint-5.3 placeholder value, never read by score() below.
+# MemoryRecord.emotional_significance (memory/models.py) is a required
+# float field with its own real default (0.0, matching this sprint's own
+# SQLite migration DEFAULT) — every record, old or new, always carries a
+# real value, so there is no missing-value case left for this constant to
+# actually fall back for, despite this sprint's own spec text describing
+# a "legacy-record fallback" role; resolved here in favor of the simpler,
+# more honest design (a real default everywhere, not two competing
+# neutral values) rather than built as literally specified.
 _NEUTRAL_EMOTIONAL_SIGNIFICANCE = 0.5
 
 
@@ -72,9 +85,10 @@ class ConfidenceScorer:
         the score itself must not silently drift back down either.
         Otherwise: a weighted sum of frequency (diminishing-returns curve
         over access_count), recency (exponential decay over
-        last_accessed_at using recency_half_life_days), and category
+        last_accessed_at using recency_half_life_days), category
         (category_importance lookup, falling back to
-        category_default_weight), plus the fixed emotional placeholder —
+        category_default_weight), and emotional significance (Sprint
+        5.3 — record.emotional_significance, a real, derived signal) —
         see this module's own docstring for why importance contributes no
         term here.
 
@@ -105,7 +119,7 @@ class ConfidenceScorer:
             record.category, self._memory_config.category_default_weight
         )
 
-        emotional_factor = _NEUTRAL_EMOTIONAL_SIGNIFICANCE
+        emotional_factor = record.emotional_significance
 
         weighted = (
             frequency_factor * self._memory_config.frequency_weight

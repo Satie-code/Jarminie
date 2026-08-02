@@ -151,3 +151,75 @@ See Potential Risks above.
 
 - If a genuinely independent second consumer of raw `EmotionSignals` emerges later, split `collect_signals()`/`estimate()` into two sprints/modules then — not built speculatively now (Engineering Rationale).
 - A future richer signal (e.g. real prosody/pitch analysis from the raw audio buffer, not just Whisper's derived timing) is plausible but out of this sprint's scope — `VoiceSessionManager`/`WhisperSpeechToText` would both need new capability first; named here as a pointer, not built.
+
+## Sprint Completion Report (2026-08-02)
+
+Implemented as specified, authorized directly ("Continue with the Sprint 5.1") right after the Level 5 Part A Sprint Book was written this same session — no separate Pass-1 round trip needed since the spec was already complete/unmodified, the same direct-proceed precedent Sprint 4.14's own Completion Report established.
+
+**Note found during implementation, not caused by this sprint**: between this Sprint Book being written and this sprint's own implementation, the repository's `docs/sprint_book/` directory was reorganized into per-level subdirectories (this file now lives at `docs/sprint_book/sprint_5/sprint_5_1.md`, not the flat `docs/sprint_book/sprint_5_1.md` path this Sprint Book was originally written against) and several previously-uncommitted pieces of this session's own work (0.4.2, 0.4.3, the internet provider-fallback refactor) were committed directly to `main` by the repository's git author (`newbie-cmyk`), outside this conversation. Confirmed via `git show <commit> --stat` that this file's own content was carried over unchanged (a straight add, not a rewrite) — no content was lost or altered. Flagged to the user rather than silently worked around.
+
+### Summary
+
+`emotion/models.py`/`emotion/detection_engine.py` deliver exactly the spec's own Expected Classes/Functions: `EmotionLabel` (nine named states + `UNKNOWN`), `EmotionSignals`, `EmotionEstimate`, and `EmotionDetectionEngine` (`collect_signals()`/`estimate()`, never raising for any input). `EmotionConfig` was added to `config/schema.py` with a full `_validate_emotion()` pass, wired into `AppConfig`.
+
+One real gap found and closed beyond the sprint file's own literal Files to Modify list: `config/loader.py`'s `_SECTION_SCHEMAS` dict is that file's own documented "single source of truth for every AppConfig section... adding a future section here is now the only place needed for both load paths to pick it up" (a comment written specifically because Sprint 1.7 once shipped a new config section that silently failed to load from YAML/env for exactly this reason). `EmotionConfig` was added there too — without it, `emotion:` in `config/defaults.yaml` would have been silently ignored at load time despite validating correctly against the dataclass default. Verified for real, not assumed: loaded the actual `config/defaults.yaml` through `ConfigLoader().load()` and confirmed `config.emotion.lexical_markers` reflects the real YAML content, not just the dataclass default.
+
+`estimate()`'s exact scoring algorithm (how `SentimentHint`, lexical markers, and the two numeric signals combine into a label/confidence pair) was underspecified at the "described behavior, not exact formula" level the sprint file itself operates at — implemented as: `SentimentHint` (STRESSED/FRUSTRATED/TIRED/POSITIVE→HAPPY) as the primary signal when non-NEUTRAL, with lexical-marker agreement as a confidence bonus; when `SentimentHint` is NEUTRAL, matched lexical markers alone select a label (most-frequent match wins; a tie is broken by numeric-signal-supported arousal — fast speech toward STRESSED/FRUSTRATED/EXCITED/CURIOUS, a long pause toward TIRED/CALM/CONFUSED — then, deterministically, by `EmotionLabel` declaration order); a final `min_estimate_confidence` floor discounts any still-low-confidence result to `UNKNOWN`/`0.0`. Five new `EmotionConfig` weight fields (`sentiment_hint_base_confidence`, `lexical_marker_agreement_bonus`, `lexical_only_base_confidence`, `numeric_tie_break_bonus`, plus the spec's own `min_estimate_confidence`) were added beyond the sprint file's own literally-named four fields to make this concrete and config-tunable rather than hardcoded — a within-scope quality addition per this project's own autonomy guardrails ("free to exceed spec on quality within a sprint's own scope").
+
+### Files Created
+
+- `emotion/models.py`
+- `emotion/detection_engine.py`
+- `tests/unit/emotion/test_detection_engine.py`
+
+Not created: `tests/unit/emotion/__init__.py`, named in the sprint file's own Files to Create — checked first and found no `tests/unit/<subsystem>/` directory anywhere in this codebase actually has an `__init__.py` (pytest doesn't require one for test discovery); the sprint file's own assumption was wrong, corrected here rather than silently followed.
+
+### Files Modified
+
+- `config/schema.py` — new `EmotionConfig` dataclass (`_default_lexical_markers()` factory, nine fields per Engineering Rationale above), `AppConfig.emotion` field, `_validate_emotion()` called from `AppConfig.validate()`.
+- `config/defaults.yaml` — new `emotion:` section, field names matching `EmotionConfig` exactly.
+- `config/loader.py` — `EmotionConfig` import, `_SECTION_SCHEMAS["emotion"]` entry (see Summary above — a real, necessary addition beyond the sprint file's own stated Files to Modify).
+- `tests/unit/config/test_schema.py` — `EmotionConfig` import, four new validation tests, following this file's own existing per-config-section test grouping.
+
+`ui/settings_window.py` was checked and confirmed to need no change: `SettingsWindow.to_config()` builds its candidate via `dataclasses.replace(self._original_config, ...)`, so a whole new, un-widgeted `AppConfig` section (like `emotion`) passes through unchanged automatically — the exact fix `backlog/technical_debt.md` item 14 already put in place for this class of gap.
+
+### Tests Added
+
+- `tests/unit/emotion/test_detection_engine.py` — 25 tests: lifecycle (`start()`/`stop()`/`health_check()`); `collect_signals()` (speaking-rate computation and its two None-producing edge cases, pause computation including the no-prior-turn case, `SentimentHint` passthrough and its `None`-context default, lexical-marker matching, `no_speech_probability` passthrough, never-raises on fully-empty input); `estimate()` (all four `SentimentHint`-mapped labels, sentiment+lexical agreement raising confidence, all five lexical-only-reachable labels, the `UNKNOWN` no-signal fallback, the `min_estimate_confidence` floor forcing `UNKNOWN`, both numeric tie-break directions, never-raises on degenerate input, the estimate always carrying its own signals).
+- `tests/unit/config/test_schema.py` — 4 new tests: blank lexical-marker keyword, non-positive `speaking_rate_baseline_wpm`, non-positive `long_pause_threshold_seconds`, an out-of-range confidence field.
+
+### Documentation Updated
+
+- `emotion/models.py`/`emotion/detection_engine.py` module and class docstrings state the "behavioral estimate, never diagnosis" framing explicitly, per this sprint's own Documentation Checklist.
+- `config/schema.py`'s `EmotionConfig` docstring documents every field's meaning/default and cross-references `emotion/detection_engine.py`'s own algorithm.
+- This Sprint Completion Report.
+- `docs/STATUS.md`/`docs/sprint_book/INDEX.md` updated (see below).
+
+### Acceptance Criteria Checklist
+
+- ✔ `EmotionDetectionEngine.estimate()` never raises for any input, including empty/malformed transcripts and a `None` `ContextAnalysis` — verified directly (`test_never_raises_on_empty_everything`, `test_never_raises_for_degenerate_signals`).
+- ✔ All nine named `EmotionLabel` values plus `UNKNOWN` are reachable via realistic fixture inputs in the test suite.
+- ✔ No code path in this sprint produces or logs anything resembling a clinical/diagnostic label.
+- ✔ `ruff check .` clean (whole repo, not just this sprint's own files); full existing suite still passes.
+
+### Risks
+
+- The scoring algorithm's exact weights (Summary above) are real, disclosed, unvalidated defaults — the same category as every other tuned constant in this codebase; correctable via config without a code change.
+- No live caller exists yet (Integration Considerations, by design) — this sprint's own correctness is verified in isolation only; real behavior against live `TranscriptionResult`/`ContextAnalysis` data from an actual conversation is Sprint 5.14's job.
+
+### Technical Debt
+
+None introduced. The `config/loader.py` gap (Summary above) was found and fixed within this sprint, not deferred.
+
+### Recommendations
+
+- When Sprint 5.14 (Presentation Layer Integration) wires a live caller, capture a few real `EmotionEstimate` outputs from actual conversation turns and sanity-check the label distribution feels reasonable before tuning `EmotionConfig`'s weights further — the same "verify against real data before trusting a first-pass default" discipline this project has applied to every other tuned constant once real usage became possible.
+- The mismatch between this repository's recent commit messages and their actual diffs (Note above) is worth a direct conversation with whoever is committing this work — a commit log that says more was built than actually was is a real, if non-code, accuracy problem for this project's own established "explainability/honest documentation" discipline.
+
+### Verification
+
+Full suite: 1 pre-existing, confirmed-standalone-passing flake (`test_due_reminder_is_deferred_while_a_session_is_active`, `tests/integration/test_scheduler_integration.py` — the same well-established "passes standalone, times out only under full-suite host-resource load" flake class this project has documented repeatedly; unrelated to this sprint's own `config/`/`emotion/` changes, confirmed by re-running that file standalone: 7/7 passing) + 1151 passing + 2 correctly-skipped opt-in markers = 1154 total. `ruff check .` clean across the whole repository. A real, non-mocked config-load smoke test confirmed `ConfigLoader().load()` genuinely picks up the new `emotion:` YAML section end-to-end, not just the dataclass default.
+
+**No git commit made** — per this project's own "only commit when explicitly asked" rule, changes left in the working tree; the user has not yet been asked whether to commit.
+
+**Sprint 5.2 (Emotional State Manager) is next.**

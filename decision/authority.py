@@ -19,8 +19,11 @@ never modify this enum):
     WORKFLOW                 - wired: CommunicationPipeline._handle_workflow_turn() (4.11)
     SCHEDULER                - wired: CommunicationPipeline._handle_scheduler_turn() (4.18)
     INTERNET_AGENT           - wired: CommunicationPipeline._handle_internet_agent_turn() (4.18)
-    WELLNESS                 - reserved: Level 5 (Wellness Engine)
-    EMOTION_SUPPORT          - reserved: Level 5 (Emotion Engine)
+    WELLNESS                 - reserved: Level 5 (Wellness Engine, Part B)
+    EMOTION_SUPPORT          - wired: selects Persona.compose_reply()'s tone-adapted
+                                CONVERSATIONAL_RESPONSE path (5.4) — a *style* choice, not
+                                a distinct subsystem dispatch; CommunicationPipeline still
+                                has no dedicated EMOTION_SUPPORT branch of its own (5.14)
 
 SCHEDULER/INTERNET_AGENT routing (Sprint 4.18, _determine_engine()),
 the same additive-branch pattern Sprint 4.11 already established for
@@ -50,6 +53,25 @@ is expected to follow":
   _handle_scheduler_turn() is deliberately create-only (see its own
   docstring), so routing a query there would produce a confusing,
   unhandled case. A real future consideration, not built speculatively.
+
+EMOTION_SUPPORT routing (Sprint 5.4, _determine_engine()): an
+EMOTIONAL_SUPPORT intent routes to EMOTION_SUPPORT only when
+authority_level is not INFORM (RECOMMEND or, in principle,
+EMERGENCY_ASSIST) — mirroring every other branch's own narrow-gating
+style. Unlike DEVICE_CONTROL/SCHEDULER/etc., this is deliberately NOT a
+dispatch to a distinct subsystem: EMOTION_SUPPORT selects a *style* of
+CONVERSATIONAL_RESPONSE (Persona.compose_reply()'s own tone-adaptation
+path, driven by a separate EmotionalState input, not by this trace at
+all) — see personas/base.py's ToneVariant docstring. _determine_authority()
+is untouched by this sprint: EMOTIONAL_SUPPORT is not itself a
+_RECOMMEND_INTENT_CATEGORIES member, so in the real, currently-wired
+pipeline (PriorityQueueManager.classify() only ever assigns
+CRITICAL_EMERGENCY to an EMERGENCY intent) this branch is reachable only
+via the same CRITICAL_EMERGENCY-priority-with-no-matching-procedure path
+that already produces RECOMMEND for any category — narrow and honest
+about it, not a live gap; see this sprint's own Testing Checklist and
+sprint_5_4.md's Engineering Rationale for why this scope was chosen over
+widening _RECOMMEND_INTENT_CATEGORIES.
 
 DEVICE_CONTROL/WORKFLOW routing (Sprint 4.11, _determine_engine()):
 an ACTION_REQUEST intent routes to one of them only when
@@ -84,15 +106,19 @@ whitelist is populated with real, reviewed procedure ids.
 System), reviewed and explicitly deferred, not an oversight.** Device
 Control (Level 4, Sprints 4.1-4.6) now exists, but nothing in the
 codebase wires EMERGENCY_ASSIST authority to any real automated action
-yet: _determine_engine() below always returns CONVERSATIONAL_RESPONSE/
-INFORM_ONLY regardless of authority_level, and no ActionType exists for
-anything resembling a real emergency-response procedure (e.g. a safe
-shutdown). Approving a procedure id today would be symbolic only, with
-no real capability behind it — a false sense of readiness, not a real
-safety improvement. Revisit once real Device-Control-to-Authority
-wiring exists (Sprint 4.11 or later) and a concrete emergency-response
-ActionType is actually built to back a real procedure id. See
-sprint_4_7.md's own Sprint Completion Report for the full reasoning.
+yet: _determine_engine() below still never returns anything but
+CONVERSATIONAL_RESPONSE/INFORM_ONLY for an actually-EMERGENCY_ASSIST
+authority_level specifically (EMOTION_SUPPORT's own narrow RECOMMEND-or-
+above gate, Sprint 5.4, is the one branch that does now read
+authority_level — an unrelated, non-emergency routing decision), and no
+ActionType exists for anything resembling a real emergency-response
+procedure (e.g. a safe shutdown). Approving a procedure id today would
+be symbolic only, with no real capability behind it — a false sense of
+readiness, not a real safety improvement. Revisit once real
+Device-Control-to-Authority wiring exists (Sprint 4.11 or later) and a
+concrete emergency-response ActionType is actually built to back a real
+procedure id. See sprint_4_7.md's own Sprint Completion Report for the
+full reasoning.
 
 The whitelist is checked against a normalized form of
 ContextAnalysis.primary_topic as the "procedure id" — evaluate()'s own
@@ -102,14 +128,14 @@ This is a genuine implementation-time decision (not spelled out by this
 sprint's own spec), harmless at Level 3 since the whitelist is always
 empty regardless of what string is checked against it.
 
-selected_engine is CONVERSATIONAL_RESPONSE, INFORM_ONLY, DEVICE_CONTROL,
-or WORKFLOW in the real returned DecisionTrace as of Sprint 4.11 — never
-one of the four still-reserved values above, even when a reserved
-engine would ideally be the destination (e.g. an EMOTIONAL_SUPPORT
-intent "really" belongs to Wellness) — that inference is recorded only
-in reasoning_text, worded as an honest capability gap ("this looks like
-X, which doesn't exist yet"), never as if the request were actually
-routed there.
+selected_engine is never WELLNESS in the real returned DecisionTrace —
+that value remains fully reserved (Level 5 Part B). An EMOTIONAL_SUPPORT
+intent at INFORM authority (the common case in the real, currently-wired
+pipeline) still degrades to CONVERSATIONAL_RESPONSE with the same honest
+"this looks like a task for the Wellness Engine, which doesn't exist yet"
+capability-gap wording in reasoning_text this docstring described before
+Sprint 5.4 — only a non-INFORM authority_level unlocks the real,
+narrower EMOTION_SUPPORT branch documented above.
 
 Sprint 3.13 hardening (scenario e): evaluate()'s own body is wrapped in
 a try/except — any internal exception (a malformed input, a bug in
@@ -307,7 +333,7 @@ class AuthorityEvaluator:
             authority_level, emergency_approved = self._determine_authority(
                 intent, context_analysis, priority_level
             )
-            selected_engine = self._determine_engine(intent, context_analysis)
+            selected_engine = self._determine_engine(intent, context_analysis, authority_level)
             reasoning_text = _build_reasoning(
                 intent,
                 priority_level,
@@ -364,8 +390,16 @@ class AuthorityEvaluator:
         return AuthorityLevel.INFORM, False
 
     def _determine_engine(
-        self, intent: Intent, context_analysis: ContextAnalysis
+        self,
+        intent: Intent,
+        context_analysis: ContextAnalysis,
+        authority_level: AuthorityLevel,
     ) -> EngineSelection:
+        if (
+            intent.category == IntentCategory.EMOTIONAL_SUPPORT
+            and authority_level != AuthorityLevel.INFORM
+        ):
+            return EngineSelection.EMOTION_SUPPORT
         if intent.category == IntentCategory.INFORMATIONAL:
             if _wants_current_information(intent.raw_transcript):
                 return EngineSelection.INTERNET_AGENT
@@ -450,6 +484,8 @@ def _build_reasoning(
             "This needs current or external information, so I'll check "
             f"{_ENGINE_DISPLAY_NAMES[EngineSelection.INTERNET_AGENT]}."
         )
+    elif selected_engine is EngineSelection.EMOTION_SUPPORT:
+        parts.append("This calls for emotional support, so I'll respond with an adapted tone.")
     elif intent.category is IntentCategory.ACTION_REQUEST:
         if _mentions_scheduler_keywords(intent.raw_transcript):
             parts.append(

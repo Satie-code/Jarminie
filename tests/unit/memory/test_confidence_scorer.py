@@ -110,7 +110,10 @@ def test_unknown_category_falls_back_to_default_weight(memory_config):
     expected_category_contribution = memory_config.category_weight * 0.5 * 100
     frequency_contribution = 0.0  # access_count=0 -> frequency_factor=0
     recency_contribution = memory_config.recency_weight * 1.0 * 100  # just accessed
-    emotional_contribution = memory_config.emotional_weight * 0.5 * 100
+    # Sprint 5.3: emotional_significance now defaults to 0.0 (a real,
+    # disclosed behavior change from the old 0.5 neutral placeholder) —
+    # make_record() below doesn't set it explicitly, so it contributes 0.
+    emotional_contribution = memory_config.emotional_weight * 0.0 * 100
     expected = (
         frequency_contribution
         + recency_contribution
@@ -291,3 +294,38 @@ def test_empty_override_trigger_phrases_raises():
     config = AppConfig(memory=MemoryConfig(override_trigger_phrases=[]))
     with pytest.raises(ConfigError, match="override_trigger_phrases"):
         config.validate()
+
+
+def test_emotional_moment_recall_threshold_out_of_range_raises():
+    config = AppConfig(memory=MemoryConfig(emotional_moment_recall_threshold=1.5))
+    with pytest.raises(ConfigError, match="emotional_moment_recall_threshold"):
+        config.validate()
+
+
+# --- Emotional significance (Sprint 5.3) -------------------------------
+
+
+def test_higher_emotional_significance_produces_higher_score(scorer):
+    low = make_record(emotional_significance=0.0)
+    high = make_record(emotional_significance=1.0)
+
+    assert scorer.score(high) > scorer.score(low)
+
+
+def test_emotional_significance_contributes_its_configured_weight(memory_config):
+    scorer = ConfidenceScorer(memory_config)
+    zero_significance = scorer.score(make_record(emotional_significance=0.0))
+    full_significance = scorer.score(make_record(emotional_significance=1.0))
+
+    assert full_significance - zero_significance == pytest.approx(
+        memory_config.emotional_weight * 100, rel=1e-6
+    )
+
+
+def test_default_emotional_significance_scores_without_error(scorer):
+    # A "legacy" record that never had emotional_significance set explicitly
+    # (the dataclass default, 0.0) must still score cleanly, never raise.
+    record = make_record()
+    assert record.emotional_significance == 0.0
+    score = scorer.score(record)
+    assert 0.0 <= score <= 100.0

@@ -53,14 +53,27 @@ CREATE TABLE IF NOT EXISTS memory_records (
     created_at TEXT NOT NULL,
     last_accessed_at TEXT NOT NULL,
     band_entered_at TEXT NOT NULL,
-    access_count INTEGER NOT NULL
+    access_count INTEGER NOT NULL,
+    emotional_significance REAL NOT NULL DEFAULT 0.0
 )
 """
+
+# Sprint 5.3 (Emotional Memory) migration: CREATE TABLE IF NOT EXISTS above
+# only creates emotional_significance for a brand-new database — it does
+# NOT retroactively add the column to an already-existing on-disk
+# memory_records table (this project's real, standing database/jarminei.db
+# among them). ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite, so
+# start() below runs it unconditionally and swallows only the specific
+# "duplicate column" failure that means it already ran — see start()'s own
+# docstring.
+_MIGRATE_ADD_EMOTIONAL_SIGNIFICANCE_SQL = (
+    "ALTER TABLE memory_records ADD COLUMN emotional_significance REAL NOT NULL DEFAULT 0.0"
+)
 
 _SELECT_COLUMNS = (
     "id, memory_type, content, category, confidence_score, is_permanent, "
     "user_override, source_session_id, occurred_at, created_at, last_accessed_at, "
-    "band_entered_at, access_count"
+    "band_entered_at, access_count, emotional_significance"
 )
 
 
@@ -76,16 +89,34 @@ class MemoryStore:
 
     def start(self) -> None:
         """Open both backends and ensure the memory_records table and all
-        five Chroma collections exist (idempotent)."""
+        five Chroma collections exist (idempotent).
+
+        Sprint 5.3 (Emotional Memory): also runs a one-off, idempotent
+        column migration for emotional_significance — real, necessary for
+        any on-disk database created before this sprint (CREATE TABLE IF
+        NOT EXISTS is a no-op against an already-existing table, so a
+        pre-existing memory_records table would otherwise never gain the
+        new column and every subsequent store() would fail). A "duplicate
+        column" failure means the migration already ran (or the table was
+        just freshly created with the column already present) and is
+        swallowed; any other failure is a genuine problem and re-raised."""
         try:
             self._sqlite_client.connect()
             self._sqlite_client.execute(_CREATE_TABLE_SQL)
+            self._migrate_add_emotional_significance_column()
             self._chroma_client.connect()
             self._chroma_client.ensure_collections()
         except Exception as exc:
             raise MemoryStoreError(f"Failed to start memory store: {exc}") from exc
         self._started = True
         logger.info("Memory store started.")
+
+    def _migrate_add_emotional_significance_column(self) -> None:
+        try:
+            self._sqlite_client.execute(_MIGRATE_ADD_EMOTIONAL_SIGNIFICANCE_SQL)
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def stop(self) -> None:
         self._sqlite_client.close()
@@ -123,7 +154,7 @@ class MemoryStore:
         try:
             self._sqlite_client.execute(
                 f"INSERT INTO memory_records ({_SELECT_COLUMNS}) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.memory_type.value,
@@ -138,6 +169,7 @@ class MemoryStore:
                     record.last_accessed_at.isoformat(),
                     record.band_entered_at.isoformat(),
                     record.access_count,
+                    record.emotional_significance,
                 ),
             )
         except Exception as exc:
@@ -331,4 +363,5 @@ def _row_to_record(row: tuple) -> MemoryRecord:
         last_accessed_at=datetime.fromisoformat(row[10]),
         band_entered_at=datetime.fromisoformat(row[11]),
         access_count=row[12],
+        emotional_significance=row[13],
     )

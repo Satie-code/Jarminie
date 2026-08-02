@@ -293,8 +293,8 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
     conversation_store = ConversationSessionStore(sqlite_client, database_config)
     context_manager = ContextManager(conversation_store)
 
-    jarvis = JarvisPersona(voice_config)
-    minie = MiniePersona(voice_config)
+    jarvis = JarvisPersona(voice_config, config.emotion)
+    minie = MiniePersona(voice_config, config.emotion)
     persona_manager = PersonaManager(jarvis, minie, voice_config)
 
     turn_complete_relay = CallbackRelay()

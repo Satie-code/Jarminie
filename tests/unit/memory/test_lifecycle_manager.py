@@ -73,7 +73,12 @@ def make_temporary_scoring_record(**overrides):
     Temporary band (0-29) with default weights: zero access_count, very
     stale last_accessed_at, and an unrecognized category (falls back to
     category_default_weight=0.5) — no frequency/recency contribution,
-    only category (0.15*0.5*100=7.5) + emotional (0.15*0.5*100=7.5) = 15."""
+    only category (0.15*0.5*100=7.5). emotional_significance defaults to
+    0.0 (Sprint 5.3 — a real, disclosed change from the old 0.5 neutral
+    placeholder this docstring originally assumed), contributing nothing,
+    so the real total is 7.5, not the originally-claimed 15 — still
+    comfortably within the Temporary band either way, which is all this
+    helper's own callers actually assert."""
     defaults = dict(
         memory_type=MemoryType.SHARED,
         content="a temporary memory",

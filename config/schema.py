@@ -157,9 +157,16 @@ class MemoryConfig:
 
     recency_half_life_days is the exponential decay half-life for the
     recency factor. category_importance/category_default_weight score the
-    category factor; emotional_weight is applied against a fixed neutral
-    placeholder value until Sprint 5.2 (Emotion Inference) exists — see
-    memory/confidence_scorer.py.
+    category factor; emotional_weight is applied against a real, derived
+    signal (MemoryRecord.emotional_significance) as of Sprint 5.3
+    (Emotional Memory) — see memory/confidence_scorer.py.
+
+    emotional_moment_recall_threshold (Sprint 5.3) is memory/
+    emotional_memory.py's EmotionalMemory.recall_recent_moments()'s own
+    minimum emotional_significance a record must meet to be surfaced —
+    deliberately a higher bar than "any nonzero significance," so only
+    genuinely notable moments (not every ordinary emotionally-neutral
+    exchange) come back.
 
     override_trigger_phrases (Sprint 3.5) triggers the User Override Rule
     — matched case-insensitively as plain substrings, no NLU, the same
@@ -204,6 +211,7 @@ class MemoryConfig:
     retrieval_similarity_weight: float = 0.6
     retrieval_confidence_weight: float = 0.4
     max_retrieval_results: int = 5
+    emotional_moment_recall_threshold: float = 0.6
 
 
 @dataclass
@@ -598,6 +606,154 @@ class InternetConfig:
     min_sources_for_corroboration: int = 2
 
 
+# Valid EmotionalState (emotion/state_manager.py) dimension names and
+# their ranges — duplicated here rather than imported, since config/ is a
+# dependency-direction leaf (nothing in config/ imports emotion/ or any
+# other subsystem package, the same discipline SecurityConfig.risk_policies
+# already follows for ActionType/RiskLevel). Used only to validate
+# EmotionConfig.label_state_targets below.
+_EMOTIONAL_STATE_DIMENSION_RANGES: dict[str, tuple[float, float]] = {
+    "mood": (-100.0, 100.0),
+    "energy": (0.0, 100.0),
+    "stress": (0.0, 100.0),
+    "focus": (0.0, 100.0),
+    "comfort": (0.0, 100.0),
+    "social_energy": (0.0, 100.0),
+    "conversation_momentum": (0.0, 100.0),
+}
+
+
+def _default_label_state_targets() -> dict[str, dict[str, float]]:
+    """Per-EmotionLabel.value target VALUES (not deltas) for a subset of
+    EmotionalState's six label-driven dimensions (emotion/state_manager.py
+    — conversation_momentum is deliberately never driven from here, see
+    that module's own docstring). A label's own dict names only the
+    dimensions it meaningfully moves; every other dimension is left
+    untouched for that label (mathematically equivalent to a target equal
+    to whatever the dimension's current value already is). UNKNOWN has no
+    entry — EmotionalStateManager.apply_estimate() treats it as a
+    deliberate no-op, never reaching this table. Real, disclosed,
+    unvalidated first-pass defaults — same category as
+    MemoryConfig's five Dynamic Memory Formula weights."""
+    return {
+        "happy": {"mood": 60.0, "comfort": 70.0},
+        "calm": {"stress": 20.0, "comfort": 65.0, "energy": 40.0},
+        "stressed": {"stress": 85.0, "comfort": 25.0, "mood": -30.0},
+        "tired": {"energy": 15.0, "focus": 30.0, "mood": -10.0},
+        "excited": {"energy": 85.0, "mood": 55.0, "social_energy": 75.0},
+        "frustrated": {"stress": 75.0, "mood": -45.0, "comfort": 30.0},
+        "confused": {"focus": 25.0, "stress": 60.0},
+        "curious": {"focus": 70.0, "energy": 60.0, "social_energy": 60.0},
+        "focused": {"focus": 90.0, "energy": 55.0},
+    }
+
+
+def _default_lexical_markers() -> dict[str, list[str]]:
+    """A deliberately crude, English-only starting vocabulary — the same
+    "documented starting point, correctable via config" category as
+    VoiceConfig's trigger phrases / MemoryConfig's salience triggers.
+    Keyed by EmotionLabel.value (emotion/models.py); UNKNOWN has no entry
+    by design (it is the fallback, never something to match toward)."""
+    return {
+        "happy": ["happy", "glad", "great news", "wonderful", "so good"],
+        "calm": ["calm", "relaxed", "at ease", "peaceful"],
+        "stressed": ["stressed", "overwhelmed", "so much pressure", "can't keep up", "anxious"],
+        "tired": ["tired", "exhausted", "sleepy", "worn out", "drained"],
+        "excited": ["excited", "can't wait", "thrilled", "pumped"],
+        "frustrated": ["frustrated", "annoyed", "this is ridiculous", "fed up", "irritated"],
+        "confused": ["confused", "not sure", "don't understand", "i'm lost", "unclear"],
+        "curious": ["curious", "i wonder", "wonder if", "interested to know"],
+        "focused": ["focused", "in the zone", "concentrating", "deep work"],
+    }
+
+
+@dataclass
+class EmotionConfig:
+    """Emotion Detection Engine settings (Sprint 5.1 — Level 5 Part A).
+
+    A **behavioral-estimate engine, never a diagnostic one** — see
+    emotion/models.py's own docstring for the "no medical/psychological
+    diagnosis" rule this Level is built under.
+
+    lexical_markers is a deliberately crude, config-driven keyword
+    heuristic (case-insensitive substring matching, no NLU) keyed by
+    EmotionLabel.value — the same honestly-acknowledged limitation
+    PersonaManager.detect_context_heuristic()/MemoryConfig.
+    short_term_salience_triggers already carry.
+
+    speaking_rate_baseline_wpm/long_pause_threshold_seconds are unvalidated,
+    reasonable-guess numeric baselines (same disclosed-default category as
+    VoiceConfig.wake_word_sensitivity) used only as tie-breakers among
+    matched lexical markers, never as an independent detector on their own
+    — see emotion/detection_engine.py's _resolve_lexical_tie().
+
+    sentiment_hint_base_confidence/lexical_marker_agreement_bonus/
+    lexical_only_base_confidence/numeric_tie_break_bonus are
+    EmotionDetectionEngine.estimate()'s own confidence-weighting knobs:
+    SentimentHint (decision/context_analyzer.py, itself LLM-derived) is
+    treated as the richer, higher-confidence primary signal;
+    lexical-marker agreement with it is a bonus, never a replacement.
+    When SentimentHint is NEUTRAL, matched lexical markers alone drive a
+    lower base confidence, itself nudged by numeric-signal corroboration.
+
+    min_estimate_confidence is the floor below which estimate() discounts
+    a low-evidence read to EmotionLabel.UNKNOWN/0.0 rather than assert a
+    guess it isn't confident in — an honest "no read" is always preferred
+    over a forced one (emotion/detection_engine.py's own docstring).
+
+    state_smoothing_alpha (Sprint 5.2) is EmotionalStateManager.
+    apply_estimate()'s bounded exponential-moving-average weight
+    (new = old * (1 - alpha) + target * alpha) — small by default so
+    EmotionalState evolves gradually across several consistent turns,
+    never snapping to one turn's own read (the brief's own explicit
+    "not sentence-by-sentence" requirement).
+
+    baseline_decay_half_life_seconds (Sprint 5.2) is
+    decay_toward_baseline()'s half-life: the real elapsed time (seconds)
+    after which a displaced dimension has decayed halfway back to its
+    neutral midpoint. Applied once per turn using the real gap since the
+    previous turn, so a long idle gap (a new session) naturally returns
+    the state close to neutral without a special-cased reset.
+
+    label_state_targets (Sprint 5.2, see _default_label_state_targets())
+    are the per-EmotionLabel.value target VALUES apply_estimate() pulls
+    each dimension toward — real, disclosed, unvalidated first-pass
+    defaults, correctable via config without a code change.
+
+    tone_high_stress_threshold/{jarvis,minie}_tone_low_mood_threshold/
+    {jarvis,minie}_tone_low_comfort_threshold (Sprint 5.4) are
+    personas/jarvis.py's/personas/minie.py's own _select_tone_variant()
+    thresholds — real, disclosed, unvalidated first-pass defaults, same
+    category as speaking_rate_baseline_wpm above, correctable via config
+    without a code change per 03_Engineering_Standards.md's "no
+    hardcoded... thresholds" rule. The stress threshold is shared (both
+    personas read the same value); mood/comfort are per-persona since
+    Minie's own "casual, comfort, wellness" identity leans into
+    ToneVariant.ENCOURAGING more readily than Jarvis's (looser, i.e.
+    less-negative/less-extreme, thresholds) — see sprint_5_4.md's own
+    Engineering Rationale.
+    """
+
+    lexical_markers: dict[str, list[str]] = field(default_factory=_default_lexical_markers)
+    speaking_rate_baseline_wpm: float = 150.0
+    long_pause_threshold_seconds: float = 4.0
+    sentiment_hint_base_confidence: float = 0.65
+    lexical_marker_agreement_bonus: float = 0.2
+    lexical_only_base_confidence: float = 0.45
+    numeric_tie_break_bonus: float = 0.1
+    min_estimate_confidence: float = 0.35
+    state_smoothing_alpha: float = 0.15
+    baseline_decay_half_life_seconds: float = 1800.0
+    label_state_targets: dict[str, dict[str, float]] = field(
+        default_factory=_default_label_state_targets
+    )
+    tone_high_stress_threshold: float = 70.0
+    jarvis_tone_low_mood_threshold: float = -25.0
+    jarvis_tone_low_comfort_threshold: float = 35.0
+    minie_tone_low_mood_threshold: float = -15.0
+    minie_tone_low_comfort_threshold: float = 40.0
+
+
 @dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
@@ -615,6 +771,7 @@ class AppConfig:
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     internet: InternetConfig = field(default_factory=InternetConfig)
+    emotion: EmotionConfig = field(default_factory=EmotionConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -630,6 +787,7 @@ class AppConfig:
         self._validate_workflow()
         self._validate_scheduler()
         self._validate_internet()
+        self._validate_emotion()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -821,6 +979,11 @@ class AppConfig:
                 "memory.max_retrieval_results must be positive, "
                 f"got {self.memory.max_retrieval_results}"
             )
+        if not (0 <= self.memory.emotional_moment_recall_threshold <= 1):
+            raise ConfigError(
+                "memory.emotional_moment_recall_threshold must be in [0, 1], "
+                f"got {self.memory.emotional_moment_recall_threshold}"
+            )
 
     def _validate_device_control(self) -> None:
         if self.device_control.max_tracked_applications <= 0:
@@ -949,3 +1112,82 @@ class AppConfig:
                 "internet.min_sources_for_corroboration must be positive, "
                 f"got {self.internet.min_sources_for_corroboration}"
             )
+
+    def _validate_emotion(self) -> None:
+        for label, keywords in self.emotion.lexical_markers.items():
+            if not label or not label.strip():
+                raise ConfigError("emotion.lexical_markers must not contain empty-string keys")
+            for keyword in keywords:
+                if not keyword or not keyword.strip():
+                    raise ConfigError(
+                        f"emotion.lexical_markers[{label!r}] must not contain empty strings"
+                    )
+        if self.emotion.speaking_rate_baseline_wpm <= 0:
+            raise ConfigError(
+                "emotion.speaking_rate_baseline_wpm must be positive, "
+                f"got {self.emotion.speaking_rate_baseline_wpm}"
+            )
+        if self.emotion.long_pause_threshold_seconds <= 0:
+            raise ConfigError(
+                "emotion.long_pause_threshold_seconds must be positive, "
+                f"got {self.emotion.long_pause_threshold_seconds}"
+            )
+        confidence_fields = {
+            "sentiment_hint_base_confidence": self.emotion.sentiment_hint_base_confidence,
+            "lexical_marker_agreement_bonus": self.emotion.lexical_marker_agreement_bonus,
+            "lexical_only_base_confidence": self.emotion.lexical_only_base_confidence,
+            "numeric_tie_break_bonus": self.emotion.numeric_tie_break_bonus,
+            "min_estimate_confidence": self.emotion.min_estimate_confidence,
+        }
+        for name, value in confidence_fields.items():
+            if not (0 <= value <= 1):
+                raise ConfigError(f"emotion.{name} must be in [0, 1], got {value}")
+        if not (0 < self.emotion.state_smoothing_alpha <= 1):
+            raise ConfigError(
+                "emotion.state_smoothing_alpha must be in (0, 1], "
+                f"got {self.emotion.state_smoothing_alpha}"
+            )
+        if self.emotion.baseline_decay_half_life_seconds <= 0:
+            raise ConfigError(
+                "emotion.baseline_decay_half_life_seconds must be positive, "
+                f"got {self.emotion.baseline_decay_half_life_seconds}"
+            )
+        for label, targets in self.emotion.label_state_targets.items():
+            if not label or not label.strip():
+                raise ConfigError("emotion.label_state_targets must not contain empty-string keys")
+            for dimension, target in targets.items():
+                if dimension not in _EMOTIONAL_STATE_DIMENSION_RANGES:
+                    raise ConfigError(
+                        f"emotion.label_state_targets[{label!r}] names unknown dimension "
+                        f"{dimension!r}, must be one of {sorted(_EMOTIONAL_STATE_DIMENSION_RANGES)}"
+                    )
+                low, high = _EMOTIONAL_STATE_DIMENSION_RANGES[dimension]
+                if not (low <= target <= high):
+                    raise ConfigError(
+                        f"emotion.label_state_targets[{label!r}][{dimension!r}] must be in "
+                        f"[{low}, {high}], got {target}"
+                    )
+        stress_low, stress_high = _EMOTIONAL_STATE_DIMENSION_RANGES["stress"]
+        if not (stress_low <= self.emotion.tone_high_stress_threshold <= stress_high):
+            raise ConfigError(
+                "emotion.tone_high_stress_threshold must be in "
+                f"[{stress_low}, {stress_high}], got {self.emotion.tone_high_stress_threshold}"
+            )
+        mood_low, mood_high = _EMOTIONAL_STATE_DIMENSION_RANGES["mood"]
+        for name, value in (
+            ("jarvis_tone_low_mood_threshold", self.emotion.jarvis_tone_low_mood_threshold),
+            ("minie_tone_low_mood_threshold", self.emotion.minie_tone_low_mood_threshold),
+        ):
+            if not (mood_low <= value <= mood_high):
+                raise ConfigError(
+                    f"emotion.{name} must be in [{mood_low}, {mood_high}], got {value}"
+                )
+        comfort_low, comfort_high = _EMOTIONAL_STATE_DIMENSION_RANGES["comfort"]
+        for name, value in (
+            ("jarvis_tone_low_comfort_threshold", self.emotion.jarvis_tone_low_comfort_threshold),
+            ("minie_tone_low_comfort_threshold", self.emotion.minie_tone_low_comfort_threshold),
+        ):
+            if not (comfort_low <= value <= comfort_high):
+                raise ConfigError(
+                    f"emotion.{name} must be in [{comfort_low}, {comfort_high}], got {value}"
+                )

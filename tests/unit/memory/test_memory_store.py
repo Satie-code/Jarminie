@@ -184,6 +184,74 @@ def test_occurred_at_round_trips_when_set(database_config, memory_config):
     assert fetched.occurred_at == occurred
 
 
+def test_emotional_significance_round_trips_when_set(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+    store.start()
+    try:
+        record_id = store.store(make_record(emotional_significance=0.85))
+        fetched = store.get_by_id(record_id)
+    finally:
+        store.stop()
+
+    assert fetched.emotional_significance == 0.85
+
+
+def test_emotional_significance_defaults_to_zero(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+    store.start()
+    try:
+        record_id = store.store(make_record())
+        fetched = store.get_by_id(record_id)
+    finally:
+        store.stop()
+
+    assert fetched.emotional_significance == 0.0
+
+
+def test_starting_migrates_a_pre_existing_table_missing_the_new_column(
+    database_config, memory_config
+):
+    """Sprint 5.3: CREATE TABLE IF NOT EXISTS is a no-op against an
+    already-existing table — simulates a real on-disk database created
+    before this sprint (no emotional_significance column at all) and
+    confirms start()'s own migration step adds it without data loss."""
+    sqlite_client = SqliteClient(database_config.sqlite_path)
+    sqlite_client.connect()
+    sqlite_client.execute(
+        "CREATE TABLE memory_records ("
+        "id TEXT PRIMARY KEY, memory_type TEXT NOT NULL, content TEXT NOT NULL, "
+        "category TEXT, confidence_score REAL NOT NULL, is_permanent INTEGER NOT NULL, "
+        "user_override INTEGER NOT NULL, source_session_id TEXT, occurred_at TEXT, "
+        "created_at TEXT NOT NULL, last_accessed_at TEXT NOT NULL, "
+        "band_entered_at TEXT NOT NULL, access_count INTEGER NOT NULL)"
+    )
+    now = datetime.now(UTC).isoformat()
+    sqlite_client.execute(
+        "INSERT INTO memory_records "
+        "(id, memory_type, content, category, confidence_score, is_permanent, "
+        "user_override, source_session_id, created_at, last_accessed_at, "
+        "band_entered_at, access_count) "
+        "VALUES ('pre-existing', 'shared', 'a pre-migration record', NULL, 0.0, 0, 0, "
+        "NULL, ?, ?, ?, 0)",
+        (now, now, now),
+    )
+    sqlite_client.close()
+
+    store = make_store(database_config, memory_config)
+    store.start()
+    try:
+        fetched = store.get_by_id("pre-existing")
+        new_record_id = store.store(make_record())
+        new_fetched = store.get_by_id(new_record_id)
+    finally:
+        store.stop()
+
+    assert fetched is not None
+    assert fetched.content == "a pre-migration record"
+    assert fetched.emotional_significance == 0.0
+    assert new_fetched.emotional_significance == 0.0
+
+
 def test_occurred_at_defaults_to_none(database_config, memory_config):
     store = make_store(database_config, memory_config)
     store.start()

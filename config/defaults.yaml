@@ -504,3 +504,13 @@ presentation:
   # should_switch()'s own minimum consecutive-matching-turn count before
   # recommending an actual dashboard rearrangement.
   workspace_switch_debounce_turns: 2
+
+  # Sprint 5.13 — Companion Experience. presentation/companion_experience.py's
+  # CompanionExperienceEngine. greeting_idle_threshold_seconds: below this
+  # much session idle time, no special "welcome back" moment is warranted
+  # (3600.0 = one hour). celebration_significance_threshold is a
+  # deliberately higher bar than memory.emotional_moment_recall_threshold
+  # — reserved for genuinely standout moments, not merely recall-worthy
+  # ones.
+  greeting_idle_threshold_seconds: 3600.0
+  celebration_significance_threshold: 0.75

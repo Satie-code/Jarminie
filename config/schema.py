@@ -1010,6 +1010,18 @@ class PresentationConfig:
     before recommending an actual dashboard rearrangement. Both real,
     disclosed, unvalidated first-pass defaults, the same category as
     every other Level 5 tuned default.
+
+    `greeting_idle_threshold_seconds`/`celebration_significance_threshold`
+    (Sprint 5.13) drive `presentation/companion_experience.py`'s
+    `CompanionExperienceEngine`: below `greeting_idle_threshold_seconds`
+    of session idle time, `check_for_greeting()` returns `None` (no
+    special "welcome back" moment warranted); `celebration_significance_threshold`
+    is a deliberately higher bar than `MemoryConfig.
+    emotional_moment_recall_threshold`'s own general-recall threshold —
+    `check_for_celebration()` reserves itself for genuinely standout
+    moments, not merely ones significant enough to recall at all. Both
+    real, disclosed, unvalidated first-pass defaults, the same category
+    as every other Level 5 tuned default.
     """
 
     jarvis_smile_intensity_min: float = 0.0
@@ -1074,6 +1086,9 @@ class PresentationConfig:
         default_factory=_default_workspace_profile_keywords
     )
     workspace_switch_debounce_turns: int = 2
+
+    greeting_idle_threshold_seconds: float = 3600.0
+    celebration_significance_threshold: float = 0.75
 
 
 @dataclass
@@ -1691,6 +1706,17 @@ class AppConfig:
             raise ConfigError(
                 "presentation.workspace_switch_debounce_turns must be positive, got "
                 f"{p.workspace_switch_debounce_turns}"
+            )
+
+        if p.greeting_idle_threshold_seconds <= 0:
+            raise ConfigError(
+                "presentation.greeting_idle_threshold_seconds must be positive, got "
+                f"{p.greeting_idle_threshold_seconds}"
+            )
+        if not (0.0 <= p.celebration_significance_threshold <= 1.0):
+            raise ConfigError(
+                "presentation.celebration_significance_threshold must be in [0.0, 1.0], got "
+                f"{p.celebration_significance_threshold}"
             )
         for expression_id, threshold in p.minie_expression_thresholds.items():
             if not expression_id.strip():

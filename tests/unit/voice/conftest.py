@@ -171,14 +171,20 @@ def fake_stt() -> FakeSpeechToText:
 
 
 class FakeTextToSpeech:
-    """In-memory TextToSpeech double — never loads a real model."""
+    """In-memory TextToSpeech double — never loads a real model.
+    on_audio_ready (Sprint 5.14) is accepted, matching the real
+    TextToSpeech.speak() Protocol, and simply recorded — no test in this
+    directory needs a real audio buffer, only that the parameter is
+    accepted and forwarded correctly."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.on_audio_ready_calls: list = []
         self.should_raise = False
 
-    def speak(self, text: str, voice_id: str) -> None:
+    def speak(self, text: str, voice_id: str, on_audio_ready=None) -> None:
         self.calls.append((text, voice_id))
+        self.on_audio_ready_calls.append(on_audio_ready)
         if self.should_raise:
             raise TextToSpeechError("simulated speech synthesis failure")
 

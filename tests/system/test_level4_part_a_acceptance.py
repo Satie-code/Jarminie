@@ -501,6 +501,9 @@ def test_level4_part_a_full_acceptance_scenario(
         "authority_evaluator",
         "action_audit_log",
         "workflow_store",
+        "emotion_detection_engine",
+        "emotional_state_manager",
+        "presentation_controller",
     }
     assert all(state == "running" for state in states.values())
 

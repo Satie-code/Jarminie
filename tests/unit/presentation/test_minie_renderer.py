@@ -4,9 +4,19 @@ Uses a minimal fake AvatarRenderer — MinieRenderer's own contract is
 "thin adapter," so these tests verify the translation/delegation logic
 itself, never a real VTube Studio connection (that's
 test_vtube_studio_renderer.py's own job).
+
+mount() (Sprint 5.14) spawns a background daemon thread rather than
+calling AvatarRenderer.mount() synchronously — see that method's own
+docstring for the measured latency finding this resolves.
+test_mount_delegates_to_the_avatar_renderer() below waits on
+mount_called (a threading.Event _FakeAvatarRenderer sets) rather than
+asserting immediately after mount() returns, matching this real,
+disclosed asynchrony rather than racing it.
 """
 
+import threading
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,13 +24,17 @@ from config.schema import PresentationConfig
 from presentation.minie_renderer import MinieRenderer, _derive_expression_id
 from presentation.presentation_state import PresentationState
 
+_WAIT_TIMEOUT = 2.0
+
 
 class _FakeAvatarRenderer:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.mount_called = threading.Event()
 
     def mount(self) -> None:
         self.calls.append(("mount",))
+        self.mount_called.set()
 
     def unmount(self) -> None:
         self.calls.append(("unmount",))
@@ -69,7 +83,7 @@ def avatar() -> _FakeAvatarRenderer:
 
 @pytest.fixture
 def renderer(avatar, config) -> MinieRenderer:
-    return MinieRenderer(avatar, config)
+    return MinieRenderer(avatar, config, MagicMock())
 
 
 # --- mount()/unmount() delegate straight through ------------------------------
@@ -77,6 +91,7 @@ def renderer(avatar, config) -> MinieRenderer:
 
 def test_mount_delegates_to_the_avatar_renderer(renderer, avatar):
     renderer.mount()
+    assert avatar.mount_called.wait(timeout=_WAIT_TIMEOUT)
     assert avatar.calls == [("mount",)]
 
 

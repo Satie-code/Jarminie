@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from config.schema import (
     AppConfig,
@@ -51,12 +52,15 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from emotion.detection_engine import EmotionDetectionEngine
+from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
+from memory.emotional_memory import EmotionalMemory
 from memory.event_memory import EventMemory
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.memory_store import MemoryStore
@@ -66,6 +70,18 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from presentation.adaptive_workspace import AdaptiveWorkspaceController
+from presentation.avatar_renderer_registry import create_avatar_renderer
+from presentation.companion_experience import CompanionExperienceEngine
+from presentation.gesture_engine import GestureEngine
+from presentation.jarvis_renderer import JarvisRenderer
+from presentation.jarvis_state_computer import JarvisPresentationStateComputer
+from presentation.lip_sync import LipSyncDriver
+from presentation.minie_renderer import MinieRenderer
+from presentation.minie_state_computer import MiniePresentationStateComputer
+from presentation.presentation_controller import PresentationController
+from presentation.transition_engine import TransitionEngine
+from presentation.voice_personality import VoicePersonalityModulator
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -141,7 +157,11 @@ class FakeTextToSpeech:
         self.speak_calls: list[tuple[str, str]] = []
         self.spoken_event = threading.Event()
 
-    def speak(self, text: str, voice_id: str) -> None:
+    def speak(self, text: str, voice_id: str, on_audio_ready=None) -> None:
+        if on_audio_ready is not None:
+            import numpy as np
+
+            on_audio_ready(np.zeros(160, dtype=np.float32).tobytes(), 16000)
         self.speak_calls.append((text, voice_id))
         self.spoken_event.set()
 
@@ -347,9 +367,15 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     conversation_store = ConversationSessionStore(sqlite_client, config.database)
     context_manager = ContextManager(conversation_store)
 
+    # Sprint 5.14: stands in for on_switch until transition_engine (Level
+    # 5, built later in this same function) exists — see tests/integration/
+    # conftest.py's own identical persona_switch_relay comment, and
+    # main.py's own docstring, for the full circular-construction
+    # reasoning this CallbackRelay resolves.
+    persona_switch_relay = CallbackRelay()
     jarvis = JarvisPersona(config.voice)
     minie = MiniePersona(config.voice)
-    persona_manager = PersonaManager(jarvis, minie, config.voice)
+    persona_manager = PersonaManager(jarvis, minie, config.voice, on_switch=persona_switch_relay)
 
     turn_complete_relay = CallbackRelay()
     session_ended_relay = CallbackRelay()
@@ -455,6 +481,42 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     source_validator = SourceValidator(internet_config)
     summarizer = Summarizer(llm_client, internet_config, config.models)
 
+    # Sprint 5.14 — Level 5 Part A, matching main.py's own
+    # _construct_level5_modules() exactly (same real classes throughout;
+    # the one real external boundary, VTube Studio, is unfaked but
+    # self-degrading — see tests/integration/conftest.py's own identical
+    # reasoning). Unlike that file, this harness already has a real
+    # CoreManager, so JarvisRenderer/MinieRenderer receive it directly
+    # rather than a MagicMock stand-in.
+    emotion_detection_engine = EmotionDetectionEngine(config.emotion)
+    emotional_state_manager = EmotionalStateManager(config.emotion)
+    emotional_memory = EmotionalMemory(memory_store, config.memory)
+
+    gesture_engine = GestureEngine(config.presentation)
+    jarvis_state_computer = JarvisPresentationStateComputer(config.presentation)
+    minie_state_computer = MiniePresentationStateComputer(config.presentation)
+    jarvis_renderer = JarvisRenderer(config.presentation, core_manager)
+    avatar_renderer = create_avatar_renderer(config.presentation)
+    minie_renderer = MinieRenderer(avatar_renderer, config.presentation, core_manager)
+
+    presentation_controller = PresentationController(
+        persona_manager=persona_manager,
+        emotional_state_manager=emotional_state_manager,
+        quiet_mode_controller=quiet_mode_controller,
+        state_computers={"jarvis": jarvis_state_computer, "minie": minie_state_computer},
+        renderers={"jarvis": jarvis_renderer, "minie": minie_renderer},
+        gesture_engine=gesture_engine,
+    )
+    transition_engine = TransitionEngine(presentation_controller, config.presentation)
+    persona_switch_relay.target = transition_engine.transition
+
+    adaptive_workspace_controller = AdaptiveWorkspaceController(config.presentation)
+    companion_experience_engine = CompanionExperienceEngine(
+        emotional_memory, event_memory, config.presentation
+    )
+    voice_personality_modulator = VoicePersonalityModulator(config.presentation)
+    lip_sync_driver = LipSyncDriver(config.presentation)
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -485,6 +547,18 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         summarizer=summarizer,
         action_audit_log=audit_log,
         scheduler_config=scheduler_config,
+        memory_config=config.memory,
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        gesture_engine=gesture_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
+        companion_experience_engine=companion_experience_engine,
+        jarvis_renderer=jarvis_renderer,
+        avatar_renderer=avatar_renderer,
     )
 
     # task_scheduler/calendar_store registered FIRST, before even
@@ -530,6 +604,13 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     # _register_level4_modules() docstring.
     core_manager.register_module("action_audit_log", audit_log)
     core_manager.register_module("workflow_store", workflow_store)
+    # Sprint 5.14 — Level 5 Part A, registered last (main.py's own
+    # _register_level5_modules() ordering): presentation_controller.start()
+    # calls persona_manager.active_persona(), which requires persona_manager
+    # already registered/started above.
+    core_manager.register_module("emotion_detection_engine", emotion_detection_engine)
+    core_manager.register_module("emotional_state_manager", emotional_state_manager)
+    core_manager.register_module("presentation_controller", presentation_controller)
 
     core_manager.startup()
 
@@ -580,25 +661,61 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         summarizer=summarizer,
         scheduler_config=scheduler_config,
         internet_config=internet_config,
+        # Sprint 5.14 (Level 5 Part A) additions.
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        jarvis_renderer=jarvis_renderer,
+        minie_renderer=minie_renderer,
+        avatar_renderer=avatar_renderer,
+        gesture_engine=gesture_engine,
+        transition_engine=transition_engine,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        companion_experience_engine=companion_experience_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
     )
     try:
         yield harness
     finally:
         core_manager.shutdown()
+        # Sprint 5.14: see tests/integration/conftest.py's own identical
+        # comment for the concretely reproduced Qt native crash this
+        # resolves — core_manager.shutdown() above already calls
+        # presentation_controller.stop() (unmounting jarvis_renderer),
+        # but never destroys or processes the real, unparented top-level
+        # QWidget JarvisRenderer.mount() built; doing so here, per test,
+        # keeps Qt's own internal bookkeeping consistent throughout a
+        # full suite run instead of building up a backlog that eventually
+        # corrupts state.
+        if jarvis_renderer._container is not None:
+            jarvis_renderer._container.deleteLater()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+            app.processEvents()
 
 
 @pytest.fixture
-def app_harness(tmp_path, voice_config):
+def app_harness(tmp_path, voice_config, qapp):
     """SchedulerConfig() (realistic, slow defaults) — see
     _app_harness_impl()'s own docstring for why. Every existing system
     test in this directory uses this fixture; only
     test_level4_part_b_acceptance.py opts into fast_scheduler_app_
-    harness below instead."""
+    harness below instead.
+
+    qapp (Sprint 5.14, pytest-qt's own session-scoped fixture) is
+    depended on but never used directly — see tests/integration/
+    conftest.py's own pipeline_harness for why this is required now that
+    PresentationController.start() (registered/started as a real
+    ManagedModule here) mounts JarvisRenderer by default, lazily
+    constructing real QWidgets."""
     yield from _app_harness_impl(tmp_path, voice_config, SchedulerConfig())
 
 
 @pytest.fixture
-def fast_scheduler_app_harness(tmp_path, voice_config):
+def fast_scheduler_app_harness(tmp_path, voice_config, qapp):
     """Identical object graph to app_harness, but with short
     poll_interval_seconds/maintenance_interval_seconds (0.3s, matching
     tests/integration/conftest.py's own fast_scheduler_harness — see its

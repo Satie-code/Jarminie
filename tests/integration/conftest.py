@@ -32,23 +32,29 @@ tests/unit/voice/conftest.py.
 
 import threading
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtWidgets import QApplication
 
 from config.schema import (
     DatabaseConfig,
     DeviceControlConfig,
+    EmotionConfig,
     InternetConfig,
     MemoryConfig,
     ModelConfig,
+    PresentationConfig,
     ResourceThresholds,
     SchedulerConfig,
     SecurityConfig,
+    UIConfig,
     VoiceConfig,
     WorkflowConfig,
 )
-from core.resource_monitor import ResourceMonitor
+from core.resource_monitor import ResourceMonitor, ResourceSnapshot
 from database.sqlite_client import SqliteClient
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
@@ -62,12 +68,15 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from emotion.detection_engine import EmotionDetectionEngine
+from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
+from memory.emotional_memory import EmotionalMemory
 from memory.event_memory import EventMemory
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.memory_store import MemoryStore
@@ -77,6 +86,18 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from presentation.adaptive_workspace import AdaptiveWorkspaceController
+from presentation.avatar_renderer_registry import create_avatar_renderer
+from presentation.companion_experience import CompanionExperienceEngine
+from presentation.gesture_engine import GestureEngine
+from presentation.jarvis_renderer import JarvisRenderer
+from presentation.jarvis_state_computer import JarvisPresentationStateComputer
+from presentation.lip_sync import LipSyncDriver
+from presentation.minie_renderer import MinieRenderer
+from presentation.minie_state_computer import MiniePresentationStateComputer
+from presentation.presentation_controller import PresentationController
+from presentation.transition_engine import TransitionEngine
+from presentation.voice_personality import VoicePersonalityModulator
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -170,18 +191,29 @@ class FakeSpeechToText:
 
 class FakeTextToSpeech:
     """should_raise (Sprint 2.14, scenario c at integration level)
-    simulates a Coqui synthesis/playback failure."""
+    simulates a Coqui synthesis/playback failure. on_audio_ready (Sprint
+    5.14) is accepted (matching the real TextToSpeech.speak() Protocol,
+    voice/text_to_speech.py) and invoked with a tiny synthetic float32
+    silence buffer — real enough for LipSyncDriver.drive_from_audio()'s
+    own np.frombuffer() decode to succeed without raising, never
+    asserted on by any test in this directory that doesn't explicitly
+    care."""
 
     def __init__(self) -> None:
         self.speak_calls: list[tuple[str, str]] = []
         self.spoken_event = threading.Event()
         self.should_raise = False
 
-    def speak(self, text: str, voice_id: str) -> None:
+    def speak(self, text: str, voice_id: str, on_audio_ready=None) -> None:
         if self.should_raise:
             from voice.errors import TextToSpeechError
 
             raise TextToSpeechError("simulated Coqui synthesis failure")
+        if on_audio_ready is not None:
+            import numpy as np
+
+            silence = np.zeros(160, dtype=np.float32).tobytes()
+            on_audio_ready(silence, 16000)
         self.speak_calls.append((text, voice_id))
         self.spoken_event.set()
 
@@ -335,11 +367,42 @@ def _wait_for_no_scheduler_worker_threads(timeout: float = 3.0) -> None:
         time.sleep(0.02)
 
 
+def _fake_core_manager(interval_ms: int = 3000) -> MagicMock:
+    """Sprint 5.14: JarvisRenderer/MinieRenderer's own required
+    core_manager constructor parameter — this harness starts modules by
+    hand rather than through a real CoreManager (see this function's own
+    docstring), so a MagicMock stands in, mirroring tests/unit/presentation/
+    test_jarvis_renderer.py's own _fake_core_manager() helper exactly.
+    Only ui_config()/module_states()/check_resources() are ever actually
+    called (by _SystemStatusPanel, only if a test calls
+    apply_workspace_profile()) — real values are supplied for those three
+    so such a call would not crash outright, even though no test in this
+    directory currently exercises that path."""
+    manager = MagicMock()
+    manager.ui_config.return_value = UIConfig(status_refresh_interval_ms=interval_ms)
+    manager.module_states.return_value = {}
+    manager.check_resources.return_value = ResourceSnapshot(
+        cpu_percent=10.0,
+        ram_percent=20.0,
+        disk_percent=30.0,
+        battery_percent=80.0,
+        timestamp=datetime.now(UTC),
+    )
+    return manager
+
+
 def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig):
     """The real Communication Pipeline object graph, matching
     main.py's own composition order exactly (_register_level2_modules,
-    _register_level3_modules, and — Sprint 4.11 — _register_level4_modules)
-    — fakes only at the mic/wake-engine/STT/TTS/Ollama boundary.
+    _register_level3_modules, _register_level4_modules, and — Sprint
+    5.14 — _register_level5_modules) — fakes only at the mic/wake-engine/
+    STT/TTS/Ollama boundary. Level 5's own real avatar_renderer
+    (VTubeStudioAvatarRenderer, via create_avatar_renderer()) is used
+    unfaked too — mount()'s own "disconnected, never crash" contract
+    (Sprint 5.8) already degrades a real connection attempt against a
+    VTube Studio instance that isn't running to a safe, fast no-op, the
+    same "real external dependency stays opt-in" precedent this
+    module's own docstring already applies to Ollama/search providers.
 
     Level 4's device_control_config is deliberately scoped for safety,
     per sprint_4_11.md's own Potential Risks ("every destructive-shaped
@@ -371,9 +434,16 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
     conversation_store = ConversationSessionStore(sqlite_client, database_config)
     context_manager = ContextManager(conversation_store)
 
+    # Sprint 5.14: stands in for on_switch until transition_engine (Level
+    # 5, built much later in this same function) exists — the identical
+    # circular-construction problem/CallbackRelay resolution main.py's
+    # own persona_switch_relay applies, reproduced here by hand since
+    # this harness constructs its object graph directly rather than
+    # through main.py's own composition-root functions.
+    persona_switch_relay = CallbackRelay()
     jarvis = JarvisPersona(voice_config)
     minie = MiniePersona(voice_config)
-    persona_manager = PersonaManager(jarvis, minie, voice_config)
+    persona_manager = PersonaManager(jarvis, minie, voice_config, on_switch=persona_switch_relay)
 
     turn_complete_relay = CallbackRelay()
     session_ended_relay = CallbackRelay()
@@ -499,6 +569,43 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
     source_validator = SourceValidator(internet_config)
     summarizer = Summarizer(llm_client, internet_config, model_config)
 
+    # Sprint 5.14 — Level 5 Part A, same construction shape as main.py's
+    # own _construct_level5_modules() (real classes throughout; the one
+    # real external boundary, VTube Studio, is unfaked but self-degrading
+    # — see this function's own docstring).
+    emotion_config = EmotionConfig()
+    presentation_config = PresentationConfig()
+    fake_core_manager = _fake_core_manager()
+
+    emotion_detection_engine = EmotionDetectionEngine(emotion_config)
+    emotional_state_manager = EmotionalStateManager(emotion_config)
+    emotional_memory = EmotionalMemory(memory_store, memory_config)
+
+    gesture_engine = GestureEngine(presentation_config)
+    jarvis_state_computer = JarvisPresentationStateComputer(presentation_config)
+    minie_state_computer = MiniePresentationStateComputer(presentation_config)
+    jarvis_renderer = JarvisRenderer(presentation_config, fake_core_manager)
+    avatar_renderer = create_avatar_renderer(presentation_config)
+    minie_renderer = MinieRenderer(avatar_renderer, presentation_config, fake_core_manager)
+
+    presentation_controller = PresentationController(
+        persona_manager=persona_manager,
+        emotional_state_manager=emotional_state_manager,
+        quiet_mode_controller=quiet_mode_controller,
+        state_computers={"jarvis": jarvis_state_computer, "minie": minie_state_computer},
+        renderers={"jarvis": jarvis_renderer, "minie": minie_renderer},
+        gesture_engine=gesture_engine,
+    )
+    transition_engine = TransitionEngine(presentation_controller, presentation_config)
+    persona_switch_relay.target = transition_engine.transition
+
+    adaptive_workspace_controller = AdaptiveWorkspaceController(presentation_config)
+    companion_experience_engine = CompanionExperienceEngine(
+        emotional_memory, event_memory, presentation_config
+    )
+    voice_personality_modulator = VoicePersonalityModulator(presentation_config)
+    lip_sync_driver = LipSyncDriver(presentation_config)
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -529,6 +636,18 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
         summarizer=summarizer,
         action_audit_log=audit_log,
         scheduler_config=scheduler_config,
+        memory_config=memory_config,
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        gesture_engine=gesture_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
+        companion_experience_engine=companion_experience_engine,
+        jarvis_renderer=jarvis_renderer,
+        avatar_renderer=avatar_renderer,
     )
 
     # task_scheduler/calendar_store start FIRST, before pipeline.start()
@@ -537,7 +656,11 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
     # start() to have already run (matching main.py's own real
     # registration-order requirement, reproduced here by hand since this
     # harness starts modules individually rather than through
-    # CoreManager).
+    # CoreManager). emotion_detection_engine/emotional_state_manager/
+    # presentation_controller (Sprint 5.14's own three ManagedModules)
+    # start last, mirroring main.py's own _register_level5_modules()
+    # ordering — presentation_controller.start() calls persona_manager.
+    # active_persona(), which requires persona_manager already started.
     task_scheduler.start()
     calendar_store.start()
     mic.start()
@@ -553,6 +676,9 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
     authority_evaluator.start()
     audit_log.start()
     workflow_store.start()
+    emotion_detection_engine.start()
+    emotional_state_manager.start()
+    presentation_controller.start()
     pipeline.start()
     wake_word_detector.start()
 
@@ -596,12 +722,50 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
         summarizer=summarizer,
         scheduler_config=scheduler_config,
         internet_config=internet_config,
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        jarvis_renderer=jarvis_renderer,
+        minie_renderer=minie_renderer,
+        avatar_renderer=avatar_renderer,
+        gesture_engine=gesture_engine,
+        transition_engine=transition_engine,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        companion_experience_engine=companion_experience_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
     )
     try:
         yield harness
     finally:
         wake_word_detector.stop()
         pipeline.stop()
+        presentation_controller.stop()
+        emotional_state_manager.stop()
+        emotion_detection_engine.stop()
+        # Sprint 5.14: presentation_controller.start() above (real
+        # production behavior, deliberately exercised for real) makes
+        # JarvisRenderer build a real, unparented top-level QWidget every
+        # single test in this directory now constructs — a concretely
+        # reproduced Qt native crash (Windows fatal exception: access
+        # violation, inside pytest-qt's own qtbot.wait()) was found once
+        # ~140 such widgets across this whole directory accumulated with
+        # no test ever pumping Qt's event loop, only for the resulting
+        # backlog to land all at once inside some unrelated, later test's
+        # own first real qtbot.wait() call. Explicitly releasing the
+        # widget and pumping the event loop here, incrementally, per
+        # test, keeps Qt's own internal widget/timer bookkeeping
+        # consistent throughout the run instead of building up a batch
+        # that eventually corrupts state — verified directly: the
+        # combined tests/integration/+tests/system/+tests/unit/presentation/
+        # run that reliably crashed without this passed cleanly with it.
+        if jarvis_renderer._container is not None:
+            jarvis_renderer._container.deleteLater()
+        app = QApplication.instance()
+        if app is not None:
+            app.processEvents()
+            app.processEvents()
         # task_scheduler.stop() moved here (immediately after pipeline.stop()
         # removes every job it registered) — deliberately BEFORE any
         # store's own stop() closes the SqliteClient connection a still
@@ -627,17 +791,26 @@ def _pipeline_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerCo
 
 
 @pytest.fixture
-def pipeline_harness(tmp_path, voice_config):
+def pipeline_harness(tmp_path, voice_config, qapp):
     """SchedulerConfig() (realistic, slow defaults) — see
     _pipeline_harness_impl()'s own docstring for why. Every existing
     integration test in this directory uses this fixture; only
     test_scheduler_integration.py opts into fast_scheduler_harness
-    below instead."""
+    below instead.
+
+    qapp (Sprint 5.14, pytest-qt's own session-scoped fixture) is
+    depended on but never used directly — PresentationController.start()
+    (Level 5's own ManagedModule, started inside _pipeline_harness_impl())
+    mounts JarvisRenderer by default, which lazily constructs real
+    QWidgets; requesting qapp here guarantees a QApplication already
+    exists before that happens, the same precedent
+    tests/unit/presentation/test_jarvis_renderer.py's own qtbot-based
+    widget construction already established."""
     yield from _pipeline_harness_impl(tmp_path, voice_config, SchedulerConfig())
 
 
 @pytest.fixture
-def fast_scheduler_harness(tmp_path, voice_config):
+def fast_scheduler_harness(tmp_path, voice_config, qapp):
     """Identical object graph to pipeline_harness, but with short
     poll_interval_seconds/maintenance_interval_seconds so
     test_scheduler_integration.py can observe real recurrence (a job

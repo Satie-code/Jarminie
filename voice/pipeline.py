@@ -161,6 +161,56 @@ ActionResult/WorkflowRunResult parameter, and extending it is outside
 this sprint's own Files to Modify) — "via the active persona" therefore
 means spoken through persona.voice_id (VoiceSessionManager.speak_reply()),
 not literally through Persona.compose_reply().
+
+Sprint 5.14 (Presentation Layer Integration) wires the entire Level 5
+Part A graph (Sprints 5.1-5.13) into this same per-turn flow, in
+_handle_turn_complete()'s own existing shape, without restructuring it:
+
+    _run_decision_pipeline()  (existing, unchanged)
+          |
+    _run_presentation_pipeline(context, context_analysis)  <-- NEW
+          | EmotionDetectionEngine.collect_signals()/.estimate() (5.1)
+          | EmotionalStateManager.decay_toward_baseline()/.apply_estimate() (5.2)
+          | EmotionalMemory.record_significant_moment() (5.3, conditional)
+          | PresentationController.refresh() -> mounted Renderer.render_state() (5.6)
+          | AdaptiveWorkspaceController.select_profile()/.should_switch() (5.12, Jarvis-only)
+          | GestureEngine.trigger_event(TURN_END, ...) (5.9)
+          |
+    persona selection (existing) -- on_switch now really fires
+          | TransitionEngine.transition() (5.10), via PersonaManager's on_switch
+          |
+    reply composed (existing four branches, PLUS new EMOTION_SUPPORT
+    branch: compose_reply_safely(..., emotional_state) directly, since
+    EMOTION_SUPPORT selects a tone, not a subsystem — decision/authority.py's
+    own docstring)
+          |
+    record_turn() / promote_from_turn() / apply_user_override() (existing, unchanged)
+          |
+    VoicePersonalityModulator.shape_pacing(reply, voice_warmth) (5.11)
+          |
+    speak_reply(paced_reply, persona.voice_id, on_audio_ready=...) --
+        on_audio_ready drives LipSyncDriver.drive_from_audio() (5.11)
+        alongside playback whenever Minie's AvatarRenderer is mounted
+          |
+    real per-phase JarvisRenderer.apply_turn_phase() calls (THINKING at
+    turn start, SPEAKING before speak_reply(), LISTENING after) close
+    the ring-state granularity gap Sprint 5.7 named explicitly, threading
+    voice/session_manager.py's own real SessionState through without
+    adding new state to that module (see current_session_state()'s own
+    docstring there)
+
+Separately, a new session's own first turn checks CompanionExperienceEngine
+(5.13) for a greeting/celebration moment (_maybe_prepare_companion_moment()),
+folding its content into that turn's own reply as a plain-text prefix —
+Persona.compose_reply()'s own signature is outside this sprint's Files to
+Modify, so phrasing happens here rather than through a persona template;
+a disclosed, narrower implementation of the Sprint Book's own "folded
+into the next reply's own content input" language, not a silent gap.
+
+CommunicationPipeline gains twelve new constructor dependencies for all
+of this — every one an already-built Level 5 Part A class from Sprints
+5.1-5.13, wired for the first time here, per this sprint's own "no new
+architecture, real work is threading the callers" Engineering Rationale.
 """
 
 import re
@@ -169,10 +219,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from config.schema import SchedulerConfig
+from config.schema import MemoryConfig, SchedulerConfig
 from core.logging_setup import get_logger
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
-from decision.context_analyzer import ContextAnalyzer
+from decision.context_analyzer import ContextAnalysis, ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel, PriorityQueueManager
@@ -186,14 +236,31 @@ from device_control.action_engine import (
     ActionType,
 )
 from device_control.action_log import ActionAuditLog
+from emotion.detection_engine import EmotionDetectionEngine
+from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from memory.confidence_scorer import ConfidenceScorer
+from memory.emotional_memory import EmotionalMemory, _score_significance
 from memory.lifecycle_manager import MemoryLifecycleManager
+from memory.models import MemoryType
 from memory.retrieval_engine import MemoryRetrievalEngine
 from memory.short_term_memory import ShortTermMemory
 from personas.persona_manager import PersonaManager, SwitchReason
+from presentation.adaptive_workspace import AdaptiveWorkspaceController, WorkspaceProfile
+from presentation.avatar_renderer import AvatarRenderer
+from presentation.companion_experience import (
+    CompanionExperienceEngine,
+    CompanionMoment,
+    CompanionMomentType,
+)
+from presentation.gesture_engine import GestureEngine, GestureTrigger
+from presentation.jarvis_renderer import JarvisRenderer
+from presentation.lip_sync import LipSyncDriver
+from presentation.presentation_controller import PresentationController
+from presentation.voice_personality import VoicePersonalityModulator
+from presentation.widgets.segmented_ring_widget import RingState
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.scheduler_model import ItemType, ScheduledItem
@@ -310,6 +377,18 @@ class CommunicationPipeline:
         summarizer: Summarizer,
         action_audit_log: ActionAuditLog,
         scheduler_config: SchedulerConfig,
+        memory_config: MemoryConfig,
+        emotion_detection_engine: EmotionDetectionEngine,
+        emotional_state_manager: EmotionalStateManager,
+        emotional_memory: EmotionalMemory,
+        presentation_controller: PresentationController,
+        adaptive_workspace_controller: AdaptiveWorkspaceController,
+        gesture_engine: GestureEngine,
+        voice_personality_modulator: VoicePersonalityModulator,
+        lip_sync_driver: LipSyncDriver,
+        companion_experience_engine: CompanionExperienceEngine,
+        jarvis_renderer: JarvisRenderer,
+        avatar_renderer: AvatarRenderer,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -340,7 +419,37 @@ class CommunicationPipeline:
         self._scheduler_config = scheduler_config
         self._turn_complete_relay = turn_complete_relay
         self._session_ended_relay = session_ended_relay
+        self._memory_config = memory_config
+        self._emotion_detection_engine = emotion_detection_engine
+        self._emotional_state_manager = emotional_state_manager
+        self._emotional_memory = emotional_memory
+        self._presentation_controller = presentation_controller
+        self._adaptive_workspace_controller = adaptive_workspace_controller
+        self._gesture_engine = gesture_engine
+        self._voice_personality_modulator = voice_personality_modulator
+        self._lip_sync_driver = lip_sync_driver
+        self._companion_experience_engine = companion_experience_engine
+        self._jarvis_renderer = jarvis_renderer
+        self._avatar_renderer = avatar_renderer
         self._wired = False
+
+        # Sprint 5.14's own new, genuinely-this-sprint's-own state (Sprint
+        # 5.12's AdaptiveWorkspaceController.should_switch() deliberately
+        # leaves ownership of the running debounce count to the
+        # integration sprint — see that module's own docstring):
+        self._current_workspace_profile = WorkspaceProfile.GENERAL
+        self._pending_workspace_candidate: WorkspaceProfile | None = None
+        self._workspace_consecutive_match_count = 0
+
+        # A session_id is added here on its own first turn only — see
+        # _maybe_prepare_companion_moment()'s own docstring.
+        self._greeted_session_ids: set[str] = set()
+
+        # EmotionalStateManager.decay_toward_baseline() needs the real
+        # elapsed time since the previous turn; None on the very first
+        # turn this process has ever handled (decay_toward_baseline()
+        # itself treats a zero/negative elapsed_seconds as a no-op).
+        self._last_emotion_update_at: datetime | None = None
 
     def start(self) -> None:
         """Connect the callback chain: point both relays at their real
@@ -483,10 +592,21 @@ class CommunicationPipeline:
         | None signature (Sprint 3.12) was designed to tolerate, and the
         same failure-triggered fallback PersonaManager.select_from_
         context() already documented (Sprint 3.12) for a missing
-        ContextAnalysis."""
+        ContextAnalysis.
+
+        Sprint 5.14: _run_presentation_pipeline() runs in its own narrow
+        exception boundary too (same reasoning as _run_decision_pipeline()'s
+        above — a presentation failure must degrade to "doesn't update
+        this turn," never abort the spoken reply). _apply_turn_phase()
+        calls thread real turn-phase signals into JarvisRenderer at the
+        three real transition points this method already has: THINKING
+        at turn start, SPEAKING immediately before speak_reply(), LISTENING
+        immediately after (see this module's own docstring)."""
         try:
             persona_before = self._persona_manager.active_persona()
             context = self._context_manager.current_context(session_id, persona_before.name)
+            self._apply_turn_phase(RingState.THINKING)
+            companion_moment = self._maybe_prepare_companion_moment(context, session_id)
 
             try:
                 decision_trace = self._run_decision_pipeline(transcript, context, session_id)
@@ -498,19 +618,29 @@ class CommunicationPipeline:
                 )
                 decision_trace = None
 
+            context_analysis = (
+                decision_trace.context_analysis if decision_trace is not None else None
+            )
+
+            try:
+                self._run_presentation_pipeline(context, context_analysis)
+            except Exception:
+                logger.exception(
+                    "Presentation pipeline failed for this turn; continuing without a "
+                    "presentation update."
+                )
+
             explicit = self._persona_manager.detect_explicit_selection(transcript)
             if explicit is not None:
                 self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
             else:
-                context_analysis = (
-                    decision_trace.context_analysis if decision_trace is not None else None
-                )
                 self._persona_manager.select_from_context(context_analysis, transcript)
 
             persona = self._persona_manager.active_persona()
             selected_engine = (
                 decision_trace.selected_engine if decision_trace is not None else None
             )
+            emotional_state = self._emotional_state_manager.current_state()
 
             if selected_engine is EngineSelection.DEVICE_CONTROL:
                 reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
@@ -520,10 +650,21 @@ class CommunicationPipeline:
                 reply = self._handle_scheduler_turn(decision_trace)
             elif selected_engine is EngineSelection.INTERNET_AGENT:
                 reply = self._handle_internet_agent_turn(decision_trace)
+            elif selected_engine is EngineSelection.EMOTION_SUPPORT:
+                # EMOTION_SUPPORT selects a tone within compose_reply_safely()'s
+                # own template path, not a distinct subsystem — see
+                # decision/authority.py's own docstring and Sprint 5.4's
+                # Engineering Rationale.
+                reply = self._persona_manager.compose_reply_safely(
+                    transcript, context, decision_trace, emotional_state
+                )
             else:
                 reply = self._compose_conversational_reply(
                     transcript, context, decision_trace, persona.name
                 )
+
+            if companion_moment is not None:
+                reply = _prefix_companion_moment(reply, companion_moment)
 
             turn = ConversationTurn(
                 session_id=session_id,
@@ -540,13 +681,174 @@ class CommunicationPipeline:
             ):
                 self._memory_lifecycle_manager.apply_user_override(promoted_record_id)
 
-            self._session_manager.speak_reply(reply, persona.voice_id)
+            presentation_state = self._presentation_controller.last_state_for(persona.name)
+            voice_warmth = (
+                presentation_state.voice_warmth if presentation_state is not None else 0.5
+            )
+            paced_reply = self._voice_personality_modulator.shape_pacing(reply, voice_warmth)
+
+            self._apply_turn_phase(RingState.SPEAKING)
+            self._session_manager.speak_reply(
+                paced_reply, persona.voice_id, on_audio_ready=self._drive_lip_sync_if_avatar_mounted
+            )
+            self._apply_turn_phase(RingState.LISTENING)
         except Exception:
             logger.exception(
                 "Unexpected failure while handling a completed turn; ending the session "
                 "rather than leaving it stuck."
             )
             self._session_manager.end_session(SessionEndReason.ERROR)
+
+    def _run_presentation_pipeline(
+        self, context: ConversationContext, context_analysis: ContextAnalysis | None
+    ) -> None:
+        """Per real turn: EmotionDetectionEngine.collect_signals()/
+        .estimate() -> EmotionalStateManager.decay_toward_baseline(elapsed)
+        then .apply_estimate(estimate) -> (conditionally, per Sprint 5.3's
+        own significance threshold) EmotionalMemory.record_significant_
+        moment() -> PresentationController.refresh() ->
+        AdaptiveWorkspaceController.select_profile()/.should_switch()
+        (Jarvis-only path) -> GestureEngine.trigger_event(TURN_END, ...).
+        Called from within its own narrow exception boundary in
+        _handle_turn_complete() — see that method's own docstring.
+
+        last_transcription_result() (voice/session_manager.py, Sprint
+        5.14) can honestly be None only before this process's very first
+        transcribed utterance, which can never reach a turn-complete
+        callback in practice (on_turn_complete only fires after a real
+        transcription exists) — guarded here anyway as a defensive,
+        never-crash floor rather than assumed impossible."""
+        transcription = self._session_manager.last_transcription_result()
+        if transcription is None:
+            return
+
+        signals = self._emotion_detection_engine.collect_signals(
+            transcription, context_analysis, context
+        )
+        estimate = self._emotion_detection_engine.estimate(signals)
+
+        now = datetime.now(UTC)
+        elapsed = (
+            (now - self._last_emotion_update_at).total_seconds()
+            if self._last_emotion_update_at is not None
+            else 0.0
+        )
+        self._emotional_state_manager.decay_toward_baseline(elapsed)
+        state = self._emotional_state_manager.apply_estimate(estimate)
+        self._last_emotion_update_at = now
+
+        # _score_significance() is memory/emotional_memory.py's own
+        # private significance formula — imported directly here rather
+        # than duplicated, the same reuse tests/unit/memory/
+        # test_emotional_memory.py itself already relies on, so this
+        # sprint's own "record only when genuinely significant" gate
+        # cannot drift from EmotionalMemory's own definition of
+        # significant.
+        if _score_significance(state) >= self._memory_config.emotional_moment_recall_threshold:
+            active_persona = self._persona_manager.active_persona()
+            memory_type = (
+                MemoryType.JARVIS if active_persona.name == "jarvis" else MemoryType.MINIE
+            )
+            category = (
+                context_analysis.primary_topic if context_analysis else ""
+            ) or "conversation"
+            self._emotional_memory.record_significant_moment(
+                content=transcription.text,
+                memory_type=memory_type,
+                category=category,
+                state=state,
+            )
+
+        self._presentation_controller.refresh()
+
+        active_persona = self._persona_manager.active_persona()
+        if active_persona.name == "jarvis":
+            self._update_workspace_profile(context_analysis)
+
+        event = self._gesture_engine.trigger_event(GestureTrigger.TURN_END, active_persona.name)
+        if event is not None:
+            self._presentation_controller.dispatch_gesture(event)
+
+    def _update_workspace_profile(self, context_analysis: ContextAnalysis | None) -> None:
+        """Jarvis-only: tracks AdaptiveWorkspaceController.should_switch()'s
+        own caller-owned running consecutive-match count (Sprint 5.12
+        deliberately left ownership of it to this integration sprint) and
+        applies a real dashboard rearrangement via JarvisRenderer.
+        apply_workspace_profile() once the debounce threshold is met."""
+        candidate = self._adaptive_workspace_controller.select_profile(context_analysis)
+        if candidate == self._current_workspace_profile:
+            self._pending_workspace_candidate = None
+            self._workspace_consecutive_match_count = 0
+            return
+
+        if candidate == self._pending_workspace_candidate:
+            self._workspace_consecutive_match_count += 1
+        else:
+            self._pending_workspace_candidate = candidate
+            self._workspace_consecutive_match_count = 1
+
+        if self._adaptive_workspace_controller.should_switch(
+            self._current_workspace_profile, candidate, self._workspace_consecutive_match_count
+        ):
+            self._jarvis_renderer.apply_workspace_profile(candidate)
+            self._current_workspace_profile = candidate
+            self._pending_workspace_candidate = None
+            self._workspace_consecutive_match_count = 0
+
+    def _maybe_prepare_companion_moment(
+        self, context: ConversationContext, session_id: str
+    ) -> CompanionMoment | None:
+        """CompanionExperienceEngine's own real session-start trigger
+        (Sprint 5.13's own "no live caller yet" gap): a session_id is
+        checked (and recorded) here exactly once, on its own first turn
+        — idle_duration_seconds reuses ConversationContext.last_activity_at,
+        the real gap since the previous session's own last activity,
+        already flowing through this pipeline (EmotionDetectionEngine's
+        own pause_before_turn_seconds signal reads the identical field).
+        Never raises — CompanionExperienceEngine's own methods already
+        promise never to, guarded here anyway as defense in depth,
+        matching this class's own established discipline."""
+        if session_id in self._greeted_session_ids:
+            return None
+        self._greeted_session_ids.add(session_id)
+        try:
+            idle_duration = max(
+                0.0, (datetime.now(UTC) - context.last_activity_at).total_seconds()
+            )
+            moment = self._companion_experience_engine.check_for_greeting(idle_duration)
+            if moment is None:
+                moment = self._companion_experience_engine.check_for_celebration()
+            return moment
+        except Exception:
+            logger.exception(
+                "Companion Experience session-start check failed; continuing without one."
+            )
+            return None
+
+    def _apply_turn_phase(self, phase: RingState) -> None:
+        """Threads voice/session_manager.py's own real turn-phase concept
+        into JarvisRenderer without adding new state to that module (see
+        VoiceSessionManager.current_session_state()'s own docstring) —
+        never raises; a renderer-side failure must not affect the
+        turn's own spoken reply."""
+        try:
+            self._jarvis_renderer.apply_turn_phase(phase)
+        except Exception:
+            logger.exception("apply_turn_phase(%s) failed; continuing.", phase.value)
+
+    def _drive_lip_sync_if_avatar_mounted(self, audio: bytes, sample_rate_hz: int) -> None:
+        """speak_reply()'s own on_audio_ready callback (Sprint 5.14):
+        drives LipSyncDriver.drive_from_audio() — which itself spawns a
+        non-blocking background thread — only when Minie's AvatarRenderer
+        is the currently mounted renderer, matching this sprint's own
+        "when the mounted renderer is an AvatarRenderer" wording. Checked
+        via PresentationController.mounted_persona_name rather than
+        active_persona() — the mounted renderer, not merely the active
+        persona, is what's actually about to be driven (see
+        PresentationController's own "mounted renderer is a deliberately
+        separate concept from active persona" docstring)."""
+        if self._presentation_controller.mounted_persona_name == "minie":
+            self._lip_sync_driver.drive_from_audio(audio, sample_rate_hz, self._avatar_renderer)
 
     def _compose_conversational_reply(
         self,
@@ -810,3 +1112,30 @@ def _describe_workflow_result(run_result: WorkflowRunResult, name: str) -> str:
     if run_result.aborted_early:
         return f"I ran part of the '{name}' workflow, but a step failed partway through."
     return f"Done — I've run the '{name}' workflow."
+
+
+def _prefix_companion_moment(reply: str, moment: CompanionMoment) -> str:
+    """Folds a CompanionMoment's own content into a reply as a plain-text
+    prefix (Sprint 5.14) — Persona.compose_reply()'s own signature has no
+    CompanionMoment parameter, and extending it is outside this sprint's
+    own Files to Modify (personas/base.py, personas/jarvis.py,
+    personas/minie.py are none of them), so phrasing happens here rather
+    than through a persona template — a disclosed, narrower
+    implementation of the Sprint Book's own "folded into the next
+    reply's own content input" language (mirrors _describe_action_result()'s/
+    _describe_workflow_result()'s own precedent of composing confirmation
+    text directly in this class rather than through Persona.compose_reply()
+    for the identical reason). CompanionMoment.referenced_content is
+    always the stored MemoryRecord.content verbatim (CompanionExperienceEngine's
+    own "decide the moment, not the phrasing" contract) — folded in as
+    plain, honest attribution, never presented as a fact JARMINEI is
+    newly asserting."""
+    if moment.moment_type is CompanionMomentType.GREETING:
+        prefix = (
+            f"Welcome back — last time we talked you mentioned {moment.referenced_content}. "
+            if moment.referenced_content
+            else "Welcome back. "
+        )
+    else:
+        prefix = f"By the way — {moment.referenced_content}. That's worth celebrating! "
+    return prefix + reply

@@ -80,7 +80,7 @@ def test_full_turn_completes_when_ollama_entirely_unreachable(
         assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what time is it right now".'
+    assert reply_text.replace("... ", "") == 'Understood. You said: "what time is it right now".'
     assert h.intent_detector.health_check() is False
     assert h.context_analyzer.health_check() is False
     assert any("Response Generator call failed" in r.message for r in caplog.records)
@@ -159,7 +159,7 @@ def test_full_turn_completes_when_chromadb_entirely_unreachable(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
 
     generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
     assert len(generation_prompts) == 1
@@ -199,7 +199,7 @@ def test_full_turn_completes_when_an_unexpected_decision_pipeline_exception_occu
         assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
     assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)
     assert not any(
         "Unexpected failure while handling a completed turn" in r.message

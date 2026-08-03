@@ -323,6 +323,9 @@ def test_level4_part_b_full_acceptance_scenario(
         "authority_evaluator",
         "action_audit_log",
         "workflow_store",
+        "emotion_detection_engine",
+        "emotional_state_manager",
+        "presentation_controller",
     }
     assert all(state == "running" for state in states.values())
 
@@ -375,7 +378,8 @@ def test_calendar_store_sqlite_failure_degrades_gracefully_through_the_full_grap
 
         assert h.tts.spoken_event.wait(timeout=_TURN_TIMEOUT)
         reply_text, _ = h.tts.speak_calls[-1]
-        assert reply_text == "I'm sorry, I couldn't save that reminder right now."
+        expected = "I'm sorry, I couldn't save that reminder right now."
+        assert reply_text.replace("... ", "") == expected
     finally:
         h.calendar_store.save = original_save
         wait_for_dormant(h.quiet_mode_controller, timeout=_TURN_TIMEOUT)

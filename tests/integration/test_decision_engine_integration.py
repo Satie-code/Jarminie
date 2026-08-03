@@ -69,7 +69,7 @@ def test_full_turn_reply_measurably_differs_with_a_matching_stored_memory(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response  # a real generated reply
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
 
     generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
     assert len(generation_prompts) == 1
@@ -93,7 +93,7 @@ def test_full_turn_without_a_matching_memory_still_gets_a_real_generated_reply(
     assert h.tts.spoken_event.wait(timeout=5.0)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
 
     generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
     assert len(generation_prompts) == 1

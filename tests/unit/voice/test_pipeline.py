@@ -16,15 +16,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.schema import SchedulerConfig
+from config.schema import MemoryConfig, SchedulerConfig
 from decision.authority import EngineSelection
 from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
 from device_control.action_engine import ActionResult, ActionStatus
+from emotion.state_manager import EmotionalState
 from internet.search_provider import SearchResult
 from internet.source_validator import Citation
 from internet.summarizer import ResearchSummary
 from personas.persona_manager import SwitchReason
+from presentation.adaptive_workspace import WorkspaceProfile
 from scheduler.scheduler_model import ItemType, ScheduledItem
 from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
@@ -100,6 +102,43 @@ def collaborators():
     priority_queue_manager.peek_next.return_value = None
     priority_queue_manager.pop_next.return_value = None
 
+    context.last_activity_at = datetime.now(UTC)
+
+    # Sprint 5.14 collaborators. A real EmotionalState (not a MagicMock)
+    # for apply_estimate()/current_state() — _score_significance()
+    # (memory/emotional_memory.py) does real dataclass-field arithmetic
+    # on whatever this returns, which a MagicMock cannot support. Its
+    # neutral defaults score 0.0 significance, below any real
+    # emotional_moment_recall_threshold, so record_significant_moment()
+    # is not called unless a test explicitly configures a displaced
+    # state. voice_personality_modulator.shape_pacing() and
+    # companion_experience_engine's two check_for_*() methods are
+    # explicitly configured to their real "no-op" defaults (identity
+    # passthrough / None) so every existing reply-text assertion in this
+    # file keeps holding exactly as it did before Sprint 5.14 — a
+    # default MagicMock return value for either would otherwise corrupt
+    # every test's own spoken reply text.
+    emotion_detection_engine = MagicMock()
+    emotional_state_manager = MagicMock()
+    emotional_state_manager.apply_estimate.return_value = EmotionalState()
+    emotional_state_manager.current_state.return_value = EmotionalState()
+    emotional_memory = MagicMock()
+    presentation_controller = MagicMock()
+    presentation_controller.last_state_for.return_value = None
+    presentation_controller.mounted_persona_name = "jarvis"
+    adaptive_workspace_controller = MagicMock()
+    adaptive_workspace_controller.select_profile.return_value = WorkspaceProfile.GENERAL
+    gesture_engine = MagicMock()
+    gesture_engine.trigger_event.return_value = None
+    voice_personality_modulator = MagicMock()
+    voice_personality_modulator.shape_pacing.side_effect = lambda text, warmth: text
+    lip_sync_driver = MagicMock()
+    companion_experience_engine = MagicMock()
+    companion_experience_engine.check_for_greeting.return_value = None
+    companion_experience_engine.check_for_celebration.return_value = None
+    jarvis_renderer = MagicMock()
+    avatar_renderer = MagicMock()
+
     return {
         "mic": MagicMock(),
         "wake_word_detector": MagicMock(),
@@ -130,6 +169,18 @@ def collaborators():
         "summarizer": MagicMock(),
         "action_audit_log": MagicMock(),
         "scheduler_config": SchedulerConfig(),
+        "memory_config": MemoryConfig(),
+        "emotion_detection_engine": emotion_detection_engine,
+        "emotional_state_manager": emotional_state_manager,
+        "emotional_memory": emotional_memory,
+        "presentation_controller": presentation_controller,
+        "adaptive_workspace_controller": adaptive_workspace_controller,
+        "gesture_engine": gesture_engine,
+        "voice_personality_modulator": voice_personality_modulator,
+        "lip_sync_driver": lip_sync_driver,
+        "companion_experience_engine": companion_experience_engine,
+        "jarvis_renderer": jarvis_renderer,
+        "avatar_renderer": avatar_renderer,
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -171,6 +222,18 @@ def pipeline(collaborators):
         summarizer=collaborators["summarizer"],
         action_audit_log=collaborators["action_audit_log"],
         scheduler_config=collaborators["scheduler_config"],
+        memory_config=collaborators["memory_config"],
+        emotion_detection_engine=collaborators["emotion_detection_engine"],
+        emotional_state_manager=collaborators["emotional_state_manager"],
+        emotional_memory=collaborators["emotional_memory"],
+        presentation_controller=collaborators["presentation_controller"],
+        adaptive_workspace_controller=collaborators["adaptive_workspace_controller"],
+        gesture_engine=collaborators["gesture_engine"],
+        voice_personality_modulator=collaborators["voice_personality_modulator"],
+        lip_sync_driver=collaborators["lip_sync_driver"],
+        companion_experience_engine=collaborators["companion_experience_engine"],
+        jarvis_renderer=collaborators["jarvis_renderer"],
+        avatar_renderer=collaborators["avatar_renderer"],
     )
 
 
@@ -313,9 +376,7 @@ def test_handle_turn_complete_happy_path(pipeline, collaborators):
     collaborators["persona_manager"].detect_explicit_selection.assert_called_once_with(
         "hello there"
     )
-    collaborators["context_manager"].current_context.assert_called_once_with(
-        "session-1", "jarvis"
-    )
+    collaborators["context_manager"].current_context.assert_called_once_with("session-1", "jarvis")
     collaborators["response_generator"].generate.assert_called_once_with(
         "hello there", collaborators["context"], collaborators["decision_trace"], "jarvis"
     )
@@ -326,7 +387,9 @@ def test_handle_turn_complete_happy_path(pipeline, collaborators):
     assert turn.persona_name == "jarvis"
     assert turn.user_text == "hello there"
     assert turn.response_text == "a reply"
-    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "a reply", "p340", on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted
+    )
 
 
 def test_handle_turn_complete_selects_on_an_explicit_match(pipeline, collaborators):
@@ -371,7 +434,9 @@ def test_conversational_turn_calls_response_generator_with_persona_name(pipeline
         "jarvis",
     )
     collaborators["persona_manager"].compose_reply_safely.assert_not_called()
-    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "a reply", "p340", on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted
+    )
 
 
 def test_conversational_turn_skips_the_llm_call_for_an_empty_transcript(pipeline, collaborators):
@@ -391,7 +456,9 @@ def test_conversational_turn_falls_back_to_the_template_on_llm_error(pipeline, c
     collaborators["persona_manager"].compose_reply_safely.assert_called_once_with(
         "what's the capital of France", collaborators["context"], collaborators["decision_trace"]
     )
-    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "a reply", "p340", on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted
+    )
 
 
 def test_conversational_turn_llm_error_does_not_end_the_session(pipeline, collaborators):
@@ -505,7 +572,9 @@ def test_decision_pipeline_failure_degrades_gracefully_without_ending_the_sessio
         "hello there", collaborators["context"], None, "jarvis"
     )
     collaborators["persona_manager"].compose_reply_safely.assert_not_called()
-    collaborators["session_manager"].speak_reply.assert_called_once_with("a reply", "p340")
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "a reply", "p340", on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted
+    )
     assert any("Decision Engine pipeline failed" in r.message for r in caplog.records)
 
 
@@ -531,7 +600,9 @@ def test_device_control_turn_dispatches_launch_application_and_speaks_confirmati
     collaborators["persona_manager"].compose_reply_safely.assert_not_called()
     collaborators["response_generator"].generate.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "Done — I've opened notepad.exe.", "p340"
+        "Done — I've opened notepad.exe.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
     turn = collaborators["conversation_store"].record_turn.call_args[0][0]
     assert turn.response_text == "Done — I've opened notepad.exe."
@@ -555,7 +626,9 @@ def test_device_control_turn_with_no_entity_reports_it_could_not_tell(pipeline, 
 
     collaborators["action_registry"].dispatch.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I couldn't tell what application to open.", "p340"
+        "I couldn't tell what application to open.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -572,7 +645,9 @@ def test_device_control_turn_reports_a_denied_result(pipeline, collaborators):
     pipeline._handle_turn_complete("open cmd", "session-1")
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I'm not able to do that: Application not on allowlist", "p340"
+        "I'm not able to do that: Application not on allowlist",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -589,7 +664,9 @@ def test_device_control_turn_reports_a_failed_result(pipeline, collaborators):
     pipeline._handle_turn_complete("open nonexistent", "session-1")
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "That didn't work: No such file or directory", "p340"
+        "That didn't work: No such file or directory",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -618,7 +695,9 @@ def test_workflow_turn_resolves_by_name_and_runs_it(pipeline, collaborators):
     assert context.requested_by == "voice_turn"
     assert context.session_id == "session-1"
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "Done — I've run the 'Morning Routine' workflow.", "p340"
+        "Done — I've run the 'Morning Routine' workflow.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -654,7 +733,9 @@ def test_workflow_turn_not_found_reports_it_and_never_calls_run(pipeline, collab
 
     collaborators["workflow_executor"].run.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I couldn't find a workflow named 'nonexistent workflow'.", "p340"
+        "I couldn't find a workflow named 'nonexistent workflow'.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -678,7 +759,9 @@ def test_workflow_turn_declined_confirmation_reports_it(pipeline, collaborators)
     pipeline._handle_turn_complete("run the big cleanup workflow", "session-1")
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I didn't run the 'Big Cleanup' workflow since it wasn't confirmed.", "p340"
+        "I didn't run the 'Big Cleanup' workflow since it wasn't confirmed.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -702,7 +785,9 @@ def test_workflow_turn_partial_run_reports_it(pipeline, collaborators):
     pipeline._handle_turn_complete("run the big cleanup workflow", "session-1")
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I ran part of the 'Big Cleanup' workflow, but a step failed partway through.", "p340"
+        "I ran part of the 'Big Cleanup' workflow, but a step failed partway through.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -737,9 +822,7 @@ def test_scheduler_turn_falls_back_to_raw_transcript_when_no_topic(pipeline, col
     assert saved_item.title == "remind me to call mom in 20 minutes"
 
 
-def test_scheduler_turn_with_no_resolvable_time_reports_it_and_never_saves(
-    pipeline, collaborators
-):
+def test_scheduler_turn_with_no_resolvable_time_reports_it_and_never_saves(pipeline, collaborators):
     collaborators["decision_trace"].selected_engine = EngineSelection.SCHEDULER
     collaborators["decision_trace"].intent = collaborators["intent"]
     collaborators["intent"].raw_transcript = "remind me to call mom tomorrow"
@@ -748,7 +831,9 @@ def test_scheduler_turn_with_no_resolvable_time_reports_it_and_never_saves(
 
     collaborators["calendar_store"].save.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I couldn't tell when to remind you.", "p340"
+        "I couldn't tell when to remind you.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -770,7 +855,9 @@ def test_scheduler_turn_calendar_store_save_failure_degrades_to_an_honest_reply(
     pipeline._handle_turn_complete("remind me to call mom in 20 minutes", "session-1")
 
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I'm sorry, I couldn't save that reminder right now.", "p340"
+        "I'm sorry, I couldn't save that reminder right now.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
     collaborators["session_manager"].end_session.assert_not_called()
 
@@ -803,7 +890,9 @@ def test_internet_agent_turn_speaks_summary_with_citation_count(pipeline, collab
 
     collaborators["research_engine"].research.assert_called_once_with("latest Python release")
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "Python 3.13 was released recently. (Based on 1 source(s), 1 corroborated.)", "p340"
+        "Python 3.13 was released recently. (Based on 1 source(s), 1 corroborated.)",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -820,7 +909,9 @@ def test_internet_agent_turn_with_no_results_reports_it_and_never_summarizes(
 
     collaborators["summarizer"].summarize.assert_not_called()
     collaborators["session_manager"].speak_reply.assert_called_once_with(
-        "I couldn't find anything for something obscure.", "p340"
+        "I couldn't find anything for something obscure.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
 
 
@@ -1008,9 +1099,7 @@ def test_live_turn_sweep_every_scheduler_and_internet_agent_call_site_never_prop
         # complete()'s own outer catch ends the session gracefully
         # rather than leaving it stuck, the same degrade every other
         # genuinely unexpected internal bug already gets.
-        collaborators["session_manager"].end_session.assert_called_once_with(
-            SessionEndReason.ERROR
-        )
+        collaborators["session_manager"].end_session.assert_called_once_with(SessionEndReason.ERROR)
         collaborators["session_manager"].speak_reply.assert_not_called()
 
 

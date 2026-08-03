@@ -116,7 +116,7 @@ def test_full_level3_acceptance_scripted_conversation(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
     assert h.persona_manager.active_persona().name == "jarvis"
     third_reply, _ = h.tts.speak_calls[2]
-    assert third_reply == h.llm_client.conversational_response  # a real generated reply
+    assert third_reply.replace("... ", "") == h.llm_client.conversational_response
 
     generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
     assert len(generation_prompts) == 3  # one real generation call per turn so far
@@ -197,6 +197,9 @@ def test_full_level3_acceptance_scripted_conversation(
         "authority_evaluator",
         "action_audit_log",
         "workflow_store",
+        "emotion_detection_engine",
+        "emotional_state_manager",
+        "presentation_controller",
     }
     assert all(state == "running" for state in states.values())
 
@@ -239,7 +242,11 @@ def test_full_conversation_continues_when_ollama_entirely_unreachable(
         assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == 'Understood. You said: "what time is it right now".'
+    # .replace("... ", ""): Sprint 5.14's VoicePersonalityModulator.shape_pacing()
+    # now really runs on every spoken reply, inserting pacing markers at
+    # existing sentence/clause boundaries — stripping them reconstructs
+    # the original text exactly (that module's own structural guarantee).
+    assert reply_text.replace("... ", "") == 'Understood. You said: "what time is it right now".'
     assert h.intent_detector.health_check() is False
     assert h.context_analyzer.health_check() is False
     assert any("Response Generator call failed" in r.message for r in caplog.records)
@@ -270,7 +277,7 @@ def test_full_conversation_continues_when_chromadb_entirely_unreachable(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
 
     generation_prompts = [c for c in h.llm_client.calls if "Reply to the user directly" in c]
     assert len(generation_prompts) == 1
@@ -304,6 +311,6 @@ def test_unexpected_decision_pipeline_exception_does_not_end_the_session(
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
 
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == h.llm_client.conversational_response
+    assert reply_text.replace("... ", "") == h.llm_client.conversational_response
     assert h.session_manager.is_active()  # NOT ended — still the same session
     assert h.session_manager._session.session_id == session_id

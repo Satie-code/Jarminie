@@ -202,6 +202,11 @@ class VTubeStudioAvatarRenderer:
             return
         self._try_send_request("HotkeyTriggerRequest", {"hotkeyID": gesture_id})
 
+    def is_connected(self) -> bool:
+        """Sprint 5.14 — a plain read of state this class already tracks
+        internally (AvatarRenderer's own new Protocol method)."""
+        return self._connected
+
     def _authenticate(self) -> None:
         """Requests a fresh plugin token from VTube Studio only if no
         persisted one exists, or the persisted one is no longer

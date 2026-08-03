@@ -22,7 +22,7 @@ import sys
 from dataclasses import dataclass, replace
 
 from config import ConfigLoader
-from config.schema import AppConfig, SchedulerConfig
+from config.schema import AppConfig, MemoryConfig, SchedulerConfig
 from core import configure_logging
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
@@ -40,12 +40,15 @@ from device_control.command_executor import CommandExecutionEngine
 from device_control.file_operations import FileOperationsManager
 from device_control.resource_gate import ActionResourceGate
 from device_control.window_manager import WindowManager
+from emotion.detection_engine import EmotionDetectionEngine
+from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.search_provider_registry import create_search_provider_with_fallback
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
+from memory.emotional_memory import EmotionalMemory
 from memory.event_memory import EventMemory
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.memory_store import MemoryStore
@@ -55,6 +58,19 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from presentation.adaptive_workspace import AdaptiveWorkspaceController
+from presentation.avatar_renderer import AvatarRenderer
+from presentation.avatar_renderer_registry import create_avatar_renderer
+from presentation.companion_experience import CompanionExperienceEngine
+from presentation.gesture_engine import GestureEngine
+from presentation.jarvis_renderer import JarvisRenderer
+from presentation.jarvis_state_computer import JarvisPresentationStateComputer
+from presentation.lip_sync import LipSyncDriver
+from presentation.minie_renderer import MinieRenderer
+from presentation.minie_state_computer import MiniePresentationStateComputer
+from presentation.presentation_controller import PresentationController
+from presentation.transition_engine import TransitionEngine
+from presentation.voice_personality import VoicePersonalityModulator
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -98,6 +114,7 @@ class _Level2Modules:
     wake_word_detector: WakeWordDetector
     turn_complete_relay: CallbackRelay
     session_ended_relay: CallbackRelay
+    persona_switch_relay: CallbackRelay
 
 
 @dataclass
@@ -157,6 +174,39 @@ class _Level4PartBModules:
     research_engine: ResearchEngine
     source_validator: SourceValidator
     summarizer: Summarizer
+
+
+@dataclass
+class _Level5Modules:
+    """Bundles every Level 5 Part A (Emotional Intelligence & Presentation
+    Layer) object CommunicationPipeline, CoreManager registration, or
+    ui/main_window.py's own Qt-layer assembly needs (Sprint 5.14). Only
+    presentation_controller/emotion_detection_engine/emotional_state_manager
+    are real ManagedModules — every other object here is plain and
+    lifecycle-free (each one's own originating sprint, 5.1-5.13,
+    documented this explicitly), the same "only register what has a real
+    lifecycle" discipline every prior level's own Modules dataclass
+    already established. persona_switch_relay is not a Level 5 object at
+    all (it's constructed alongside PersonaManager in
+    _construct_level2_modules(), Level 2) but is threaded through
+    main()'s own body once transition_engine exists — see main()'s own
+    ordering comment for the circular-construction problem this resolves,
+    the identical CallbackRelay indirection voice/pipeline.py's own
+    turn_complete_relay/session_ended_relay already established."""
+
+    emotion_detection_engine: EmotionDetectionEngine
+    emotional_state_manager: EmotionalStateManager
+    emotional_memory: EmotionalMemory
+    presentation_controller: PresentationController
+    jarvis_renderer: JarvisRenderer
+    minie_renderer: MinieRenderer
+    avatar_renderer: AvatarRenderer
+    gesture_engine: GestureEngine
+    transition_engine: TransitionEngine
+    adaptive_workspace_controller: AdaptiveWorkspaceController
+    companion_experience_engine: CompanionExperienceEngine
+    voice_personality_modulator: VoicePersonalityModulator
+    lip_sync_driver: LipSyncDriver
 
 
 def _prewarm_tts_before_pyside6() -> None:
@@ -221,6 +271,22 @@ def _prewarm_tts_before_pyside6() -> None:
 
 
 def main() -> int:
+    # Sprint 5.14: must run before ANY construction below, not merely
+    # before ui.app's own import as previously — presentation/
+    # jarvis_renderer.py/presentation/minie_renderer.py (both
+    # Level 5 objects _construct_level5_modules() builds) import
+    # PySide6.QtCore/QtWidgets at THEIR OWN module level, so simply
+    # importing either module (which _construct_level5_modules() must,
+    # to construct real JarvisRenderer/MinieRenderer instances) now
+    # triggers PySide6's own import hook exactly as early as ui.app's
+    # import previously did. Moving the call here — the true first line
+    # of real work — keeps the fix's own root-cause contract intact
+    # ("Coqui TTS/six.moves cached in sys.modules before PySide6's hook
+    # is ever installed") regardless of which module ends up being the
+    # first to actually import PySide6. See this function's own
+    # docstring for the full history.
+    _prewarm_tts_before_pyside6()
+
     config_loader = ConfigLoader()
     config = config_loader.load()
     configure_logging(config.logging)
@@ -232,11 +298,15 @@ def main() -> int:
     # then Level 2 (VoiceConfirmationService, built inside Level 4,
     # needs its session_manager/persona_manager), then Level 4 Part A
     # (needs both Level 2 and Level 3 objects), then Level 4 Part B
-    # (needs Level 3's priority_queue_manager), then the pipeline itself
-    # (needs all four). Registration order is intentionally different —
+    # (needs Level 3's priority_queue_manager), then Level 5 Part A
+    # (needs Level 2's persona_manager/quiet_mode_controller and Level
+    # 3's memory_store — constructed after Level 2 for that reason,
+    # per _Level5Modules' own docstring; before-or-after Level 4/4B is
+    # immaterial, neither depends on Level 5), then the pipeline itself
+    # (needs all five). Registration order is intentionally different —
     # see _register_level4_part_b_early()'s, _register_level3_modules()'s,
     # and _register_level4_modules()'s own docstrings for the two
-    # distinct ordering constraints this project now balances: Level 3/4
+    # distinct ordering constraints this project now balances: Level 3/4/5
     # Part A/4B's remaining registrations all happen AFTER
     # communication_pipeline (keeping the wake_word_detector-to-pipeline
     # relay-wiring gap tight), while task_scheduler/calendar_store are
@@ -250,25 +320,46 @@ def main() -> int:
         config, resource_monitor, level3_modules, level2_modules
     )
     level4b_modules = _construct_level4_part_b_modules(config, level3_modules)
+    level5_modules = _construct_level5_modules(config, core_manager, level2_modules, level3_modules)
+
+    # Resolves the real circular-construction problem Sprint 5.10's own
+    # docstring named explicitly: PersonaManager (Level 2) must be
+    # constructed with on_switch already set, but its real target,
+    # TransitionEngine.transition, belongs to a TransitionEngine that
+    # itself needs a PresentationController that needs this same
+    # PersonaManager already built. level2_modules.persona_switch_relay
+    # (a CallbackRelay, the identical indirection turn_complete_relay/
+    # session_ended_relay already use for the analogous Level 2/3
+    # ordering problem) stood in at PersonaManager's own construction
+    # time; now that transition_engine really exists, point it at the
+    # real target.
+    level2_modules.persona_switch_relay.target = level5_modules.transition_engine.transition
+
     pipeline = _construct_pipeline(
-        level2_modules, level3_modules, level4_modules, level4b_modules, config.scheduler
+        level2_modules, level3_modules, level4_modules, level4b_modules, level5_modules,
+        config.scheduler, config.memory,
     )
 
     _register_level4_part_b_early(core_manager, level4b_modules)
     _register_level2_modules(core_manager, level2_modules, pipeline)
     _register_level3_modules(core_manager, level3_modules)
     _register_level4_modules(core_manager, level4_modules)
+    _register_level5_modules(core_manager, level5_modules)
 
-    # _prewarm_tts_before_pyside6() must run before this import — see its
-    # own docstring. ui.app is deliberately imported here, locally,
-    # rather than at this module's own top level, precisely so this
-    # ordering is achievable — a module-level import here would already
-    # be too late relative to everything else this file also imports at
-    # module level.
-    _prewarm_tts_before_pyside6()
+    # ui.app is deliberately imported here, locally, rather than at this
+    # module's own top level, so that _prewarm_tts_before_pyside6() above
+    # (now this function's own first real statement) still runs before
+    # PySide6 is definitely imported via this path too, even though — as
+    # of Sprint 5.14 — it is no longer the only path that could trigger it.
     from ui.app import run_app
 
-    return run_app(core_manager)
+    return run_app(
+        core_manager,
+        level5_modules.presentation_controller,
+        level5_modules.jarvis_renderer,
+        level5_modules.minie_renderer,
+        level5_modules.transition_engine,
+    )
 
 
 def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
@@ -293,9 +384,15 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
     conversation_store = ConversationSessionStore(sqlite_client, database_config)
     context_manager = ContextManager(conversation_store)
 
+    # Sprint 5.14: persona_switch_relay stands in for PersonaManager's
+    # on_switch until TransitionEngine (Level 5, built after this bundle)
+    # really exists — see main()'s own docstring comment at the call
+    # site that later sets .target to transition_engine.transition, and
+    # this module's own CallbackRelay docstring for the general pattern.
+    persona_switch_relay = CallbackRelay()
     jarvis = JarvisPersona(voice_config, config.emotion)
     minie = MiniePersona(voice_config, config.emotion)
-    persona_manager = PersonaManager(jarvis, minie, voice_config)
+    persona_manager = PersonaManager(jarvis, minie, voice_config, on_switch=persona_switch_relay)
 
     turn_complete_relay = CallbackRelay()
     session_ended_relay = CallbackRelay()
@@ -321,6 +418,7 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
         wake_word_detector=wake_word_detector,
         turn_complete_relay=turn_complete_relay,
         session_ended_relay=session_ended_relay,
+        persona_switch_relay=persona_switch_relay,
     )
 
 
@@ -534,20 +632,108 @@ def _construct_level4_part_b_modules(
     )
 
 
+def _construct_level5_modules(
+    config: AppConfig,
+    core_manager: CoreManager,
+    level2_modules: _Level2Modules,
+    level3_modules: _Level3Modules,
+) -> _Level5Modules:
+    """Construct every Level 5 Part A (Emotional Intelligence &
+    Presentation Layer) subsystem via DI — construction only, no
+    CoreManager registration (see _register_level5_modules() below).
+    Needs level2_modules.persona_manager/quiet_mode_controller
+    (PresentationController depends on both) and level3_modules.memory_store
+    (EmotionalMemory depends on it) already constructed.
+
+    event_memory is constructed fresh here (a second instance alongside
+    the one _construct_level3_modules() already built to feed
+    memory_retrieval_engine) rather than threaded through _Level3Modules
+    — it is a plain, stateless wrapper over memory_store (Sprint 3.3's
+    own "not a ManagedModule — owns no resource of its own" design), the
+    same "cheap to construct twice, not worth widening an existing
+    dataclass for" reasoning _construct_level4_modules()'s own
+    audit_sqlite_client/workflow_sqlite_client already established for
+    SqliteClient.
+
+    avatar_backend construction (create_avatar_renderer()) can raise
+    UnknownAvatarBackendError — deliberately NOT caught here, matching
+    this project's own "fail fast on a broken composition, fail
+    gracefully on a runtime operation" split (presentation/
+    avatar_renderer_registry.py's own docstring): a misconfigured
+    avatar_backend must stop startup loudly, not degrade silently into
+    a half-built Level 5.
+    """
+    emotion_config = config.emotion
+    presentation_config = config.presentation
+    memory_config = config.memory
+
+    emotion_detection_engine = EmotionDetectionEngine(emotion_config)
+    emotional_state_manager = EmotionalStateManager(emotion_config)
+
+    event_memory = EventMemory(level3_modules.memory_store)
+    emotional_memory = EmotionalMemory(level3_modules.memory_store, memory_config)
+
+    gesture_engine = GestureEngine(presentation_config)
+
+    jarvis_state_computer = JarvisPresentationStateComputer(presentation_config)
+    minie_state_computer = MiniePresentationStateComputer(presentation_config)
+    jarvis_renderer = JarvisRenderer(presentation_config, core_manager)
+    avatar_renderer = create_avatar_renderer(presentation_config)
+    minie_renderer = MinieRenderer(avatar_renderer, presentation_config, core_manager)
+
+    presentation_controller = PresentationController(
+        persona_manager=level2_modules.persona_manager,
+        emotional_state_manager=emotional_state_manager,
+        quiet_mode_controller=level2_modules.quiet_mode_controller,
+        state_computers={"jarvis": jarvis_state_computer, "minie": minie_state_computer},
+        renderers={"jarvis": jarvis_renderer, "minie": minie_renderer},
+        gesture_engine=gesture_engine,
+    )
+    # overlay is set later, once a real QApplication and PresentationHostWidget
+    # exist to parent a real QtTransitionOverlay to — see
+    # TransitionEngine.set_overlay()'s own docstring.
+    transition_engine = TransitionEngine(presentation_controller, presentation_config)
+
+    adaptive_workspace_controller = AdaptiveWorkspaceController(presentation_config)
+    companion_experience_engine = CompanionExperienceEngine(
+        emotional_memory, event_memory, presentation_config
+    )
+    voice_personality_modulator = VoicePersonalityModulator(presentation_config)
+    lip_sync_driver = LipSyncDriver(presentation_config)
+
+    return _Level5Modules(
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        jarvis_renderer=jarvis_renderer,
+        minie_renderer=minie_renderer,
+        avatar_renderer=avatar_renderer,
+        gesture_engine=gesture_engine,
+        transition_engine=transition_engine,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        companion_experience_engine=companion_experience_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
+    )
+
+
 def _construct_pipeline(
     level2_modules: _Level2Modules,
     level3_modules: _Level3Modules,
     level4_modules: _Level4Modules,
     level4b_modules: _Level4PartBModules,
+    level5_modules: _Level5Modules,
     scheduler_config: SchedulerConfig,
+    memory_config: MemoryConfig,
 ) -> CommunicationPipeline:
     """Built last, once every level's prerequisite objects exist —
-    CommunicationPipeline is the one object that needs Level 2, 3, 4,
-    AND 4B collaborators at once. scheduler_config is passed separately
-    (rather than threaded through _Level4PartBModules) since it's a
-    plain config slice, not a constructed object, matching how every
-    other *_config value already reaches this function's own callers
-    directly from AppConfig."""
+    CommunicationPipeline is the one object that needs Level 2, 3, 4, 4B,
+    AND 5 collaborators at once. scheduler_config/memory_config are
+    passed separately (rather than threaded through a *Modules bundle)
+    since they're plain config slices, not constructed objects, matching
+    how every other *_config value already reaches this function's own
+    callers directly from AppConfig."""
     return CommunicationPipeline(
         mic=level2_modules.mic,
         wake_word_detector=level2_modules.wake_word_detector,
@@ -578,6 +764,18 @@ def _construct_pipeline(
         summarizer=level4b_modules.summarizer,
         action_audit_log=level4_modules.action_audit_log,
         scheduler_config=scheduler_config,
+        memory_config=memory_config,
+        emotion_detection_engine=level5_modules.emotion_detection_engine,
+        emotional_state_manager=level5_modules.emotional_state_manager,
+        emotional_memory=level5_modules.emotional_memory,
+        presentation_controller=level5_modules.presentation_controller,
+        adaptive_workspace_controller=level5_modules.adaptive_workspace_controller,
+        gesture_engine=level5_modules.gesture_engine,
+        voice_personality_modulator=level5_modules.voice_personality_modulator,
+        lip_sync_driver=level5_modules.lip_sync_driver,
+        companion_experience_engine=level5_modules.companion_experience_engine,
+        jarvis_renderer=level5_modules.jarvis_renderer,
+        avatar_renderer=level5_modules.avatar_renderer,
     )
 
 
@@ -697,6 +895,41 @@ def _register_level4_modules(core_manager: CoreManager, level4_modules: _Level4M
     established."""
     core_manager.register_module("action_audit_log", level4_modules.action_audit_log)
     core_manager.register_module("workflow_store", level4_modules.workflow_store)
+
+
+def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5Modules) -> None:
+    """Registered after every Level 2/3/4 module (see main()'s own
+    ordering comment) — same "keep the wake_word_detector-to-
+    communication_pipeline relay-wiring gap tight" discipline
+    _register_level3_modules()/_register_level4_modules() already
+    established. presentation_controller is registered last of the
+    three: its own start() calls persona_manager.active_persona(),
+    which requires persona_manager (Level 2, already started by this
+    point in registration order) to already be running.
+
+    Only PresentationController/EmotionDetectionEngine/EmotionalStateManager
+    are real ManagedModules among everything Level 5 Part A constructs —
+    every other object (EmotionalMemory, JarvisRenderer, MinieRenderer,
+    avatar_renderer, GestureEngine, TransitionEngine,
+    AdaptiveWorkspaceController, CompanionExperienceEngine,
+    VoicePersonalityModulator, LipSyncDriver) is plain and lifecycle-free
+    (each one's own originating sprint documented this explicitly), so
+    they are never registered — the identical "only register what has a
+    real lifecycle" discipline every prior level's own registration
+    function already established. avatar_renderer's own mount()/unmount()
+    (a Renderer-shaped lifecycle, not a ManagedModule one) happens
+    indirectly, through MinieRenderer.mount()/unmount(), themselves
+    called by PresentationController.mount_renderer() — never registered
+    with CoreManager directly."""
+    core_manager.register_module(
+        "emotion_detection_engine", level5_modules.emotion_detection_engine
+    )
+    core_manager.register_module(
+        "emotional_state_manager", level5_modules.emotional_state_manager
+    )
+    core_manager.register_module(
+        "presentation_controller", level5_modules.presentation_controller
+    )
 
 
 if __name__ == "__main__":

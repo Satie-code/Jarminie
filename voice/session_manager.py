@@ -47,7 +47,7 @@ from config.schema import VoiceConfig
 from core.logging_setup import get_logger
 from voice.errors import MicrophoneError, SessionError, SpeechToTextError, TextToSpeechError
 from voice.microphone import MicrophoneManager, MicrophoneMode
-from voice.speech_to_text import SpeechToText
+from voice.speech_to_text import SpeechToText, TranscriptionResult
 from voice.text_to_speech import TextToSpeech
 
 logger = get_logger(__name__)
@@ -147,6 +147,16 @@ class VoiceSessionManager:
         self._pending_reply_text: str | None = None
         self._awaiting_external_reply = False
 
+        # Sprint 5.14: exposes this session's own internal turn-phase/
+        # transcription state to CommunicationPipeline for real Presentation
+        # Layer wiring (EmotionDetectionEngine.collect_signals() needs the
+        # full TranscriptionResult, not just its .text; JarvisRenderer's
+        # per-phase RingState needs the real SessionState) — see
+        # current_session_state()/last_transcription_result() below. Both
+        # are read-only accessors over state this class already tracks
+        # internally; neither adds a new state dimension of its own.
+        self._last_transcription_result: TranscriptionResult | None = None
+
     def start(self) -> None:
         """Launch the inter-turn timeout watchdog. Does not itself start
         a session — that's begin_session()'s job, called by Quiet Mode
@@ -173,6 +183,23 @@ class VoiceSessionManager:
 
     def is_active(self) -> bool:
         return self._session is not None
+
+    def current_session_state(self) -> SessionState:
+        """Sprint 5.14: the real, current SessionState (LISTENING/
+        PROCESSING/SPEAKING/etc.) — CommunicationPipeline's own real
+        caller threads this into JarvisRenderer's per-phase RingState,
+        closing the granularity gap Sprint 5.7 named explicitly. A plain
+        read of state this class already tracks internally; adds no new
+        state."""
+        return self._state
+
+    def last_transcription_result(self) -> TranscriptionResult | None:
+        """Sprint 5.14: the most recent utterance's full TranscriptionResult
+        (not just its .text) — EmotionDetectionEngine.collect_signals()'s
+        own real caller needs duration_ms/no_speech_probability, which the
+        on_turn_complete callback's plain (text, session_id) signature
+        never carried. None before any utterance has been transcribed."""
+        return self._last_transcription_result
 
     def begin_session(self, announce_first: tuple[str, str] | None = None) -> VoiceSession:
         """Begin a new session: switch the mic to active capture and
@@ -312,15 +339,24 @@ class VoiceSessionManager:
         finally:
             self._awaiting_external_reply = False
 
-    def speak_reply(self, text: str, voice_id: str) -> None:
+    def speak_reply(
+        self,
+        text: str,
+        voice_id: str,
+        on_audio_ready: Callable[[bytes, int], None] | None = None,
+    ) -> None:
         """Speak a composed reply, then re-arm listening for the next
-        turn. Called once a persona reply exists (Sprint 2.9+)."""
+        turn. Called once a persona reply exists (Sprint 2.9+).
+        on_audio_ready (Sprint 5.14, additive — None preserves every
+        existing caller's exact prior behavior) is forwarded straight
+        through to TextToSpeech.speak() — see that module's own
+        docstring for what it does and why."""
         if self._session is None:
             raise SessionError("Cannot speak a reply outside an active session.")
         self._session.last_activity_at = datetime.now(UTC)
         self._state = SessionState.SPEAKING
         try:
-            self._tts.speak(text, voice_id)
+            self._tts.speak(text, voice_id, on_audio_ready=on_audio_ready)
         except TextToSpeechError:
             logger.exception("Failed to speak reply.")
             self.end_session(SessionEndReason.ERROR)
@@ -404,6 +440,7 @@ class VoiceSessionManager:
             return
 
         session.last_activity_at = datetime.now(UTC)
+        self._last_transcription_result = result
         if self._awaiting_external_reply:
             # A confirmation reply, not a normal conversation turn —
             # doesn't count toward turn_count, and is routed to

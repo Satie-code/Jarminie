@@ -46,6 +46,21 @@ embedded into `MainWindow` alongside the renderer-hosting work that
 sprint already has to do; `on_switch` (the real live caller of
 `transition()`, via `PersonaManager`'s own new constructor parameter)
 has no real caller until then either.
+
+**`set_overlay()` (Sprint 5.14)**: a real gap found while wiring a real
+`QtTransitionOverlay` (`presentation/qt_transition_overlay.py`) for the
+first time — that overlay is a genuine `QWidget`, which cannot be
+constructed until a `QApplication` exists, but `TransitionEngine` itself
+is built at `main.py`'s composition-root time, deliberately before
+`QApplication` does (see `main.py`'s own `_prewarm_tts_before_pyside6()`
+docstring for why that ordering is load-bearing elsewhere too). This
+class is therefore constructed with the `NullTransitionOverlay` default
+in `main.py`, and `MainWindow` (Sprint 5.14, once a real `QApplication`
+and `PresentationHostWidget` exist to parent the overlay to) calls
+`set_overlay()` to swap in the real one — the same "found a real gap in
+the sprint's own file list, resolved it directly, disclosed it here"
+precedent this class's own Sprint 5.6/5.9/5.10 constructor additions
+already used.
 """
 
 import time
@@ -123,6 +138,15 @@ class TransitionEngine:
         self._config = presentation_config
         self._overlay = overlay if overlay is not None else NullTransitionOverlay()
         self._saved_states: dict[str, PresentationState] = {}
+
+    def set_overlay(self, overlay: TransitionOverlay) -> None:
+        """Swap in a real overlay after construction — see this class's
+        own docstring for why this exists. Safe to call at any time,
+        including mid-transition (takes effect on the next
+        _call_overlay_safely() call); there is no lifecycle to tear down
+        on the overlay being replaced (TransitionOverlay itself is
+        stateless scaffolding, per its own Protocol docstring)."""
+        self._overlay = overlay
 
     def transition(self, old_persona_name: str, new_persona_name: str) -> None:
         """Runs the seven phases in order (module docstring). Never

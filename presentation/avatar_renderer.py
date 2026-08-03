@@ -57,3 +57,12 @@ class AvatarRenderer(Renderer, Protocol):
         """A one-shot animation (e.g. a head tilt or small wave). The
         real caller is Sprint 5.9's Gesture Engine, not Sprint 5.8."""
         ...
+
+    def is_connected(self) -> bool:
+        """Sprint 5.14: whether the underlying avatar backend is
+        currently connected — MinieRenderer.status_widget()'s own real
+        caller, so `PresentationHostWidget` can show an honest
+        "Connected to VTube Studio" / "VTube Studio not detected" status
+        instead of a fake in-app avatar standing in for the real one
+        (Sprint 5.14's own Engineering Rationale). Never raises."""
+        ...

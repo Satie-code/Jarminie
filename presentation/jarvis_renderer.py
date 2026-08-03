@@ -38,6 +38,30 @@ a particular call order.
 No live embedding into `ui/main_window.py` this sprint (Sprint 5.14's
 job).
 
+**Cross-thread marshaling (Sprint 5.14)**: `mount()`/`unmount()`/
+`apply_workspace_profile()` are, as of this sprint, real, live callers
+from `CommunicationPipeline`'s own background thread (`VoiceSessionManager.
+_session_loop`, per that class's own established "runs the whole turn"
+threading model) — a concretely reproduced Qt violation (`QObject::
+killTimer: Timers cannot be stopped from another thread`) was found
+during this sprint's own real integration testing when a live persona
+switch called `unmount()`'s `self._timer.stop()` from that thread.
+`self._timer`/`self._container` are real `QObject`s with thread affinity
+permanently fixed to whichever thread first constructed them (always the
+main/Qt thread in real operation, per "Widget construction is
+deliberately lazy" above) — `render_state()`/`apply_turn_phase()`/
+`trigger_gesture()` themselves stay unmarshaled (confirmed, not assumed:
+each only ever writes plain Python attributes on `HolographicSphereWidget`/
+`SegmentedRingWidget`, never touching a real Qt API — the actual paint
+work happens later, entirely on the main thread, inside `_on_tick()`'s
+own shared-`QTimer`-driven callback), but `self._timer.start()`/`.stop()`
+and `self._container`'s own widget-tree mutations are marshaled onto the
+main thread via `QTimer.singleShot(0, context, callable)` — Qt6's own
+documented idiom for "run this callable on context's own thread,
+regardless of which thread schedules it" (verified directly against this
+project's installed PySide6 version, not assumed from Qt's C++ docs
+alone) — through `_run_on_main_thread()` below.
+
 **`trigger_gesture()` (Sprint 5.9)**: a deliberately narrow, honestly
 disclosed interpretation. Jarvis's own locked visual vocabulary is "a
 single subtle ring/dashboard accent" (the brief's own restraint) —
@@ -76,7 +100,9 @@ and 3.8) and are real future content work (Future Considerations), not
 built speculatively here.
 """
 
-from PySide6.QtCore import QTimer
+from collections.abc import Callable
+
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -187,6 +213,7 @@ class JarvisRenderer:
         self._timer: QTimer | None = None
         self._mounted = False
         self._current_workspace_profile: WorkspaceProfile | None = None
+        self._last_animation_speed: float = 1.0
 
     def widget(self) -> QWidget:
         """The top-level container widget (sphere + ring + dashboard-panel
@@ -201,12 +228,17 @@ class JarvisRenderer:
         (this sprint's own Acceptance Criteria): builds the widget
         hierarchy on first call only, then (re)starts the shared
         animation timer. Does not itself show/embed the widget — that
-        is whichever parent layout it's added into (Sprint 5.14)."""
+        is whichever parent layout it's added into (Sprint 5.14).
+        self._timer.start() is marshaled onto the main thread (see this
+        module's own docstring) — _mounted itself flips synchronously
+        so PresentationController's own "is something mounted" tracking
+        stays immediately consistent even though the real Qt call lands
+        a tick later."""
         self._ensure_widgets_built()
         if self._mounted:
             return
         self._mounted = True
-        self._timer.start()
+        self._run_on_main_thread(self._timer.start)
         logger.info("Jarvis Renderer mounted.")
 
     def unmount(self) -> None:
@@ -216,13 +248,29 @@ class JarvisRenderer:
         consumes no CPU at all") and hides the container — cheaply
         re-mountable, never destroyed, so a brief interruption (Sprint
         5.10's TransitionEngine switching back shortly after switching
-        away) doesn't pay a full teardown/rebuild cost."""
+        away) doesn't pay a full teardown/rebuild cost. Marshaled onto
+        the main thread (see this module's own docstring)."""
         if not self._mounted:
             return
+        self._mounted = False
+        self._run_on_main_thread(self._do_unmount)
+        logger.info("Jarvis Renderer unmounted.")
+
+    def _do_unmount(self) -> None:
         self._timer.stop()
         self._container.hide()
-        self._mounted = False
-        logger.info("Jarvis Renderer unmounted.")
+
+    def _run_on_main_thread(self, func: Callable[[], None]) -> None:
+        """See this module's own docstring ("Cross-thread marshaling").
+        Calls func() directly, synchronously, when already on
+        self._container's own thread (the common case for every call
+        site inside ui/main_window.py itself) — QTimer.singleShot()'s
+        own deferral is real, necessary overhead only when actually
+        crossing threads."""
+        if QThread.currentThread() is self._container.thread():
+            func()
+        else:
+            QTimer.singleShot(0, self._container, func)
 
     def render_state(self, state: PresentationState) -> None:
         """Updates each child widget's own target values — never calls
@@ -237,7 +285,32 @@ class JarvisRenderer:
         color = QColor(state.lighting_color)
         self._sphere.set_target(color, state.animation_speed)
         self._ring.set_color(color)
+        self._last_animation_speed = state.animation_speed
         self._ring.set_ring_state(_derive_ring_state(state), state.animation_speed)
+
+    def apply_turn_phase(self, phase: RingState) -> None:
+        """The real per-phase turn-phase signal (Sprint 5.14) — closes
+        the granularity gap this module's own docstring named explicitly:
+        PresentationState alone can only ever distinguish IDLE from
+        "everything else" (_derive_ring_state() above); CommunicationPipeline
+        now threads voice/session_manager.py's own real SessionState
+        through to here directly. An independent update path from
+        render_state() (mirrors apply_workspace_profile()'s own Sprint
+        5.12 precedent exactly): never called from render_state(), always
+        called from a separate, real turn-phase trigger, so it can win
+        even when it runs after render_state()'s own generic PROCESSING
+        default already applied this tick. Uses the most recently
+        rendered animation_speed rather than a fresh one of its own — a
+        turn-phase change alone is not a new emotional read. A no-op
+        (logged) if called before the widget hierarchy exists, matching
+        render_state()'s own contract."""
+        if self._ring is None:
+            logger.warning(
+                "apply_turn_phase(%s) called before the widget hierarchy exists; ignoring.",
+                phase.value,
+            )
+            return
+        self._ring.set_ring_state(phase, self._last_animation_speed)
 
     def trigger_gesture(self, gesture_id: str) -> None:
         """One uniform accent pulse on the segmented ring — see this
@@ -257,9 +330,16 @@ class JarvisRenderer:
         """Rebuilds the dashboard-panel area for profile — see this
         module's own docstring for the real/placeholder panel split. An
         independent update path from render_state() (Sprint 5.12's own
-        Architecture Notes), never called from it."""
+        Architecture Notes), never called from it. The real widget-tree
+        rebuild is marshaled onto the main thread (this module's own
+        docstring) — a real, live caller (CommunicationPipeline's own
+        background thread, Sprint 5.14) rebuilds QWidgets here, the
+        identical concern mount()/unmount() already guard against."""
         self._ensure_widgets_built()
         self._current_workspace_profile = profile
+        self._run_on_main_thread(lambda: self._apply_workspace_profile_on_main_thread(profile))
+
+    def _apply_workspace_profile_on_main_thread(self, profile: WorkspaceProfile) -> None:
         self._clear_panel_container()
         layout = self._panel_container.layout()
         layout.addWidget(_SystemStatusPanel(self._core_manager))

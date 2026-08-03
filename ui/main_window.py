@@ -9,13 +9,32 @@ embedded in it — Settings (1.8) and Debug Console (1.9) are each opened
 as their own window via a menu action instead, which turned out to suit
 their non-persistent, occasionally-opened nature better. See
 docs/sprint_book/sprint_1_6.md, sprint_1_7.md, sprint_1_8.md, sprint_1_9.md.
+
+Sprint 5.14 (Presentation Layer Integration) adds a `QSplitter` above the
+existing central layout: a new top pane, `PresentationHostWidget`
+(`presentation/presentation_host_widget.py`), sits above `StatusPanel` —
+unchanged, not removed, not repurposed, per this sprint's own Engineering
+Rationale. `QtTransitionOverlay` (`presentation/qt_transition_overlay.py`)
+is constructed here too, parented to `PresentationHostWidget`, and wired
+into the already-constructed `TransitionEngine` via `set_overlay()` — the
+real `QWidget` neither can exist before a `QApplication` does, which is
+why this composition step happens here rather than at `main.py`'s own
+composition-root time (see `TransitionEngine.set_overlay()`'s own
+docstring for the full reasoning).
 """
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent
-from PySide6.QtWidgets import QMainWindow, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMainWindow, QMenu, QSplitter, QVBoxLayout, QWidget
 
 from core.logging_setup import get_logger
 from core.manager import CoreManager
+from presentation.jarvis_renderer import JarvisRenderer
+from presentation.minie_renderer import MinieRenderer
+from presentation.presentation_controller import PresentationController
+from presentation.presentation_host_widget import PresentationHostWidget
+from presentation.qt_transition_overlay import QtTransitionOverlay
+from presentation.transition_engine import TransitionEngine
 from ui.debug_console import DebugConsole
 from ui.settings_window import SettingsWindow
 from ui.status_panel import StatusPanel
@@ -29,9 +48,22 @@ class MainWindow(QMainWindow):
     Receives a CoreManager via constructor DI — it never constructs one
     itself. closeEvent() calls core_manager.shutdown() before accepting
     the close, so closing the window is always a clean shutdown.
+
+    Sprint 5.14: also receives presentation_controller/jarvis_renderer/
+    minie_renderer/transition_engine — all already constructed at
+    main.py's own composition-root time, per this project's "only
+    main.py constructs concrete subsystem instances" rule; MainWindow
+    only assembles the Qt-layer widgets that depend on them.
     """
 
-    def __init__(self, core_manager: CoreManager) -> None:
+    def __init__(
+        self,
+        core_manager: CoreManager,
+        presentation_controller: PresentationController,
+        jarvis_renderer: JarvisRenderer,
+        minie_renderer: MinieRenderer,
+        transition_engine: TransitionEngine,
+    ) -> None:
         super().__init__()
         self._core_manager = core_manager
         self._debug_console: DebugConsole | None = None
@@ -42,10 +74,31 @@ class MainWindow(QMainWindow):
         self._layout = QVBoxLayout(container)
         self.setCentralWidget(container)
 
+        self._presentation_host = PresentationHostWidget(
+            presentation_controller, jarvis_renderer, minie_renderer, core_manager
+        )
         self._status_panel = StatusPanel(core_manager)
-        self._layout.addWidget(self._status_panel)
+
+        self._splitter = QSplitter()
+        self._splitter.setOrientation(Qt.Orientation.Vertical)
+        self._splitter.addWidget(self._presentation_host)
+        self._splitter.addWidget(self._status_panel)
+        self._layout.addWidget(self._splitter)
+
+        self._transition_overlay = QtTransitionOverlay(self._presentation_host)
+        transition_engine.set_overlay(self._transition_overlay)
 
         self._build_menu()
+
+    def refresh_presentation_host(self) -> None:
+        """Sprint 5.14: PresentationController.start() (which mounts the
+        default-active persona's renderer) runs inside
+        core_manager.startup(), which itself runs AFTER MainWindow's own
+        constructor already ran PresentationHostWidget's first refresh()
+        — without this, the presentation pane would sit empty until its
+        own QTimer's first tick. ui/app.py's run_app() calls this once,
+        right after core_manager.startup(), closing that cosmetic gap."""
+        self._presentation_host.refresh()
 
     def _build_menu(self) -> None:
         # QMenu constructed explicitly with `self` as its C++ parent, then

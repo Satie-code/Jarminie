@@ -72,7 +72,7 @@ def test_live_turn_produces_a_real_cited_summary(
 
     assert h.tts.spoken_event.wait(timeout=_TURN_TIMEOUT)
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == (
+    assert reply_text.replace("... ", "") == (
         "JARMINEI is a modular, voice-first assistant project. "
         "(Based on 3 source(s), 2 corroborated.)"
     )
@@ -147,7 +147,7 @@ def test_live_turn_summarization_llm_failure_degrades_to_an_honest_reply(
 
     assert h.tts.spoken_event.wait(timeout=_TURN_TIMEOUT)
     reply_text, _ = h.tts.speak_calls[0]
-    assert reply_text == (
+    assert reply_text.replace("... ", "") == (
         "I found some sources but couldn't summarize them right now. "
         "(Based on 1 source(s), 0 corroborated.)"
     )

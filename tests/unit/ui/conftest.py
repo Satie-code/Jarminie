@@ -50,3 +50,23 @@ def mock_core_manager(resource_snapshot_factory):
     manager.config.return_value = AppConfig()
     manager.config_loader.return_value = MagicMock()
     return manager
+
+
+@pytest.fixture
+def mock_presentation_handles():
+    """Sprint 5.14: MainWindow's four new Level 5 constructor parameters
+    (presentation_controller/jarvis_renderer/minie_renderer/
+    transition_engine) — plain MagicMocks are enough for every test in
+    this directory, none of which exercises real presentation behavior
+    (that's tests/unit/presentation/'s own job). mounted_persona_name
+    defaults to a MagicMock attribute (neither the literal string
+    "jarvis" nor "minie"), so PresentationHostWidget's own refresh()
+    harmlessly no-ops during MainWindow construction rather than trying
+    to call jarvis_renderer.widget()/minie_renderer.status_widget() and
+    needing a real QWidget back from a mock."""
+    return {
+        "presentation_controller": MagicMock(),
+        "jarvis_renderer": MagicMock(),
+        "minie_renderer": MagicMock(),
+        "transition_engine": MagicMock(),
+    }

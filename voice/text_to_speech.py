@@ -11,8 +11,28 @@ docs/sprint_book/sprint_2_4.md.
 Sensitive-data logging: spoken text is conversation content, never logged
 above DEBUG, and even at DEBUG only via extra={"sensitive": True}
 (Sprint 1.3's SensitiveDataFilter), same discipline as Sprint 2.3.
+
+**`on_audio_ready` (Sprint 5.14, additive — defaults to `None`, every
+existing caller's exact prior behavior preserved)**: a real gap found
+while wiring `presentation/lip_sync.py`'s `LipSyncDriver.
+drive_from_audio()` (Sprint 5.11) — that class needs the real
+synthesized PCM buffer and sample rate to sample amplitude from, but
+`speak()` bundles synthesis and blocking playback together with no
+return value, and this module's own docstring deliberately keeps it
+that way ("synthesis and playback only... zero knowledge that Jarvis/
+Minie exist"). Rather than restructure `speak()` into separate
+synthesize()/play() calls (a real API change every existing caller
+would have to adopt), `on_audio_ready`, when given, is invoked with the
+freshly-synthesized `(audio_bytes, sample_rate_hz)` immediately before
+playback starts — letting a caller (Sprint 5.14's `CommunicationPipeline`)
+spawn `LipSyncDriver`'s own non-blocking background thread so it runs
+*alongside* `self._output.play()`'s blocking call, without this module
+ever needing to know lip sync exists. Any exception from the callback
+is caught and logged, never allowed to break real audio playback (Fail
+Gracefully) — a presentation-layer failure must not silence JARMINEI.
 """
 
+from collections.abc import Callable
 from typing import Protocol
 
 from config.schema import ModelConfig
@@ -46,7 +66,12 @@ class TextToSpeech(Protocol):
     """Speech synthesis contract. Interface-first — Persona classes
     (Sprint 2.9+) depend on this, never the concrete Coqui type."""
 
-    def speak(self, text: str, voice_id: str) -> None: ...
+    def speak(
+        self,
+        text: str,
+        voice_id: str,
+        on_audio_ready: Callable[[bytes, int], None] | None = None,
+    ) -> None: ...
 
 
 class CoquiTextToSpeech:
@@ -105,12 +130,19 @@ class CoquiTextToSpeech:
         (scenario b) and MicrophoneManager."""
         return self._tts is not None and self._healthy
 
-    def speak(self, text: str, voice_id: str) -> None:
+    def speak(
+        self,
+        text: str,
+        voice_id: str,
+        on_audio_ready: Callable[[bytes, int], None] | None = None,
+    ) -> None:
         """Synthesize text with the given voice_id and play it, blocking
         until playback completes. Raises TextToSpeechError on an
         unrecognized voice_id or any synthesis/playback failure — never a
         silent no-op (the Persona system must never think the wrong voice
-        spoke)."""
+        spoke). on_audio_ready (Sprint 5.14) is called with the real
+        synthesized buffer immediately before playback starts — see this
+        module's own docstring."""
         if self._tts is None:
             raise TextToSpeechError("Cannot speak before start().")
         if self._known_speakers and voice_id not in self._known_speakers:
@@ -130,6 +162,12 @@ class CoquiTextToSpeech:
 
         audio_bytes = np.asarray(samples, dtype=np.float32).tobytes()
         sample_rate_hz = self._tts.synthesizer.output_sample_rate
+
+        if on_audio_ready is not None:
+            try:
+                on_audio_ready(audio_bytes, sample_rate_hz)
+            except Exception:
+                logger.exception("on_audio_ready callback failed; continuing with playback.")
 
         try:
             self._output.play(audio_bytes, sample_rate_hz)

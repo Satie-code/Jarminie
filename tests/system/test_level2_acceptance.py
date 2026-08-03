@@ -45,7 +45,7 @@ def test_full_level2_acceptance_scripted_conversation(
     push_utterance(h.audio_backend)
     assert h.tts.spoken_event.wait(timeout=_WAIT_TIMEOUT)
     first_reply, first_voice_id = h.tts.speak_calls[0]
-    assert first_reply == h.llm_client.conversational_response  # a real generated reply
+    assert first_reply.replace("... ", "") == h.llm_client.conversational_response
     assert h.persona_manager.active_persona().name == "jarvis"
 
     # Phase 2.2: "Natural conversation maintained during session" — a
@@ -95,7 +95,8 @@ def test_full_level2_acceptance_scripted_conversation(
     # two Level 4 additions are Sprint 4.11's own Workflow & Device
     # Control Integration; the two Level 4 Part B additions are Sprint
     # 4.18's own Scheduler & Internet Agent Integration, registered
-    # early per that sprint's own ordering requirement).
+    # early per that sprint's own ordering requirement; the three Level
+    # 5 additions are Sprint 5.14's own Presentation Layer Integration).
     states = h.core_manager.module_states()
     assert set(states) == {
         "task_scheduler",
@@ -117,5 +118,8 @@ def test_full_level2_acceptance_scripted_conversation(
         "authority_evaluator",
         "action_audit_log",
         "workflow_store",
+        "emotion_detection_engine",
+        "emotional_state_manager",
+        "presentation_controller",
     }
     assert all(state == "running" for state in states.values())

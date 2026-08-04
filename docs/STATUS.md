@@ -78,15 +78,15 @@ Sprints 5.1–5.16 (Emotion Detection Engine, Emotional State Manager, Emotional
 | 5.5 Presentation Layer | Developing | Sprints 5.5–5.13 (Presentation State Engine, Presentation Layer Foundation & Renderer Interface, Jarvis Renderer, Minie Renderer & Avatar Renderer Interface, Gesture Engine, Persona Transition Engine, Voice Personality, Adaptive Workspace, Companion Experience) — see [sprint_5_5.md](sprint_book/sprint_5/sprint_5_5.md)–[sprint_5_13.md](sprint_book/sprint_5/sprint_5_13.md). New scope beyond Part 4's original Level 5 roadmap; introduces a new top-level `presentation/` package (same one-engine-one-folder precedent as `emotion/`, `backlog/technical_debt.md` item 2) and, for Minie's avatar specifically, a real external dependency on a separately-running VTube Studio instance — JARMINEI neither embeds nor redistributes Live2D's own SDK. **5.5–5.13 all Complete** (see narrative above) — this closes all of Phase 5.5's own component sprints. |
 | 5.14 Integration | Developing | Sprints 5.14–5.16 (Presentation Layer Integration, Error Handling & Recovery Hardening, Integration Testing & Level Freeze) — see [sprint_5_14.md](sprint_book/sprint_5/sprint_5_14.md)–[sprint_5_16.md](sprint_book/sprint_5/sprint_5_16.md). Mirrors every prior Level's own integration/hardening/freeze closing sequence. **5.14 Complete** (see narrative above) — the whole graph is now real and wired; 5.15/5.16 remain. |
 
-### Part B — Companion Intelligence (roadmap granularity only)
+### Part B — Companion Intelligence (Sprint Book written 2026-08-04; 0/10 sprints implemented)
 
-Wellness Engine, Analytics, Learning Engine — Part 4's own original Phases 5.2/5.3/5.4, renumbered sprints 5.17–5.23 per [sprint_book/INDEX.md](sprint_book/INDEX.md). Expanded to full detail only once Part A freezes.
+Wellness Engine, Analytics, Learning Engine — Part 4's own original Phases 5.2/5.3/5.4. Full Sprint Book written 2026-08-04 (sprints 5.17–5.26: Usage & Habit Tracking, Wellness Triggers, Wellness Escalation & Hard Limit, Analytics Dashboard Data, Pattern Recognition, Adaptive Wellness, Preference Learning & Recommendations, plus Companion Intelligence Integration/Hardening/Freeze) — see [sprint_book/INDEX.md](sprint_book/INDEX.md)'s "Level 5 Part B breakdown changes" note for the full reasoning, including the real dependency-driven renumbering this expansion required (the original roadmap-granularity table's own `Adaptive Wellness` named a later-numbered sprint, `Pattern Recognition`, as a dependency — corrected the same way Level 3/Level 4's own breakdown notes already corrected an identical problem) and the three integration/hardening/freeze sprints added beyond the original seven-sprint roadmap-granularity plan. No new external dependency and no stop-and-ask gate were needed this time — `pywin32`/`psutil`, both already locked by [03_Engineering_Standards.md](03_Engineering_Standards.md), cover this Part's own screen-time/application-usage tracking in full. **Sprint 5.17 (Usage & Habit Tracking) is next.**
 
-| Phase | Status |
-|---|---|
-| 5.2 Wellness Engine | Planned |
-| 5.3 Analytics | Planned |
-| 5.4 Learning Engine | Planned |
+| Phase | Status | Notes |
+|---|---|---|
+| 5.2 Wellness Engine | Designing | Sprints 5.18 (Wellness Triggers), 5.19 (Wellness Escalation & Hard Limit), 5.22 (Adaptive Wellness) — see [sprint_5_18.md](sprint_book/sprint_5/sprint_5_18.md)/[sprint_5_19.md](sprint_book/sprint_5/sprint_5_19.md)/[sprint_5_22.md](sprint_book/sprint_5/sprint_5_22.md). Not yet implemented. |
+| 5.3 Analytics | Designing | Sprints 5.17 (Usage & Habit Tracking), 5.20 (Analytics Dashboard Data) — see [sprint_5_17.md](sprint_book/sprint_5/sprint_5_17.md)/[sprint_5_20.md](sprint_book/sprint_5/sprint_5_20.md). Not yet implemented. |
+| 5.4 Learning Engine | Designing | Sprints 5.21 (Pattern Recognition), 5.23 (Preference Learning & Recommendations) — see [sprint_5_21.md](sprint_book/sprint_5/sprint_5_21.md)/[sprint_5_23.md](sprint_book/sprint_5/sprint_5_23.md). Not yet implemented. |
 
 ## Level 6 — Stabilization (target: v1.0)
 

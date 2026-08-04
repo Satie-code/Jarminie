@@ -220,13 +220,13 @@ See the "Level 5 breakdown changes (2026-08-02)" note above for why this table i
 
 | Sprint | Name | Phase | Depends On | Complexity | Detail |
 | --- | --- | --- | --- | --- | --- |
-| 5.17 | Usage & Habit Tracking | 5.3 | 4.6, 4.2 | Medium | [sprint_5_17.md](sprint_5/sprint_5_17.md) |
-| 5.18 | Wellness Triggers | 5.2 | 4.15, 5.2 | Medium | [sprint_5_18.md](sprint_5/sprint_5_18.md) |
-| 5.19 | Wellness Escalation & Hard Limit | 5.2 | 5.18 | Medium | [sprint_5_19.md](sprint_5/sprint_5_19.md) |
-| 5.20 | Analytics Dashboard Data | 5.3 | 5.17 | Low–Medium | [sprint_5_20.md](sprint_5/sprint_5_20.md) |
-| 5.21 | Pattern Recognition | 5.4 | 3.2, 5.17, 5.20 | High | [sprint_5_21.md](sprint_5/sprint_5_21.md) |
-| 5.22 | Adaptive Wellness | 5.2 | 5.19, 5.21 | Medium–High | [sprint_5_22.md](sprint_5/sprint_5_22.md) |
-| 5.23 | Preference Learning & Recommendations | 5.4 | 5.21, 3.1 | Medium–High | [sprint_5_23.md](sprint_5/sprint_5_23.md) |
+| 5.17 | Usage & Habit Tracking | 5.3 | 4.6, 4.2 | Medium | [sprint_5_17.md](sprint_5/sprint_5_17.md) — **Complete** |
+| 5.18 | Wellness Triggers | 5.2 | 4.15, 5.2 | Medium | [sprint_5_18.md](sprint_5/sprint_5_18.md) — **Complete** |
+| 5.19 | Wellness Escalation & Hard Limit | 5.2 | 5.18 | Medium | [sprint_5_19.md](sprint_5/sprint_5_19.md) — **Complete** |
+| 5.20 | Analytics Dashboard Data | 5.3 | 5.17 | Low–Medium | [sprint_5_20.md](sprint_5/sprint_5_20.md) — **Complete** |
+| 5.21 | Pattern Recognition | 5.4 | 3.2, 5.17, 5.20 | High | [sprint_5_21.md](sprint_5/sprint_5_21.md) — **Complete** |
+| 5.22 | Adaptive Wellness | 5.2 | 5.19, 5.21 | Medium–High | [sprint_5_22.md](sprint_5/sprint_5_22.md) — **Complete** |
+| 5.23 | Preference Learning & Recommendations | 5.4 | 5.21, 3.1 | Medium–High | [sprint_5_23.md](sprint_5/sprint_5_23.md) — **Complete** |
 | 5.24 | Companion Intelligence Integration | integration | 5.17–5.23, 4.15, 4.18, 5.14 | High | [sprint_5_24.md](sprint_5/sprint_5_24.md) |
 | 5.25 | Error Handling & Recovery Hardening, Part B (Companion Intelligence) | reliability | 5.24 | Medium | [sprint_5_25.md](sprint_5/sprint_5_25.md) |
 | 5.26 | Integration Testing & Level Freeze (Part B) | level gate | 5.25 | Medium–High | [sprint_5_26.md](sprint_5/sprint_5_26.md) |

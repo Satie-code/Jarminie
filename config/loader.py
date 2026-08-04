@@ -15,11 +15,13 @@ import yaml
 
 from config.errors import ConfigError
 from config.schema import (
+    AnalyticsConfig,
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
     EmotionConfig,
     InternetConfig,
+    LearningConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
@@ -29,6 +31,7 @@ from config.schema import (
     SecurityConfig,
     UIConfig,
     VoiceConfig,
+    WellnessConfig,
     WorkflowConfig,
 )
 
@@ -57,6 +60,9 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "internet": InternetConfig,
     "emotion": EmotionConfig,
     "presentation": PresentationConfig,
+    "analytics": AnalyticsConfig,
+    "wellness": WellnessConfig,
+    "learning": LearningConfig,
 }
 
 

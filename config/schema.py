@@ -1110,6 +1110,294 @@ class PresentationConfig:
 
 
 @dataclass
+class AnalyticsConfig:
+    """Analytics Engine settings (Sprint 5.17 — Usage & Habit Tracking).
+
+    sample_interval_seconds is how often UsageTracker's background
+    TaskScheduler job samples the real foreground window/process.
+
+    session_gap_seconds is UsageStore.list_sessions_since()'s own
+    grouping bound: a gap between two same-process samples wider than
+    this splits them into two sessions rather than one continuous one —
+    accounts for a missed poll without falsely joining two real,
+    separate sessions.
+
+    category_map is a small, literal, config-driven process_name ->
+    category lookup (e.g. {"devenv.exe": "coding"}), the same
+    classification discipline PresentationConfig.workspace_profile_
+    keywords/decision/authority.py's keyword tuples already established
+    — empty by default, since no category has any basis without the
+    user's own machine-specific application list.
+
+    top_applications_limit (Sprint 5.20 — Analytics Dashboard Data) caps
+    DailySummary.top_applications' own descending-by-time list — a real
+    gap found and closed beyond this sprint's own stated Files to Modify
+    field list, the same "found a necessary config gap, resolved it
+    directly, disclosed it" precedent WellnessConfig.high_stress_threshold
+    (Sprint 5.18)/max_postponements_before_hard_limit (Sprint 5.19)
+    already established.
+
+    habit_category_names/project_category_names (Sprint 5.20) name which
+    category_map values count as a "habit" vs. a "project progress" proxy
+    respectively — deliberately separate fields, since a category can be
+    one without being the other. Both empty by default, the same "no
+    built-in guess" discipline category_map itself already follows. Typed
+    list[str], not the sprint file's own tuple[str, ...] — the identical
+    mechanical reason WellnessConfig.trigger_priority_order (Sprint 5.18)
+    is list[str]: config/loader.py's real YAML load path always produces
+    lists, never tuples.
+
+    habit_consistency_window_days (Sprint 5.20) is Part 2's own implicit
+    weekly framing for "consistency" — also the shared default window for
+    AnalyticsDashboardService.project_progress().
+    """
+
+    sample_interval_seconds: float = 60.0
+    session_gap_seconds: float = 180.0
+    category_map: dict[str, str] = field(default_factory=dict)
+    top_applications_limit: int = 5
+    habit_category_names: list[str] = field(default_factory=list)
+    project_category_names: list[str] = field(default_factory=list)
+    habit_consistency_window_days: int = 7
+
+
+# PatternType's four values (learning/pattern_model.py), duplicated here
+# as strings rather than imported — config/ is a dependency-direction
+# leaf, the same discipline _WELLNESS_TRIGGER_TYPES below already
+# established. Used only to validate LearningConfig.recommendation_
+# templates' own keys.
+_LEARNING_PATTERN_TYPES: tuple[str, ...] = (
+    "preferred_time",
+    "frequent_application",
+    "work_habit",
+    "conversation_style",
+)
+
+
+def _default_recommendation_templates() -> dict[str, str]:
+    """One {subject}-formatted template per recommendable PatternType.value
+    — real, disclosed, unvalidated first-pass wording, the same content-
+    quality caveat every templated-phrase config in this codebase already
+    carries. A pattern type absent from this map produces no
+    recommendation at all (learning/recommendation.py's own
+    RecommendationEngine.generate_recommendations() never falls back to a
+    raw/untemplated string — that would itself be the kind of
+    unpredictable, unreviewed wording Phase 5.4's own Acceptance Criteria
+    rules out)."""
+    return {
+        "frequent_application": (
+            "You often use {subject} around this time — want me to open it for you next time?"
+        ),
+        "preferred_time": (
+            "You're often active around {subject} — want me to keep that time free for "
+            "focused work?"
+        ),
+        "work_habit": (
+            "You're regularly active in the '{subject}' category — want tips to stay consistent?"
+        ),
+        "conversation_style": (
+            "You seem to engage more with {subject}'s conversational style — want me to "
+            "default to {subject} more often?"
+        ),
+    }
+
+
+@dataclass
+class LearningConfig:
+    """Learning Engine settings (Sprint 5.21 — Pattern Recognition;
+    extended Sprint 5.23 — Preference Learning & Recommendations).
+
+    pattern_min_occurrences/pattern_min_days are the two-gate "gradually,
+    not from one data point" thresholds every learning/pattern_recognizer.py
+    detect_*() method requires before producing a LearnedPattern — the
+    same category of "don't act on one data point" guard emotion/
+    detection_engine.py's own confidence-bonus-only-on-agreement
+    discipline already established.
+
+    preferred_time_bucket_hours groups usage into evenly-sized hour-of-day
+    windows (e.g. 2 -> 14:00-16:00) — must evenly divide 24 so every
+    bucket label is clean and non-overlapping.
+
+    lookback_days bounds how far back into UsageStore each detect_*()
+    method scans — a defensive bound against an unbounded historical
+    scan, the same category of guard SchedulerConfig.max_lookahead_days
+    already established.
+
+    conversation_style_min_records (Sprint 5.23) is the identical "don't
+    act on one data point" gate applied to
+    learning/preference_learner.py's PreferenceLearner.
+    detect_conversation_style() — the combined JARVIS+MINIE memory-record
+    count must clear this before a CONVERSATION_STYLE pattern is produced
+    at all.
+
+    recommendation_templates (Sprint 5.23) maps each recommendable
+    PatternType.value to its own single {subject}-formatted template
+    string — learning/recommendation.py's RecommendationEngine composes
+    these, never an LLM call, so a recommendation's exact wording for a
+    given pattern is always the same, predictable string (Phase 5.4's own
+    "No unpredictable behavior" Acceptance Criterion, applied literally).
+    """
+
+    pattern_min_occurrences: int = 5
+    pattern_min_days: int = 3
+    preferred_time_bucket_hours: int = 2
+    lookback_days: int = 30
+    conversation_style_min_records: int = 10
+    recommendation_templates: dict[str, str] = field(
+        default_factory=_default_recommendation_templates
+    )
+
+
+# WellnessTriggerType's five values (wellness/wellness_model.py), duplicated
+# here as strings rather than imported — config/ is a dependency-direction
+# leaf, the same discipline _EMOTIONAL_STATE_DIMENSION_RANGES above already
+# established for emotion/state_manager.py's own dimension names. Used only
+# to validate WellnessConfig.trigger_priority_order below.
+_WELLNESS_TRIGGER_TYPES: tuple[str, ...] = (
+    "break",
+    "hydration",
+    "eye_protection",
+    "late_night",
+    "overwork",
+)
+
+
+def _default_escalation_message_templates() -> dict[str, list[str]]:
+    """Level-1 (gentle) / level-2 (slightly stronger) / level-3 (strong
+    recommendation) phrasing per Part 2's own named escalation ladder —
+    real, disclosed, unvalidated first-pass wording, the same content-
+    quality caveat every templated-phrase config in this codebase already
+    carries (PresentationConfig.gesture_vocabulary,
+    decision/authority.py's reasoning templates)."""
+    return {
+        "break": [
+            "You've been active for a while — consider taking a short break.",
+            "It's been a while since your last break — a short one would really help.",
+            "You've been going a long time without a break — please take one soon.",
+        ],
+        "hydration": [
+            "It might be a good time to drink some water.",
+            "Still worth pausing for some water when you get a moment.",
+            "Please take a moment to hydrate — it's been quite a while.",
+        ],
+        "eye_protection": [
+            "Consider looking at something 20 feet away for 20 seconds to rest your eyes.",
+            "Your eyes could use a real rest — try looking away for 20 seconds.",
+            "Please give your eyes a proper rest soon — this has gone on a while.",
+        ],
+        "overwork": [
+            "You've been active for a long stretch — consider taking a longer break.",
+            "This has been a long, continuous stretch of activity — a real break would help.",
+            "You've been working a very long time without a real break — please stop soon.",
+        ],
+        "late_night": [
+            "It's getting late — you might want to consider wrapping up soon.",
+            "It's quite late now — winding down soon would be a good idea.",
+            "It's very late — please consider stopping for the night.",
+        ],
+    }
+
+
+@dataclass
+class WellnessConfig:
+    """Wellness Engine settings (Sprint 5.18 — Wellness Triggers).
+
+    idle_check_interval_seconds is how often WellnessTracker's background
+    TaskScheduler job samples real OS-level idle time
+    (win32api.GetLastInputInfo()).
+
+    inactivity_reset_seconds is the "significant inactivity" resume
+    condition Part 2's Hard Limit Rule names (15 minutes by default) — an
+    idle reading at or beyond this resets both _continuous_active_seconds
+    and _daily_active_seconds to zero, correctly suppressing any trigger
+    that would otherwise have fired (a real, disclosed simplification: this
+    sprint tracks no calendar-day boundary at all, so "daily" means
+    "cumulative since the last significant break," not "since local
+    midnight" — no Part 2 text names calendar-day-boundary handling, and
+    counters are in-memory-only regardless, see wellness_tracker.py's own
+    docstring).
+
+    break_interval_seconds/hydration_interval_seconds/
+    eye_protection_interval_seconds/overwork_daily_seconds are each
+    trigger's own configured threshold — real, disclosed, unvalidated
+    first-pass guesses (see wellness_tracker.py's own docstring); no
+    clinical or ergonomic authority backs these numbers, and none is
+    claimed.
+
+    late_night_start_hour/late_night_end_hour define a wrapping window
+    (start_hour > end_hour means "wraps past midnight," e.g. 23 -> 5).
+
+    trigger_priority_order resolves which single trigger fires when more
+    than one threshold is crossed in the same tick — config-driven, not
+    hardcoded, per 03_Engineering_Standards.md's own rule. Must be a
+    permutation of exactly WellnessTriggerType's five values. Typed
+    list[str], not the sprint file's own tuple[str, ...] — every other
+    YAML-sourced ordered/collection field in this schema (search_providers,
+    workspace_profile_keywords, gesture_vocabulary) is a list for the same
+    mechanical reason: config/loader.py's YAML/env-override path produces
+    lists, never tuples, so a tuple type hint here would silently mismatch
+    the real runtime value post-load. A disclosed deviation, not an
+    oversight.
+
+    stress_sensitivity_factor is a narrow, opt-in-by-default-zero
+    adjustment: when a live EmotionalState is supplied and its stress
+    reads at or above high_stress_threshold, evaluate_triggers() shortens
+    the effective overwork_daily_seconds/break_interval_seconds threshold
+    by this bounded fraction. Default 0.0 means inert unless explicitly
+    configured — a conservative, disclosed default per this sprint's own
+    Architecture Notes. high_stress_threshold mirrors
+    EmotionConfig.tone_high_stress_threshold's identical default (70.0) —
+    the same "user is under real strain" bar, reused rather than
+    reinvented, though kept as its own field since WellnessConfig has no
+    access to EmotionConfig.
+
+    max_postponements_before_hard_limit (Sprint 5.19 — Wellness
+    Escalation & Hard Limit) is Part 2's own "Stop repeated reminders
+    after three postponements" Hard Limit Rule, config-driven rather than
+    a bare literal 3, per 03_Engineering_Standards.md's own rule.
+
+    escalation_message_templates (Sprint 5.19) maps each
+    WellnessTriggerType.value to its own 3-level (gentle/stronger/strong)
+    phrasing ladder — typed dict[str, list[str]], not the sprint file's
+    own dict[str, tuple[str, str, str]], for the identical mechanical
+    reason trigger_priority_order above is list[str]: config/loader.py's
+    real YAML load path always produces lists, never tuples. A trigger
+    type absent from this map falls back to
+    wellness/escalation.py's own hardcoded generic template rather than
+    raising KeyError — that fallback is intentionally NOT itself a config
+    field, since the sprint's own Files to Modify names only these two
+    new fields.
+
+    adaptive_min_multiplier/adaptive_max_multiplier (Sprint 5.22 —
+    Adaptive Wellness) are the structural bound wellness/adaptive_wellness.
+    py's AdaptiveWellnessAdjuster.compute_overrides() clamps every
+    interval multiplier into before it ever reaches evaluate_triggers() —
+    Part 2's own "Adjust reminders accordingly" is a bounded adjustment on
+    top of the existing static threshold, never an unbounded override.
+    """
+
+    idle_check_interval_seconds: float = 60.0
+    inactivity_reset_seconds: float = 900.0
+    break_interval_seconds: float = 3600.0
+    hydration_interval_seconds: float = 2700.0
+    eye_protection_interval_seconds: float = 1200.0
+    overwork_daily_seconds: float = 21600.0
+    late_night_start_hour: int = 23
+    late_night_end_hour: int = 5
+    trigger_priority_order: list[str] = field(
+        default_factory=lambda: ["break", "eye_protection", "hydration", "overwork", "late_night"]
+    )
+    stress_sensitivity_factor: float = 0.0
+    high_stress_threshold: float = 70.0
+    max_postponements_before_hard_limit: int = 3
+    escalation_message_templates: dict[str, list[str]] = field(
+        default_factory=_default_escalation_message_templates
+    )
+    adaptive_min_multiplier: float = 0.75
+    adaptive_max_multiplier: float = 1.5
+
+
+@dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
     never the whole AppConfig (see Architecture Notes in sprint_1_2.md)."""
@@ -1128,6 +1416,9 @@ class AppConfig:
     internet: InternetConfig = field(default_factory=InternetConfig)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
     presentation: PresentationConfig = field(default_factory=PresentationConfig)
+    analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
+    wellness: WellnessConfig = field(default_factory=WellnessConfig)
+    learning: LearningConfig = field(default_factory=LearningConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -1145,6 +1436,9 @@ class AppConfig:
         self._validate_internet()
         self._validate_emotion()
         self._validate_presentation()
+        self._validate_analytics()
+        self._validate_wellness()
+        self._validate_learning()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -1756,4 +2050,159 @@ class AppConfig:
                 raise ConfigError(
                     f"presentation.minie_expression_thresholds[{expression_id!r}] must be in "
                     f"[0.0, 1.0], got {threshold}"
+                )
+
+    def _validate_analytics(self) -> None:
+        if self.analytics.sample_interval_seconds <= 0:
+            raise ConfigError(
+                "analytics.sample_interval_seconds must be positive, "
+                f"got {self.analytics.sample_interval_seconds}"
+            )
+        if self.analytics.session_gap_seconds <= 0:
+            raise ConfigError(
+                "analytics.session_gap_seconds must be positive, "
+                f"got {self.analytics.session_gap_seconds}"
+            )
+        for process_name, category in self.analytics.category_map.items():
+            if not process_name.strip():
+                raise ConfigError("analytics.category_map must not contain empty-string keys")
+            if not category or not category.strip():
+                raise ConfigError(
+                    f"analytics.category_map[{process_name!r}] must not be blank"
+                )
+        if self.analytics.top_applications_limit <= 0:
+            raise ConfigError(
+                "analytics.top_applications_limit must be positive, "
+                f"got {self.analytics.top_applications_limit}"
+            )
+        if self.analytics.habit_consistency_window_days <= 0:
+            raise ConfigError(
+                "analytics.habit_consistency_window_days must be positive, "
+                f"got {self.analytics.habit_consistency_window_days}"
+            )
+        for field_name in ("habit_category_names", "project_category_names"):
+            for name in getattr(self.analytics, field_name):
+                if not name or not name.strip():
+                    raise ConfigError(f"analytics.{field_name} must not contain blank entries")
+
+    def _validate_wellness(self) -> None:
+        w = self.wellness
+        for field_name in (
+            "idle_check_interval_seconds",
+            "inactivity_reset_seconds",
+            "break_interval_seconds",
+            "hydration_interval_seconds",
+            "eye_protection_interval_seconds",
+            "overwork_daily_seconds",
+        ):
+            value = getattr(w, field_name)
+            if value <= 0:
+                raise ConfigError(f"wellness.{field_name} must be positive, got {value}")
+        if not (0 <= w.late_night_start_hour <= 23):
+            raise ConfigError(
+                f"wellness.late_night_start_hour must be in [0, 23], got {w.late_night_start_hour}"
+            )
+        if not (0 <= w.late_night_end_hour <= 23):
+            raise ConfigError(
+                f"wellness.late_night_end_hour must be in [0, 23], got {w.late_night_end_hour}"
+            )
+        if sorted(w.trigger_priority_order) != sorted(_WELLNESS_TRIGGER_TYPES):
+            raise ConfigError(
+                "wellness.trigger_priority_order must be a permutation of "
+                f"{_WELLNESS_TRIGGER_TYPES}, got {w.trigger_priority_order}"
+            )
+        if not (0.0 <= w.stress_sensitivity_factor <= 1.0):
+            raise ConfigError(
+                "wellness.stress_sensitivity_factor must be in [0.0, 1.0], got "
+                f"{w.stress_sensitivity_factor}"
+            )
+        if not (0.0 <= w.high_stress_threshold <= 100.0):
+            raise ConfigError(
+                "wellness.high_stress_threshold must be in [0.0, 100.0], got "
+                f"{w.high_stress_threshold}"
+            )
+        if w.max_postponements_before_hard_limit <= 0:
+            raise ConfigError(
+                "wellness.max_postponements_before_hard_limit must be positive, got "
+                f"{w.max_postponements_before_hard_limit}"
+            )
+        for trigger_value, templates in w.escalation_message_templates.items():
+            if trigger_value not in _WELLNESS_TRIGGER_TYPES:
+                raise ConfigError(
+                    "wellness.escalation_message_templates has an unknown trigger type key "
+                    f"{trigger_value!r}, must be one of {_WELLNESS_TRIGGER_TYPES}"
+                )
+            if len(templates) != 3:
+                raise ConfigError(
+                    f"wellness.escalation_message_templates[{trigger_value!r}] must have "
+                    f"exactly 3 entries (level 1/2/3), got {len(templates)}"
+                )
+            for level, message in enumerate(templates, start=1):
+                if not message or not message.strip():
+                    raise ConfigError(
+                        f"wellness.escalation_message_templates[{trigger_value!r}] level "
+                        f"{level} must not be blank"
+                    )
+        if w.adaptive_min_multiplier <= 0:
+            raise ConfigError(
+                "wellness.adaptive_min_multiplier must be positive, "
+                f"got {w.adaptive_min_multiplier}"
+            )
+        if w.adaptive_max_multiplier <= 0:
+            raise ConfigError(
+                "wellness.adaptive_max_multiplier must be positive, "
+                f"got {w.adaptive_max_multiplier}"
+            )
+        if w.adaptive_min_multiplier > w.adaptive_max_multiplier:
+            raise ConfigError(
+                "wellness.adaptive_min_multiplier must not exceed adaptive_max_multiplier, "
+                f"got {w.adaptive_min_multiplier} > {w.adaptive_max_multiplier}"
+            )
+
+    def _validate_learning(self) -> None:
+        learning_config = self.learning
+        if learning_config.pattern_min_occurrences <= 0:
+            raise ConfigError(
+                "learning.pattern_min_occurrences must be positive, "
+                f"got {learning_config.pattern_min_occurrences}"
+            )
+        if learning_config.pattern_min_days <= 0:
+            raise ConfigError(
+                "learning.pattern_min_days must be positive, "
+                f"got {learning_config.pattern_min_days}"
+            )
+        if not (1 <= learning_config.preferred_time_bucket_hours <= 24):
+            raise ConfigError(
+                "learning.preferred_time_bucket_hours must be in [1, 24], got "
+                f"{learning_config.preferred_time_bucket_hours}"
+            )
+        if 24 % learning_config.preferred_time_bucket_hours != 0:
+            raise ConfigError(
+                "learning.preferred_time_bucket_hours must evenly divide 24 (so every bucket "
+                "label is clean and non-overlapping), got "
+                f"{learning_config.preferred_time_bucket_hours}"
+            )
+        if learning_config.lookback_days <= 0:
+            raise ConfigError(
+                f"learning.lookback_days must be positive, got {learning_config.lookback_days}"
+            )
+        if learning_config.conversation_style_min_records <= 0:
+            raise ConfigError(
+                "learning.conversation_style_min_records must be positive, got "
+                f"{learning_config.conversation_style_min_records}"
+            )
+        for pattern_type_value, template in learning_config.recommendation_templates.items():
+            if pattern_type_value not in _LEARNING_PATTERN_TYPES:
+                raise ConfigError(
+                    "learning.recommendation_templates has an unknown pattern type key "
+                    f"{pattern_type_value!r}, must be one of {_LEARNING_PATTERN_TYPES}"
+                )
+            if not template or not template.strip():
+                raise ConfigError(
+                    f"learning.recommendation_templates[{pattern_type_value!r}] must not be blank"
+                )
+            if "{subject}" not in template:
+                raise ConfigError(
+                    f"learning.recommendation_templates[{pattern_type_value!r}] must contain a "
+                    "{subject} placeholder"
                 )

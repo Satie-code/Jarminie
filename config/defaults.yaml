@@ -522,3 +522,130 @@ presentation:
   # ones.
   greeting_idle_threshold_seconds: 3600.0
   celebration_significance_threshold: 0.75
+
+analytics:
+  # Sprint 5.17 — Usage & Habit Tracking. analytics/usage_tracker.py's
+  # UsageTracker samples the real foreground window/process this often.
+  sample_interval_seconds: 60.0
+  # analytics/usage_store.py's UsageStore.list_sessions_since() own
+  # grouping bound: a gap between two same-process samples wider than
+  # this splits them into two sessions rather than one continuous one.
+  session_gap_seconds: 180.0
+  # A process_name -> category lookup (e.g. "devenv.exe": "coding"),
+  # entirely user-configured — empty by default, no basis for a
+  # built-in guess at any one machine's own installed applications.
+  category_map: {}
+  # Sprint 5.20 — Analytics Dashboard Data. Caps
+  # DailySummary.top_applications' own descending-by-time list.
+  top_applications_limit: 5
+  # Which category_map values count as a "habit" / a "project progress"
+  # proxy respectively — deliberately separate, entirely user-configured,
+  # empty by default (same "no built-in guess" discipline category_map
+  # itself already follows).
+  habit_category_names: []
+  project_category_names: []
+  # Part 2's own implicit weekly framing for "consistency" — also the
+  # shared default window for AnalyticsDashboardService.project_progress().
+  habit_consistency_window_days: 7
+
+wellness:
+  # Sprint 5.18 — Wellness Triggers. wellness/wellness_tracker.py's
+  # WellnessTracker samples real OS-level idle time this often.
+  idle_check_interval_seconds: 60.0
+  # A tick registering idle time at or beyond this resets the continuous/
+  # daily active-time counters — the "significant inactivity" resume
+  # condition Part 2's Hard Limit Rule names (15 minutes).
+  inactivity_reset_seconds: 900.0
+  # Each trigger's own configured threshold. Real, disclosed, unvalidated
+  # first-pass guesses — no clinical or ergonomic authority backs these
+  # numbers, and none is claimed.
+  break_interval_seconds: 3600.0
+  hydration_interval_seconds: 2700.0
+  # The 20-20-20 convention: every 20 minutes.
+  eye_protection_interval_seconds: 1200.0
+  # 6 hours of cumulative active time since the last significant break.
+  overwork_daily_seconds: 21600.0
+  # A wrapping window (start_hour > end_hour means "wraps past midnight").
+  late_night_start_hour: 23
+  late_night_end_hour: 5
+  # Config-driven, not hardcoded — resolves which single trigger fires
+  # when more than one threshold is crossed in the same tick.
+  trigger_priority_order:
+    - "break"
+    - "eye_protection"
+    - "hydration"
+    - "overwork"
+    - "late_night"
+  # Opt-in-by-default-zero: when a live EmotionalState reads stress at or
+  # above high_stress_threshold, shortens the effective overwork/break
+  # threshold by this bounded fraction. 0.0 means inert unless explicitly
+  # configured.
+  stress_sensitivity_factor: 0.0
+  high_stress_threshold: 70.0
+  # Sprint 5.19 — Wellness Escalation & Hard Limit. Part 2's own "Stop
+  # repeated reminders after three postponements" Hard Limit Rule.
+  max_postponements_before_hard_limit: 3
+  # Level-1 (gentle) / level-2 (slightly stronger) / level-3 (strong
+  # recommendation) phrasing per trigger type, per Part 2's own named
+  # escalation ladder. Real, disclosed, unvalidated first-pass wording. A
+  # trigger type absent from this map falls back to wellness/escalation.py's
+  # own hardcoded generic template rather than raising an error.
+  escalation_message_templates:
+    break:
+      - "You've been active for a while — consider taking a short break."
+      - "It's been a while since your last break — a short one would really help."
+      - "You've been going a long time without a break — please take one soon."
+    hydration:
+      - "It might be a good time to drink some water."
+      - "Still worth pausing for some water when you get a moment."
+      - "Please take a moment to hydrate — it's been quite a while."
+    eye_protection:
+      - "Consider looking at something 20 feet away for 20 seconds to rest your eyes."
+      - "Your eyes could use a real rest — try looking away for 20 seconds."
+      - "Please give your eyes a proper rest soon — this has gone on a while."
+    overwork:
+      - "You've been active for a long stretch — consider taking a longer break."
+      - "This has been a long, continuous stretch of activity — a real break would help."
+      - "You've been working a very long time without a real break — please stop soon."
+    late_night:
+      - "It's getting late — you might want to consider wrapping up soon."
+      - "It's quite late now — winding down soon would be a good idea."
+      - "It's very late — please consider stopping for the night."
+  # Sprint 5.22 — Adaptive Wellness. The structural bound
+  # AdaptiveWellnessAdjuster.compute_overrides() clamps every interval
+  # multiplier into before it ever reaches evaluate_triggers() — a
+  # bounded adjustment on top of the existing static threshold, never an
+  # unbounded override.
+  adaptive_min_multiplier: 0.75
+  adaptive_max_multiplier: 1.5
+
+learning:
+  # Sprint 5.21 — Pattern Recognition. The two-gate "gradually, not from
+  # one data point" thresholds every learning/pattern_recognizer.py
+  # detect_*() method requires before producing a LearnedPattern.
+  pattern_min_occurrences: 5
+  pattern_min_days: 3
+  # Groups usage into evenly-sized hour-of-day windows (must evenly
+  # divide 24).
+  preferred_time_bucket_hours: 2
+  # A defensive bound against an unbounded historical UsageStore scan.
+  lookback_days: 30
+  # Sprint 5.23 — Preference Learning & Recommendations. The identical
+  # "don't act on one data point" gate applied to
+  # PreferenceLearner.detect_conversation_style()'s own combined
+  # JARVIS+MINIE memory-record count.
+  conversation_style_min_records: 10
+  # One {subject}-formatted template per recommendable PatternType.value —
+  # RecommendationEngine composes these, never an LLM call, so wording is
+  # always predictable. A pattern type absent from this map produces no
+  # recommendation at all.
+  recommendation_templates:
+    frequent_application: >-
+      You often use {subject} around this time — want me to open it for you next time?
+    preferred_time: >-
+      You're often active around {subject} — want me to keep that time free for focused work?
+    work_habit: >-
+      You're regularly active in the '{subject}' category — want tips to stay consistent?
+    conversation_style: >-
+      You seem to engage more with {subject}'s conversational style — want me to default to
+      {subject} more often?

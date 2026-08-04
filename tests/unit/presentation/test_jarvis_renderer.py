@@ -376,6 +376,56 @@ def test_sphere_widget_phase_wraps_within_two_pi(qtbot):
     assert 0.0 <= widget._phase < 6.283185307179586  # 2*pi
 
 
+# --- HolographicSphereWidget._on_tick() exception guarding (Sprint 5.15c) ----
+#
+# A corrupted _animation_speed (a str, not a float) forces a real
+# TypeError from _on_tick()'s own arithmetic — portable across PySide6
+# versions, unlike monkeypatching Qt's own C++-backed update() method.
+
+
+def test_sphere_widget_on_tick_survives_a_raising_tick(qtbot, caplog):
+    widget = HolographicSphereWidget()
+    qtbot.addWidget(widget)
+    widget._animation_speed = "not-a-number"
+    last_good_phase = widget._phase
+
+    with caplog.at_level("ERROR"):
+        widget._on_tick()  # must not raise
+
+    assert any("_on_tick" in r.message for r in caplog.records)
+    assert widget._phase == last_good_phase  # last-good frame retained
+
+
+def test_sphere_widget_on_tick_logs_a_repeated_failure_only_once(qtbot, caplog):
+    widget = HolographicSphereWidget()
+    qtbot.addWidget(widget)
+    widget._animation_speed = "not-a-number"
+
+    with caplog.at_level("ERROR"):
+        widget._on_tick()
+        widget._on_tick()
+        widget._on_tick()
+
+    failures = [r for r in caplog.records if "_on_tick" in r.message]
+    assert len(failures) == 1
+
+
+def test_sphere_widget_on_tick_recovers_after_a_transient_failure(qtbot, caplog):
+    widget = HolographicSphereWidget()
+    qtbot.addWidget(widget)
+
+    with caplog.at_level("ERROR"):
+        widget._animation_speed = "not-a-number"
+        widget._on_tick()  # fails, logs once
+        widget._animation_speed = 1.0
+        widget._on_tick()  # recovers
+        widget._animation_speed = "not-a-number"
+        widget._on_tick()  # fails again — logs again, since the flag reset on recovery
+
+    failures = [r for r in caplog.records if "_on_tick" in r.message]
+    assert len(failures) == 2
+
+
 def test_ring_widget_paints_without_raising(qtbot):
     widget = SegmentedRingWidget(segment_count=12)
     qtbot.addWidget(widget)
@@ -454,3 +504,53 @@ def test_ring_widget_paints_without_raising_while_pulsing(qtbot):
     pixmap = widget.grab()  # forces a real paintEvent() call while pulsing
 
     assert not pixmap.isNull()
+
+
+# --- SegmentedRingWidget._on_tick() exception guarding (Sprint 5.15c) --------
+#
+# A corrupted _animation_speed (a str, not a float) forces a real
+# TypeError from _on_tick()'s own arithmetic — the same portable
+# technique HolographicSphereWidget's own tests above use.
+
+
+def test_ring_widget_on_tick_survives_a_raising_tick(qtbot, caplog):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget._animation_speed = "not-a-number"
+    last_good_phase = widget._rotation_phase
+
+    with caplog.at_level("ERROR"):
+        widget._on_tick()  # must not raise
+
+    assert any("_on_tick" in r.message for r in caplog.records)
+    assert widget._rotation_phase == last_good_phase  # last-good frame retained
+
+
+def test_ring_widget_on_tick_logs_a_repeated_failure_only_once(qtbot, caplog):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+    widget._animation_speed = "not-a-number"
+
+    with caplog.at_level("ERROR"):
+        widget._on_tick()
+        widget._on_tick()
+        widget._on_tick()
+
+    failures = [r for r in caplog.records if "_on_tick" in r.message]
+    assert len(failures) == 1
+
+
+def test_ring_widget_on_tick_recovers_after_a_transient_failure(qtbot, caplog):
+    widget = SegmentedRingWidget(segment_count=12)
+    qtbot.addWidget(widget)
+
+    with caplog.at_level("ERROR"):
+        widget._animation_speed = "not-a-number"
+        widget._on_tick()  # fails, logs once
+        widget._animation_speed = 1.0
+        widget._on_tick()  # recovers
+        widget._animation_speed = "not-a-number"
+        widget._on_tick()  # fails again — logs again, since the flag reset on recovery
+
+    failures = [r for r in caplog.records if "_on_tick" in r.message]
+    assert len(failures) == 2

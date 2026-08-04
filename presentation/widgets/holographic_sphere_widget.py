@@ -14,6 +14,17 @@ continuously-advancing float, stepped forward once per `_on_tick()` call
 second) — never by `render_state()` itself. Conflating the two would
 make the sphere visibly jump between infrequent `render_state()` calls
 instead of animate smoothly.
+
+**Per-tick exception guarding (Sprint 5.15, scenario c)**: `_on_tick()`
+is a `QTimer` slot — an uncaught exception there is a structurally
+different risk from a bad `render_state()` call (already `Presentation
+Controller.refresh()`'s own job to guard, Sprint 5.6), since nothing
+upstream of a `QTimer.timeout` signal can catch it. A single bad tick is
+caught, logged once (rate-limited via `_tick_failure_logged` — reset on
+the next successful tick — so a persistently-broken tick doesn't flood
+the log every ~33ms), and the previous frame's own last-good `_phase`/
+`update()` state is retained rather than a crashed timer or a half-drawn
+widget.
 """
 
 import math
@@ -21,6 +32,10 @@ import math
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QRadialGradient
 from PySide6.QtWidgets import QWidget
+
+from core.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 _DEFAULT_COLOR = QColor("#0A84FF")
 _MIN_PULSE_SCALE = 0.85
@@ -48,6 +63,7 @@ class HolographicSphereWidget(QWidget):
         self._target_color = _DEFAULT_COLOR
         self._animation_speed = 1.0
         self._phase = 0.0
+        self._tick_failure_logged = False
 
     def set_target(self, color: QColor, animation_speed: float) -> None:
         """Sets the next animation target. Takes effect on the very next
@@ -61,9 +77,23 @@ class HolographicSphereWidget(QWidget):
         scaled by the current animation_speed multiplier
         (PresentationState.animation_speed, Sprint 5.5). Called by
         JarvisRenderer's own shared QTimer loop — never by set_target()/
-        render_state() itself."""
-        self._phase = (self._phase + _BASE_PHASE_STEP * self._animation_speed) % (2 * math.pi)
-        self.update()
+        render_state() itself. Sprint 5.15 scenario (c): never raises —
+        see this module's own "Per-tick exception guarding" docstring
+        section."""
+        try:
+            self._phase = (self._phase + _BASE_PHASE_STEP * self._animation_speed) % (
+                2 * math.pi
+            )
+            self.update()
+        except Exception:
+            if not self._tick_failure_logged:
+                logger.exception(
+                    "HolographicSphereWidget._on_tick() failed; retaining the last-painted "
+                    "frame."
+                )
+                self._tick_failure_logged = True
+            return
+        self._tick_failure_logged = False
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt's own naming convention)
         pulse = _MIN_PULSE_SCALE + (_MAX_PULSE_SCALE - _MIN_PULSE_SCALE) * (

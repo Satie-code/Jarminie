@@ -61,6 +61,28 @@ and `PresentationHostWidget` exist to parent the overlay to) calls
 the sprint's own file list, resolved it directly, disclosed it here"
 precedent this class's own Sprint 5.6/5.9/5.10 constructor additions
 already used.
+
+**Supersession (Sprint 5.15, scenario d)**: a `transition()` call that
+arrives while a previous one is still mid-`_run_choreography()`
+supersedes it — tracked via `_active_transition_id`, a plain counter
+token (no lock; Python's GIL makes the simple int compare-and-set below
+atomic enough for this cooperative-cancellation use, the same looseness
+`presentation/minie_renderer.py`'s own `_reconnecting`-style flags
+already accept elsewhere in this codebase). The superseded call notices
+at its own next phase-boundary check (the identical points the existing
+time-budget check already used — "never preempting a phase already in
+flight," this module's own established contract) and returns without
+ever calling `_finish()` itself; the superseding call skips
+`_run_choreography()` entirely and calls `_finish()` directly, the same
+"skip straight to `LOADING_TARGET`/`COMPLETE`" path a time-budget
+overrun already uses. Exactly one `mount_renderer()` call happens no
+matter how many `transition()` calls arrive in a burst — whichever is
+most recent wins. Verified in this codebase's own only real caller
+today (`PersonaManager`'s `on_switch`, always sequential/single-threaded
+per session) this can't yet occur in practice; built anyway as real
+defensive hardening for a plausible future caller (e.g. a UI-driven
+persona switch racing a voice-triggered one), per this sprint's own
+Purpose.
 """
 
 import time
@@ -138,6 +160,7 @@ class TransitionEngine:
         self._config = presentation_config
         self._overlay = overlay if overlay is not None else NullTransitionOverlay()
         self._saved_states: dict[str, PresentationState] = {}
+        self._active_transition_id = 0
 
     def set_overlay(self, overlay: TransitionOverlay) -> None:
         """Swap in a real overlay after construction — see this class's
@@ -152,32 +175,66 @@ class TransitionEngine:
         """Runs the seven phases in order (module docstring). Never
         raises; always calls PresentationController.mount_renderer(
         new_persona_name) exactly once, regardless of which path is
-        taken (Acceptance Criteria)."""
+        taken (Acceptance Criteria) — including scenario (d) supersession,
+        see this module's own docstring."""
+        superseding = self._active_transition_id != 0
+        self._active_transition_id += 1
+        my_id = self._active_transition_id
+
+        if superseding:
+            logger.info(
+                "transition(%s -> %s) supersedes an in-flight transition; skipping straight "
+                "to the renderer swap.",
+                old_persona_name,
+                new_persona_name,
+            )
+            try:
+                self._finish(new_persona_name, skip_restore=True)
+            finally:
+                if self._active_transition_id == my_id:
+                    self._active_transition_id = 0
+            return
+
         deadline = time.monotonic() + self._config.transition_max_duration_seconds
-        finished = False
+        ran_to_completion = False
         try:
-            self._run_choreography(old_persona_name, new_persona_name, deadline)
-            finished = True
+            ran_to_completion = self._run_choreography(
+                old_persona_name, new_persona_name, deadline, my_id
+            )
         except Exception:
             logger.exception(
                 "TransitionEngine.transition() failed mid-sequence; degrading to an instant "
                 "renderer swap."
             )
-        if not finished:
+        if self._active_transition_id != my_id:
+            # Superseded while _run_choreography() was running — a newer
+            # transition() call already owns (or will own) the one real
+            # _finish()/mount_renderer() call; must not call it again.
+            return
+        if not ran_to_completion:
             # _run_choreography raised before reaching its own _finish()
             # call below — this is the one remaining path to a renderer
             # swap, still exactly one mount_renderer() call total.
             self._finish(new_persona_name, skip_restore=True)
+        self._active_transition_id = 0
 
     def _run_choreography(
-        self, old_persona_name: str, new_persona_name: str, deadline: float
-    ) -> None:
+        self, old_persona_name: str, new_persona_name: str, deadline: float, my_id: int
+    ) -> bool:
+        """Returns True once it has called _finish() itself (the normal,
+        non-superseded path). Returns False without calling _finish() at
+        all if scenario (d) superseded this transition at any phase
+        boundary below (checked at the identical points the existing
+        time-budget check already used) — a newer transition() call
+        already owns that responsibility."""
         self._call_overlay_safely(self._overlay.show)
 
         self._call_overlay_safely(self._overlay.set_phase, TransitionPhase.SAVING_STATE)
         saved = self._presentation_controller.last_state_for(old_persona_name)
         if saved is not None:
             self._saved_states[old_persona_name] = saved
+        if self._active_transition_id != my_id:
+            return False
 
         within_budget = time.monotonic() < deadline
         if within_budget:
@@ -189,10 +246,14 @@ class TransitionEngine:
                 new_persona_name,
             )
             within_budget = time.monotonic() < deadline
+        if self._active_transition_id != my_id:
+            return False
 
         if within_budget:
             self._call_overlay_safely(self._overlay.set_phase, TransitionPhase.SHOWING_CORE)
             within_budget = time.monotonic() < deadline
+        if self._active_transition_id != my_id:
+            return False
 
         if within_budget:
             self._call_overlay_safely(
@@ -200,8 +261,11 @@ class TransitionEngine:
             )
             time.sleep(self._config.transition_particle_phase_seconds)
             within_budget = time.monotonic() < deadline
+        if self._active_transition_id != my_id:
+            return False
 
         self._finish(new_persona_name, skip_restore=not within_budget)
+        return True
 
     def _finish(self, new_persona_name: str, skip_restore: bool) -> None:
         """Phases 5/7 (and, unless skip_restore, phase 6) — the single

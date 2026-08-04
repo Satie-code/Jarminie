@@ -196,8 +196,8 @@ See the "Level 5 breakdown changes (2026-08-02)" note above for why this table i
 | 5.12   | Adaptive Workspace                                   | 5.5         | 5.7, 3.8                | Medium      | [sprint_5_12.md](sprint_5/sprint_5_12.md) — **Complete** |
 | 5.13   | Companion Experience                                 | 5.5         | 5.3, 5.9, 3.1–3.4       | Medium      | [sprint_5_13.md](sprint_5/sprint_5_13.md) — **Complete** |
 | 5.14   | Presentation Layer Integration                       | integration | 5.1–5.13, 4.11, 4.18    | High        | [sprint_5_14.md](sprint_5/sprint_5_14.md) — **Complete** |
-| 5.15   | Error Handling & Recovery Hardening                  | reliability | 5.14                    | Medium      | [sprint_5_15.md](sprint_5_15.md)     |
-| 5.16   | Integration Testing & Level Freeze (Part A)          | level gate  | 5.15                    | Medium–High | [sprint_5_16.md](sprint_5_16.md)     |
+| 5.15   | Error Handling & Recovery Hardening                  | reliability | 5.14                    | Medium      | [sprint_5_15.md](sprint_5/sprint_5_15.md) — **Complete** |
+| 5.16   | Integration Testing & Level Freeze (Part A)          | level gate  | 5.15                    | Medium–High | [sprint_5_16.md](sprint_5_16.md) — **Complete** |
 
 ### Part B — Companion Intelligence (roadmap granularity only; renumbered 2026-08-02)
 

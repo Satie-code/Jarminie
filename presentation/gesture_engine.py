@@ -18,6 +18,18 @@ arriving, a turn starting/ending, an `OperatingMode` transition) and
 each tick of a purely ambient gesture, gated by
 `PresentationState.gesture_probability`, which is what makes an idle
 avatar/dashboard feel alive rather than static).
+
+**Rate limiting (Sprint 5.15, scenario f)**: `trigger_event()` is now
+rate-limited too, per `GestureTrigger` value, via
+`PresentationConfig.gesture_trigger_min_interval_seconds` — the same
+interval-gate discipline `maybe_roll_ambient_gesture()` already applies
+to its own ambient path (only a genuine fire consumes the interval; a
+call that returns None because the vocabulary is empty does not), so a
+bug elsewhere calling `trigger_event()` far more often than intended
+(e.g. a retry loop firing it every millisecond) cannot flood a renderer
+with gesture calls either. Each `GestureTrigger` value has its own
+independent budget — a burst of `TURN_START` calls cannot suppress a
+legitimate `TURN_END` call arriving moments later.
 """
 
 import random
@@ -77,13 +89,26 @@ class GestureEngine:
         self._config = presentation_config
         self._round_robin_index: dict[GestureTrigger, int] = {}
         self._last_ambient_fired_at: datetime | None = None
+        self._last_trigger_fired_at: dict[GestureTrigger, datetime] = {}
 
     def trigger_event(self, trigger: GestureTrigger, persona_name: str) -> GestureEvent | None:
         """Never raises. Returns None (a logged no-op) if trigger's
         configured vocabulary is empty; otherwise round-robins through
         the configured candidates for config-driven variety rather than
-        always the first entry."""
-        return self._select_event(trigger, persona_name, datetime.now(UTC))
+        always the first entry. Sprint 5.15 scenario (f): also returns
+        None, without consuming a round-robin slot, if this same trigger
+        fired more recently than gesture_trigger_min_interval_seconds
+        ago — see this module's own docstring."""
+        now = datetime.now(UTC)
+        last_fired = self._last_trigger_fired_at.get(trigger)
+        if last_fired is not None:
+            elapsed = (now - last_fired).total_seconds()
+            if elapsed < self._config.gesture_trigger_min_interval_seconds:
+                return None
+        event = self._select_event(trigger, persona_name, now)
+        if event is not None:
+            self._last_trigger_fired_at[trigger] = now
+        return event
 
     def maybe_roll_ambient_gesture(
         self, gesture_probability: float, persona_name: str

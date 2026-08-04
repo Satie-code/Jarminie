@@ -24,6 +24,7 @@ from dataclasses import dataclass, replace
 from config import ConfigLoader
 from config.schema import AppConfig, MemoryConfig, SchedulerConfig
 from core import configure_logging
+from core.logging_setup import get_logger
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
 from database.sqlite_client import SqliteClient
@@ -60,7 +61,7 @@ from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
 from presentation.adaptive_workspace import AdaptiveWorkspaceController
 from presentation.avatar_renderer import AvatarRenderer
-from presentation.avatar_renderer_registry import create_avatar_renderer
+from presentation.avatar_renderer_registry import NullAvatarRenderer, create_avatar_renderer
 from presentation.companion_experience import CompanionExperienceEngine
 from presentation.gesture_engine import GestureEngine
 from presentation.jarvis_renderer import JarvisRenderer
@@ -88,6 +89,8 @@ from voice.text_to_speech import CoquiTextToSpeech, SoundDeviceAudioOutput
 from voice.wake_word import OpenWakeWordEngine, WakeWordDetector
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -192,7 +195,16 @@ class _Level5Modules:
     main()'s own body once transition_engine exists — see main()'s own
     ordering comment for the circular-construction problem this resolves,
     the identical CallbackRelay indirection voice/pipeline.py's own
-    turn_complete_relay/session_ended_relay already established."""
+    turn_complete_relay/session_ended_relay already established.
+
+    available (Sprint 5.15, scenario e) is True for a real construction
+    via _construct_level5_modules() and False only for the fallback
+    _null_level5_modules() below — every field is still a real, valid
+    object either way (CommunicationPipeline/run_app() both require all
+    of them unconditionally; widening either to tolerate None would be
+    a redesign, not this sprint's own "narrow, targeted fix" mandate),
+    just wired inertly when available is False. _register_level5_modules()
+    is the one real reader of this flag."""
 
     emotion_detection_engine: EmotionDetectionEngine
     emotional_state_manager: EmotionalStateManager
@@ -207,6 +219,7 @@ class _Level5Modules:
     companion_experience_engine: CompanionExperienceEngine
     voice_personality_modulator: VoicePersonalityModulator
     lip_sync_driver: LipSyncDriver
+    available: bool = True
 
 
 def _prewarm_tts_before_pyside6() -> None:
@@ -320,7 +333,25 @@ def main() -> int:
         config, resource_monitor, level3_modules, level2_modules
     )
     level4b_modules = _construct_level4_part_b_modules(config, level3_modules)
-    level5_modules = _construct_level5_modules(config, core_manager, level2_modules, level3_modules)
+    # Sprint 5.15, scenario (e): a genuine Level 5 Part A construction
+    # failure (e.g. an invalid PresentationConfig, though AppConfig.
+    # validate() already ran and should have caught most such cases
+    # above — or create_avatar_renderer() raising UnknownAvatarBackendError
+    # for a misconfigured avatar_backend) must not take Levels 1-4 down
+    # with it — "Presentation never changes intelligence" at the
+    # availability level, not just the content level (this sprint's own
+    # Purpose). See _null_level5_modules()'s own docstring for exactly
+    # what "Level 5 Part A simply absent" means concretely here.
+    try:
+        level5_modules = _construct_level5_modules(
+            config, core_manager, level2_modules, level3_modules
+        )
+    except Exception:
+        logger.exception(
+            "Level 5 Part A construction failed; continuing startup with Levels 1-4 intact "
+            "and Level 5 Part A unavailable."
+        )
+        level5_modules = _null_level5_modules(config, core_manager, level2_modules, level3_modules)
 
     # Resolves the real circular-construction problem Sprint 5.10's own
     # docstring named explicitly: PersonaManager (Level 2) must be
@@ -656,12 +687,21 @@ def _construct_level5_modules(
     SqliteClient.
 
     avatar_backend construction (create_avatar_renderer()) can raise
-    UnknownAvatarBackendError — deliberately NOT caught here, matching
-    this project's own "fail fast on a broken composition, fail
-    gracefully on a runtime operation" split (presentation/
-    avatar_renderer_registry.py's own docstring): a misconfigured
-    avatar_backend must stop startup loudly, not degrade silently into
-    a half-built Level 5.
+    UnknownAvatarBackendError — deliberately NOT caught here either way
+    (this function's own contract stays "construct or raise," per Sprint
+    5.15's own scenario (e) text: "not inside the function itself,
+    keeping the function's own contract clean"). **Superseded note**:
+    this docstring previously said such a failure "must stop startup
+    loudly" as this project's own final word — true when this function
+    had no live caller (pre-Sprint 5.14) and true in isolation today,
+    but main()'s own call site now wraps this whole function in a
+    try/except (Sprint 5.15, scenario e) and falls back to
+    _null_level5_modules() below rather than letting ANY Level 5 Part A
+    construction failure take Levels 1-4 down with it — a real,
+    considered supersession of the "fail fast" instinct recorded here at
+    Sprint 5.8, disclosed rather than silently reversed. See main()'s
+    own call site and _null_level5_modules()'s docstring for the full
+    reasoning.
     """
     emotion_config = config.emotion
     presentation_config = config.presentation
@@ -715,6 +755,89 @@ def _construct_level5_modules(
         companion_experience_engine=companion_experience_engine,
         voice_personality_modulator=voice_personality_modulator,
         lip_sync_driver=lip_sync_driver,
+    )
+
+
+def _null_level5_modules(
+    config: AppConfig,
+    core_manager: CoreManager,
+    level2_modules: _Level2Modules,
+    level3_modules: _Level3Modules,
+) -> _Level5Modules:
+    """Sprint 5.15, scenario (e) — the fallback main() uses only when
+    _construct_level5_modules() itself raised. CommunicationPipeline and
+    ui.app.run_app() both require every one of _Level5Modules' own
+    fields unconditionally (Sprint 5.14 wired them in deeply) — widening
+    either to tolerate None throughout would be a real redesign, not
+    this sprint's own "narrow, targeted fix" mandate (Architecture
+    Notes). Instead, every object here is real and constructed from
+    already-validated config/already-built collaborators using ONLY
+    code paths that cannot themselves plausibly fail (no I/O, no
+    registry lookups) — the one call known to be able to raise,
+    create_avatar_renderer(), is replaced with a NullAvatarRenderer
+    (presentation/avatar_renderer_registry.py). presentation_controller
+    gets an EMPTY renderers dict — the exact same "no renderer bound
+    yet" state its own tests already exercised before Sprint 5.14
+    existed, so mount_renderer()/refresh() both already no-op safely
+    with zero new code; nothing is ever mounted, so jarvis_renderer's
+    own widget (still real, still safe to construct — no I/O, see that
+    class's own "widget construction is deliberately lazy" docstring)
+    exists for ui/main_window.py to embed unmodified, but stays static.
+    _register_level5_modules() checks the returned available=False flag
+    and skips CoreManager registration entirely — "no PresentationController
+    registered," this sprint's own Purpose text. (A literal "Presentation
+    Layer unavailable" placeholder widget in ui/main_window.py itself is
+    NOT built here — that file is not in this sprint's own Files to
+    Modify list; the static, unmounted Jarvis widget above is the actual,
+    disclosed degraded state a user would see.)"""
+    emotion_config = config.emotion
+    presentation_config = config.presentation
+    memory_config = config.memory
+
+    emotion_detection_engine = EmotionDetectionEngine(emotion_config)
+    emotional_state_manager = EmotionalStateManager(emotion_config)
+
+    event_memory = EventMemory(level3_modules.memory_store)
+    emotional_memory = EmotionalMemory(level3_modules.memory_store, memory_config)
+
+    gesture_engine = GestureEngine(presentation_config)
+
+    jarvis_renderer = JarvisRenderer(presentation_config, core_manager)
+    avatar_renderer = NullAvatarRenderer()
+    minie_renderer = MinieRenderer(avatar_renderer, presentation_config, core_manager)
+
+    presentation_controller = PresentationController(
+        persona_manager=level2_modules.persona_manager,
+        emotional_state_manager=emotional_state_manager,
+        quiet_mode_controller=level2_modules.quiet_mode_controller,
+        state_computers={},
+        renderers={},
+        gesture_engine=gesture_engine,
+    )
+    transition_engine = TransitionEngine(presentation_controller, presentation_config)
+
+    adaptive_workspace_controller = AdaptiveWorkspaceController(presentation_config)
+    companion_experience_engine = CompanionExperienceEngine(
+        emotional_memory, event_memory, presentation_config
+    )
+    voice_personality_modulator = VoicePersonalityModulator(presentation_config)
+    lip_sync_driver = LipSyncDriver(presentation_config)
+
+    return _Level5Modules(
+        emotion_detection_engine=emotion_detection_engine,
+        emotional_state_manager=emotional_state_manager,
+        emotional_memory=emotional_memory,
+        presentation_controller=presentation_controller,
+        jarvis_renderer=jarvis_renderer,
+        minie_renderer=minie_renderer,
+        avatar_renderer=avatar_renderer,
+        gesture_engine=gesture_engine,
+        transition_engine=transition_engine,
+        adaptive_workspace_controller=adaptive_workspace_controller,
+        companion_experience_engine=companion_experience_engine,
+        voice_personality_modulator=voice_personality_modulator,
+        lip_sync_driver=lip_sync_driver,
+        available=False,
     )
 
 
@@ -920,7 +1043,21 @@ def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5M
     (a Renderer-shaped lifecycle, not a ManagedModule one) happens
     indirectly, through MinieRenderer.mount()/unmount(), themselves
     called by PresentationController.mount_renderer() — never registered
-    with CoreManager directly."""
+    with CoreManager directly.
+
+    Sprint 5.15, scenario (e): if level5_modules.available is False (the
+    main()-level construction fallback fired), none of the three are
+    registered at all — "no PresentationController registered" is this
+    sprint's own literal Purpose text; CoreManager simply never learns
+    these objects exist, matching every other un-registered plain object
+    already listed above."""
+    if not level5_modules.available:
+        logger.info(
+            "Level 5 Part A construction fallback is active; skipping CoreManager "
+            "registration for emotion_detection_engine/emotional_state_manager/"
+            "presentation_controller."
+        )
+        return
     core_manager.register_module(
         "emotion_detection_engine", level5_modules.emotion_detection_engine
     )

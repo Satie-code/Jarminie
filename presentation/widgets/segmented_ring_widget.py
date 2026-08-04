@@ -29,6 +29,13 @@ Deliberately independent of `_ring_state`/`_rotation_phase` (the same
 "target vs. animated phase" separation this widget's own rotation
 already uses) so a pulse never interrupts or resets whatever the ring
 was already doing.
+
+**Per-tick exception guarding (Sprint 5.15, scenario c)**: the same
+treatment `presentation/widgets/holographic_sphere_widget.py`'s own
+`_on_tick()` gets, for the identical reason (a `QTimer` slot has no
+upstream caller to guard it) — a single bad tick is caught, logged once
+(rate-limited via `_tick_failure_logged`), and the previous frame's own
+last-good rotation/pulse state is retained.
 """
 
 import math
@@ -37,6 +44,10 @@ from enum import Enum
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
+
+from core.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 class RingState(Enum):
@@ -101,6 +112,7 @@ class SegmentedRingWidget(QWidget):
         self._color = _DEFAULT_COLOR
         self._rotation_phase = 0.0
         self._pulse_ticks_remaining = 0
+        self._tick_failure_logged = False
 
     def set_ring_state(self, ring_state: RingState, animation_speed: float) -> None:
         self._ring_state = ring_state
@@ -118,12 +130,23 @@ class SegmentedRingWidget(QWidget):
         self._pulse_ticks_remaining = max(duration_ticks, 0)
 
     def _on_tick(self) -> None:
-        multiplier = _ROTATION_MULTIPLIER[self._ring_state]
-        step = _BASE_ROTATION_STEP * self._animation_speed * multiplier
-        self._rotation_phase = (self._rotation_phase + step) % (2 * math.pi)
-        if self._pulse_ticks_remaining > 0:
-            self._pulse_ticks_remaining -= 1
-        self.update()
+        """Sprint 5.15 scenario (c): never raises — see this module's
+        own "Per-tick exception guarding" docstring section."""
+        try:
+            multiplier = _ROTATION_MULTIPLIER[self._ring_state]
+            step = _BASE_ROTATION_STEP * self._animation_speed * multiplier
+            self._rotation_phase = (self._rotation_phase + step) % (2 * math.pi)
+            if self._pulse_ticks_remaining > 0:
+                self._pulse_ticks_remaining -= 1
+            self.update()
+        except Exception:
+            if not self._tick_failure_logged:
+                logger.exception(
+                    "SegmentedRingWidget._on_tick() failed; retaining the last-painted frame."
+                )
+                self._tick_failure_logged = True
+            return
+        self._tick_failure_logged = False
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt's own naming convention)
         rect = self.rect()

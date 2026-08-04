@@ -7,11 +7,25 @@ transport" precedent, and test_level4_part_b_real_verification.py's
 patches presentation.vtube_studio_renderer.connect with a fake
 connection object whose send()/recv()/close() this file fully
 controls.
+
+Sprint 5.15 (scenario a): a disconnected call now also triggers a
+bounded background reconnect attempt (see that module's own "Bounded
+background reconnect" docstring section) — the shared `config` fixture
+below sets `vtube_studio_reconnect_max_attempts=0` so every pre-existing
+"is a no-op when disconnected" test keeps its original, simple meaning
+(zero reconnect attempts, zero background threads, `connect` need not
+stay patched beyond an initial mount()). The dedicated
+"scenario (a): bounded reconnect" section further down uses its own
+config with a real positive budget and waits on
+`renderer._reconnect_finished` (mirrors test_minie_renderer.py's own
+`mount_called` threading.Event precedent) to observe the background
+attempt deterministically.
 """
 
 import ast
 import json
 import os
+import threading
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +34,8 @@ import pytest
 from config.schema import PresentationConfig
 from presentation.presentation_state import PresentationState
 from presentation.vtube_studio_renderer import VTubeStudioAvatarRenderer
+
+_WAIT_TIMEOUT = 2.0
 
 _REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..")
 _ALLOWED_IMPORTERS = {
@@ -120,7 +136,13 @@ _API_ERROR_RESPONSE = {"messageType": "APIError", "data": {"message": "Unknown p
 @pytest.fixture
 def config(tmp_path) -> PresentationConfig:
     return PresentationConfig(
-        vtube_studio_auth_token_path=str(tmp_path / "vtube_studio_token.json")
+        vtube_studio_auth_token_path=str(tmp_path / "vtube_studio_token.json"),
+        # Sprint 5.15 scenario (a): disabled here so every pre-existing
+        # test in this file keeps its original "zero background activity
+        # when disconnected" meaning — see this module's own "bounded
+        # reconnect" section further down for dedicated coverage with a
+        # real positive budget.
+        vtube_studio_reconnect_max_attempts=0,
     )
 
 
@@ -380,6 +402,111 @@ def test_unmount_never_raises_even_if_close_itself_fails(config):
     renderer.unmount()  # must not raise
 
     assert renderer._connected is False
+
+
+# --- scenario (a): bounded background reconnect (Sprint 5.15) -----------------
+
+
+@pytest.fixture
+def reconnect_config(tmp_path) -> PresentationConfig:
+    return PresentationConfig(
+        vtube_studio_auth_token_path=str(tmp_path / "vtube_studio_token.json"),
+        vtube_studio_reconnect_max_attempts=2,
+    )
+
+
+def test_a_disconnected_call_triggers_a_background_reconnect_that_can_succeed(reconnect_config):
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn) as mock_connect:
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+        renderer.render_state(_sample_state())  # never mounted — triggers a reconnect attempt
+
+        assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+
+    mock_connect.assert_called_once()
+    assert renderer._connected is True
+
+
+def test_the_triggering_call_itself_still_returns_without_sending_anything(reconnect_config):
+    """The reconnect happens in the background for a *future* call — the
+    call that triggered it must still behave as the pre-existing no-op
+    (never blocks, never itself sends render_state()'s own payload)."""
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+        renderer.render_state(_sample_state())  # must not raise, must not block
+
+        assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+
+    # Only the reconnect's own AuthenticationTokenRequest/AuthenticationRequest
+    # were sent — never an InjectParameterDataRequest for the triggering call.
+    sent_types = [json.loads(c.args[0])["messageType"] for c in conn.send.call_args_list]
+    assert "InjectParameterDataRequest" not in sent_types
+
+
+def test_a_successful_reconnect_resets_the_attempt_budget(reconnect_config):
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+        renderer.render_state(_sample_state())
+        assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+
+    assert renderer._reconnect_attempts_used == 0
+
+
+def test_reconnect_attempts_are_bounded_then_permanently_no_op(reconnect_config):
+    with patch(
+        "presentation.vtube_studio_renderer.connect", side_effect=OSError("still down")
+    ) as mock_connect:
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+
+        # reconnect_config allows exactly 2 attempts — three separate
+        # disconnected calls, each awaited before the next so the
+        # in-flight guard never suppresses one that should count.
+        for _ in range(3):
+            renderer.render_state(_sample_state())
+            assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+
+    assert mock_connect.call_count == 2  # bounded — the third call attempted nothing
+    assert renderer._connected is False
+
+
+def test_an_explicit_unmount_mount_cycle_resets_the_exhausted_budget(reconnect_config):
+    with patch(
+        "presentation.vtube_studio_renderer.connect", side_effect=OSError("still down")
+    ) as mock_connect:
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+        for _ in range(2):  # exhausts the budget
+            renderer.render_state(_sample_state())
+            assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+        assert mock_connect.call_count == 2
+
+        renderer.unmount()
+        renderer.mount()  # a real, explicit cycle — must not be silently skipped
+
+    assert mock_connect.call_count == 3
+    assert renderer._reconnect_attempts_used == 0
+
+
+def test_a_reconnect_already_in_flight_is_not_duplicated(reconnect_config):
+    release = threading.Event()
+    connect_calls: list[str] = []
+
+    def _slow_failing_connect(uri, **kwargs):
+        connect_calls.append(uri)
+        release.wait(timeout=_WAIT_TIMEOUT)
+        raise OSError("still down")
+
+    with patch("presentation.vtube_studio_renderer.connect", side_effect=_slow_failing_connect):
+        renderer = VTubeStudioAvatarRenderer(reconnect_config)
+        renderer.render_state(_sample_state())  # starts a reconnect, blocks inside connect()
+        renderer.set_expression("smile")  # arrives while the first is still in flight
+
+        release.set()
+        assert renderer._reconnect_finished.wait(timeout=_WAIT_TIMEOUT)
+
+    assert len(connect_calls) == 1  # the second call did not pile up its own attempt
+    assert renderer._reconnect_attempts_used == 1
 
 
 def test_methods_no_op_again_after_unmount(config):

@@ -21,13 +21,30 @@ deliberately simpler than device_control/action_engine.py's
 ActionRegistry, since a single AvatarRenderer is what's active at a
 time (MinieRenderer holds exactly one). Do not generalize this into
 something heavier before a real, concrete need for it exists.
+
+**NullAvatarRenderer (Sprint 5.15, scenario e)**: a real, concrete,
+always-inert `AvatarRenderer` implementation — used by `main.py`'s own
+Level 5 Part A construction fallback when `_construct_level5_modules()`
+itself raises (e.g. `create_avatar_renderer()` below raising
+`UnknownAvatarBackendError` for a misconfigured `avatar_backend`), so a
+broken avatar-backend construction never takes Levels 1-4 down with it.
+Mirrors `presentation/transition_engine.py`'s own `NullTransitionOverlay`
+precedent exactly: every method is a safe, logged no-op, `is_connected()`
+always returns False. Not returned by `create_avatar_renderer()` itself
+— that function's own "fail loud on an unknown backend" contract is
+unchanged; `NullAvatarRenderer` is main.py's own fallback construction
+tool, not a registered backend name.
 """
 
 from collections.abc import Callable
 
 from config.schema import PresentationConfig
+from core.logging_setup import get_logger
 from presentation.avatar_renderer import AvatarRenderer
+from presentation.presentation_state import PresentationState
 from presentation.vtube_studio_renderer import VTubeStudioAvatarRenderer
+
+logger = get_logger(__name__)
 
 
 class UnknownAvatarBackendError(Exception):
@@ -60,3 +77,34 @@ def create_avatar_renderer(presentation_config: PresentationConfig) -> AvatarRen
             f"Unknown avatar backend {name!r}. Registered backends: {sorted(_BACKENDS)}."
         ) from None
     return backend_cls(presentation_config)
+
+
+class NullAvatarRenderer:
+    """Sprint 5.15, scenario (e) — see this module's own docstring.
+    Structurally implements AvatarRenderer (Protocol, no explicit
+    inheritance needed), mirroring TransitionEngine's own
+    NullTransitionOverlay: every method is a safe, logged no-op."""
+
+    def mount(self) -> None:
+        logger.info("NullAvatarRenderer.mount() — no real avatar backend available.")
+
+    def unmount(self) -> None:
+        pass
+
+    def render_state(self, state: PresentationState) -> None:
+        pass
+
+    def set_expression(self, expression_id: str) -> None:
+        pass
+
+    def set_mouth_open(self, amount: float) -> None:
+        pass
+
+    def set_eye_target(self, x: float, y: float) -> None:
+        pass
+
+    def trigger_gesture(self, gesture_id: str) -> None:
+        pass
+
+    def is_connected(self) -> bool:
+        return False

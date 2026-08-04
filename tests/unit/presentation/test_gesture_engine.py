@@ -25,6 +25,11 @@ def config() -> PresentationConfig:
             "ambient_idle": ["idle_blink"],
         },
         ambient_gesture_roll_interval_seconds=10.0,
+        # Sprint 5.15 scenario (f): disabled here so every pre-existing
+        # trigger_event() test (round-robin/vocabulary) keeps its
+        # original meaning — see the dedicated "trigger_event() rate
+        # limiting" section further down for real interval coverage.
+        gesture_trigger_min_interval_seconds=0.0,
     )
 
 
@@ -87,6 +92,79 @@ def test_trigger_event_returns_none_for_an_explicitly_empty_vocabulary():
 def test_trigger_event_never_raises_for_every_trigger_value(engine):
     for trigger in GestureTrigger:
         engine.trigger_event(trigger, "jarvis")  # must not raise, configured or not
+
+
+# --- trigger_event() rate-limiting (Sprint 5.15, scenario f) -----------------
+
+
+@pytest.fixture
+def rate_limited_config() -> PresentationConfig:
+    return PresentationConfig(
+        gesture_vocabulary={
+            "notification": ["glance", "pulse"],
+            "turn_end": ["settle"],
+        },
+        gesture_trigger_min_interval_seconds=10.0,
+    )
+
+
+@pytest.fixture
+def rate_limited_engine(rate_limited_config) -> GestureEngine:
+    return GestureEngine(rate_limited_config)
+
+
+def test_trigger_event_never_fires_twice_within_the_configured_interval(rate_limited_engine):
+    first = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+    second = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+
+    assert first is not None
+    assert second is None
+
+
+def test_trigger_event_can_fire_again_once_the_interval_has_elapsed(rate_limited_engine):
+    interval = rate_limited_engine._config.gesture_trigger_min_interval_seconds
+    future = datetime.now(UTC) + timedelta(seconds=interval + 1)
+
+    first = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+    assert first is not None
+
+    with patch("presentation.gesture_engine.datetime") as mock_datetime:
+        mock_datetime.now.return_value = future
+        second = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+
+    assert second is not None
+
+
+def test_trigger_event_rate_limit_is_independent_per_trigger(rate_limited_engine):
+    """A burst of NOTIFICATION calls must not suppress a legitimate
+    TURN_END call arriving moments later — each GestureTrigger value has
+    its own independent budget."""
+    notification = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+    turn_end = rate_limited_engine.trigger_event(GestureTrigger.TURN_END, "jarvis")
+
+    assert notification is not None
+    assert turn_end is not None
+
+
+def test_a_rate_limited_call_does_not_consume_a_round_robin_slot(rate_limited_engine):
+    first = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+    rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")  # rate-limited
+
+    with patch("presentation.gesture_engine.datetime") as mock_datetime:
+        mock_datetime.now.return_value = datetime.now(UTC) + timedelta(seconds=100)
+        third = rate_limited_engine.trigger_event(GestureTrigger.NOTIFICATION, "jarvis")
+
+    assert first.gesture_id == "glance"
+    assert third.gesture_id == "pulse"  # round-robin advanced only twice, not three times
+
+
+def test_an_unconfigured_trigger_never_starts_a_rate_limit_window(rate_limited_engine):
+    """TURN_START has no configured vocabulary in this fixture — a
+    guaranteed-None call (empty vocabulary, not the rate limit) must not
+    itself mark the trigger as having fired."""
+    rate_limited_engine.trigger_event(GestureTrigger.TURN_START, "jarvis")
+
+    assert GestureTrigger.TURN_START not in rate_limited_engine._last_trigger_fired_at
 
 
 # --- maybe_roll_ambient_gesture() probability behavior -----------------------

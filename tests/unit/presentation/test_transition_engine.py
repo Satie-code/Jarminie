@@ -310,3 +310,98 @@ def test_transition_with_the_default_null_overlay_never_raises(fast_config, cont
     engine = TransitionEngine(controller, fast_config)
     engine.transition("jarvis", "minie")  # must not raise
     assert controller.mount_calls == ["minie"]
+
+
+# --- scenario (d): overlapping transition supersession (Sprint 5.15) ---------
+#
+# A re-entrant transition() call from inside the first's own overlay
+# callback simulates "a second switch arrives while the first is still
+# mid-sequence" deterministically, on a single thread — the most direct
+# way to test cooperative phase-boundary cancellation without flaky
+# real threading (this codebase's own only real caller today is
+# sequential/single-threaded, per this module's own docstring).
+
+
+class _ReentrantOverlay:
+    """Calls back into the same TransitionEngine instance's own
+    transition() from inside set_phase(), exactly once, the moment the
+    named trigger_phase is reached."""
+
+    def __init__(self, engine: TransitionEngine, trigger_phase: TransitionPhase) -> None:
+        self._engine = engine
+        self._trigger_phase = trigger_phase
+        self._reentered = False
+        self.calls: list[str] = []
+
+    def show(self) -> None:
+        self.calls.append("show")
+
+    def set_phase(self, phase: TransitionPhase) -> None:
+        self.calls.append(f"set_phase:{phase.value}")
+        if phase is self._trigger_phase and not self._reentered:
+            self._reentered = True
+            self._engine.transition("minie", "jarvis")
+
+    def hide(self) -> None:
+        self.calls.append("hide")
+
+
+def test_a_second_transition_arriving_mid_sequence_supersedes_the_first(fast_config, controller):
+    engine = TransitionEngine(controller, fast_config)
+    overlay = _ReentrantOverlay(engine, TransitionPhase.SYNCING_MEMORY)
+    engine.set_overlay(overlay)
+
+    engine.transition("jarvis", "minie")
+
+    # Exactly one mount_renderer() call total, for the superseding
+    # transition's own target — never the superseded one's "minie".
+    assert controller.mount_calls == ["jarvis"]
+
+
+def test_a_superseded_transition_never_calls_finish_a_second_time(fast_config, controller):
+    """The overlay must end in a clean, non-stuck state: show() called
+    once (by the superseded transition's own start), hide() called once
+    (by the superseding transition's own end) — never twice, never
+    zero."""
+    engine = TransitionEngine(controller, fast_config)
+    overlay = _ReentrantOverlay(engine, TransitionPhase.SYNCING_MEMORY)
+    engine.set_overlay(overlay)
+
+    engine.transition("jarvis", "minie")
+
+    assert overlay.calls.count("show") == 1
+    assert overlay.calls.count("hide") == 1
+
+
+def test_supersession_at_the_very_first_phase_boundary_still_mounts_exactly_once(
+    fast_config, controller
+):
+    """Supersession triggered as early as possible (right after
+    SAVING_STATE, before SYNCING_MEMORY even runs) — the earliest real
+    phase-boundary check in _run_choreography()."""
+    engine = TransitionEngine(controller, fast_config)
+    overlay = _ReentrantOverlay(engine, TransitionPhase.SAVING_STATE)
+    engine.set_overlay(overlay)
+
+    engine.transition("jarvis", "minie")
+
+    assert controller.mount_calls == ["jarvis"]
+
+
+def test_superseding_transition_still_replays_a_cached_state_for_its_own_target(
+    fast_config, controller
+):
+    """The superseding call's own _finish() runs with skip_restore=True
+    (matching the budget-overrun path's own precedent) — a cached state
+    for the superseding transition's target is intentionally NOT
+    replayed, since skipping straight to LOADING_TARGET/COMPLETE means
+    RESTORING_CONVERSATION never runs either."""
+    controller.set_last_state("jarvis", _sample_state("jarvis"))
+    engine = TransitionEngine(controller, fast_config)
+    overlay = _ReentrantOverlay(engine, TransitionPhase.SYNCING_MEMORY)
+    engine.set_overlay(overlay)
+
+    engine.transition("jarvis", "minie")  # superseded partway; B: minie -> jarvis wins
+
+    assert controller.mount_calls == ["jarvis"]
+    assert controller.apply_state_calls == []

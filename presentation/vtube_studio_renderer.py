@@ -23,19 +23,27 @@ error). Every other method checks `_connected` first and no-ops
 (logged at DEBUG, not WARNING, to avoid log spam) when disconnected. A
 mid-session connection loss (a send/recv failure on an already-mounted
 connection) is caught per-call, logs a WARNING once, and marks the
-renderer disconnected again — a real reconnection attempt (retrying in
-the background) is explicitly Sprint 5.15's hardening job, not this
-sprint's.
+renderer disconnected again — a real, bounded reconnection attempt
+(retrying in the background) is Sprint 5.15's own hardening job; see
+this module's own "Bounded background reconnect" section below.
 
 **Best-effort protocol implementation, disclosed**: the exact JSON
 message shapes below (`AuthenticationTokenRequest`, `AuthenticationRequest`,
 `InjectParameterDataRequest`, `HotkeyTriggerRequest`) follow VTube
 Studio's own publicly documented API from this project's own training
 knowledge — like `internet/brave_search_provider.py`'s own response
-parsing at Sprint 4.16, this has NOT been verified against a real,
-live VTube Studio instance this session (no such instance is available
-in this environment); real-VTube-Studio verification is explicitly
-Sprint 5.16's own opt-in job, mirroring `test_level4_part_b_real_
+parsing at Sprint 4.16, this was NOT verified against a real, live
+VTube Studio instance during this sprint's own original 2026-08-02
+implementation (no such instance was available then). A real instance
+became available on 2026-08-04 (a separate, direct connection-setup
+request, not part of this sprint's own work) and confirmed
+`AuthenticationTokenRequest`/`AuthenticationRequest`/`CurrentModelRequest`
+match VTube Studio's real behavior — see `backlog/technical_debt.md`
+item 37 for the full account. `InjectParameterDataRequest`/
+`HotkeyTriggerRequest` (the two shapes `render_state()`/
+`set_expression()`/`trigger_gesture()` actually use) remain unverified
+against a live instance; real-VTube-Studio verification of those two is
+still Sprint 5.16's own opt-in job, mirroring `test_level4_part_b_real_
 verification.py`'s established shape.
 
 Uses `websockets.sync.client` (the synchronous API) — this codebase has
@@ -45,9 +53,30 @@ has no use for one. The stop-and-ask gate that picked `websockets`
 itself (over a community VTube-Studio-specific wrapper such as `pyvts`)
 was resolved directly with the user before this sprint's own
 implementation began — see `backlog/technical_debt.md`.
+
+**Bounded background reconnect (Sprint 5.15, scenario a)**: every public
+method that already no-ops when `_connected` is False now also triggers
+a bounded reconnect attempt via `_maybe_start_reconnect()` — the next
+time any method is called while disconnected, rather than requiring a
+caller to explicitly `unmount()`/`mount()` again. Spawned on a
+background daemon thread, the same "never block a live turn" precedent
+`presentation/minie_renderer.py`'s own `mount()` already established at
+Sprint 5.14 — `render_state()` is called synchronously from a live
+conversation turn (`PresentationController.refresh()`), and `mount()`'s
+own connect-and-authenticate attempt can genuinely block for up to
+`vtube_studio_connection_timeout_seconds`; retrying it synchronously
+from inside `render_state()` would silently reintroduce the exact stall
+Sprint 5.14 moved the *first* `mount()` call to a background thread to
+avoid. Bounded by `PresentationConfig.vtube_studio_reconnect_max_attempts`
+across a single disconnected session (guarded by `_reconnecting`, so
+concurrent calls never pile up more than one attempt in flight at a
+time) — once exhausted, further calls degrade to the pre-existing
+silent no-op permanently, never a retry storm; a real `unmount()`/
+`mount()` cycle resets the budget.
 """
 
 import json
+import threading
 import uuid
 from pathlib import Path
 
@@ -85,11 +114,17 @@ class VTubeStudioAvatarRenderer:
         self._connected = False
         self._auth_token: str | None = None
         self._warned_keys: set[str] = set()
+        self._reconnect_attempts_used = 0
+        self._reconnecting = False
+        self._reconnect_finished = threading.Event()
 
     def mount(self) -> None:
         """Connects and authenticates (or reuses a persisted token).
         Never raises — see this module's own docstring for the full
-        "disconnected, never crash" contract."""
+        "disconnected, never crash" contract. A successful connect
+        resets the scenario (a) reconnect-attempt budget, matching this
+        module's own "a real unmount()/mount() cycle resets the budget"
+        contract."""
         if self._connected:
             return
         try:
@@ -99,12 +134,13 @@ class VTubeStudioAvatarRenderer:
             )
             self._authenticate()
             self._connected = True
+            self._reconnect_attempts_used = 0
             logger.info("VTube Studio Avatar Renderer connected and authenticated.")
         except Exception:
             logger.warning(
                 "Could not connect to/authenticate with VTube Studio at %s:%s. Minie's "
                 "avatar will not be visible until VTube Studio is running with a Live2D "
-                "model loaded (a real reconnection attempt is Sprint 5.15's job).",
+                "model loaded.",
                 self._config.vtube_studio_host,
                 self._config.vtube_studio_port,
             )
@@ -113,8 +149,13 @@ class VTubeStudioAvatarRenderer:
 
     def unmount(self) -> None:
         """Closes the connection cleanly. Idempotent and safe even if
-        mount() was never called or already failed."""
+        mount() was never called or already failed. An explicit
+        unmount() resets the scenario (a) reconnect-attempt budget too
+        — a deliberate, intentional teardown gets a fresh budget, the
+        same "full cycle resets it" contract this module's own docstring
+        names."""
         self._connected = False
+        self._reconnect_attempts_used = 0
         self._close_connection_quietly()
         logger.info("VTube Studio Avatar Renderer unmounted.")
 
@@ -128,6 +169,7 @@ class VTubeStudioAvatarRenderer:
         clear warning exactly once per session — never per tick."""
         if not self._connected:
             logger.debug("render_state() ignored — not connected to VTube Studio.")
+            self._maybe_start_reconnect()
             return
 
         parameter_values = []
@@ -164,12 +206,14 @@ class VTubeStudioAvatarRenderer:
             logger.debug(
                 "set_expression(%s) ignored — not connected to VTube Studio.", expression_id
             )
+            self._maybe_start_reconnect()
             return
         self._try_send_request("HotkeyTriggerRequest", {"hotkeyID": expression_id})
 
     def set_mouth_open(self, amount: float) -> None:
         if not self._connected:
             logger.debug("set_mouth_open() ignored — not connected to VTube Studio.")
+            self._maybe_start_reconnect()
             return
         self._try_send_request(
             "InjectParameterDataRequest",
@@ -183,6 +227,7 @@ class VTubeStudioAvatarRenderer:
     def set_eye_target(self, x: float, y: float) -> None:
         if not self._connected:
             logger.debug("set_eye_target() ignored — not connected to VTube Studio.")
+            self._maybe_start_reconnect()
             return
         self._try_send_request(
             "InjectParameterDataRequest",
@@ -199,6 +244,7 @@ class VTubeStudioAvatarRenderer:
     def trigger_gesture(self, gesture_id: str) -> None:
         if not self._connected:
             logger.debug("trigger_gesture(%s) ignored — not connected to VTube Studio.", gesture_id)
+            self._maybe_start_reconnect()
             return
         self._try_send_request("HotkeyTriggerRequest", {"hotkeyID": gesture_id})
 
@@ -206,6 +252,31 @@ class VTubeStudioAvatarRenderer:
         """Sprint 5.14 — a plain read of state this class already tracks
         internally (AvatarRenderer's own new Protocol method)."""
         return self._connected
+
+    def _maybe_start_reconnect(self) -> None:
+        """Sprint 5.15, scenario (a) — see this module's own docstring
+        ("Bounded background reconnect") for the full contract. A no-op
+        if a reconnect attempt is already in flight (never piles up more
+        than one at a time) or the attempt budget is already exhausted
+        (permanent silent no-op until a real unmount()/mount() cycle)."""
+        if self._reconnecting:
+            return
+        if self._reconnect_attempts_used >= self._config.vtube_studio_reconnect_max_attempts:
+            return
+        self._reconnect_attempts_used += 1
+        self._reconnecting = True
+        self._reconnect_finished.clear()
+        thread = threading.Thread(
+            target=self._reconnect_in_background, name="vtube-studio-reconnect", daemon=True
+        )
+        thread.start()
+
+    def _reconnect_in_background(self) -> None:
+        try:
+            self.mount()
+        finally:
+            self._reconnecting = False
+            self._reconnect_finished.set()
 
     def _authenticate(self) -> None:
         """Requests a fresh plugin token from VTube Studio only if no

@@ -908,6 +908,16 @@ class PresentationConfig:
     bounds how long `mount()` waits for that handshake before degrading
     to a disconnected, no-op state rather than blocking indefinitely.
 
+    `vtube_studio_reconnect_max_attempts` (Sprint 5.15, scenario a) bounds
+    how many bounded, background reconnect attempts `VTubeStudioAvatarRenderer`
+    makes across a single disconnected session before giving up and
+    degrading permanently to the existing silent no-op — triggered the
+    next time any of its methods is called while disconnected, rather
+    than requiring a full `unmount()`/`mount()` cycle. A real
+    `unmount()`/`mount()` cycle still resets the budget. A small,
+    disclosed first-pass default, the same category as every other
+    Level 5 tuned default.
+
     `vtube_studio_auth_token_path` is where the VTube-Studio-issued
     plugin authentication token (requested once, on first successful
     connect, then reused on every later run) is persisted on disk —
@@ -957,7 +967,13 @@ class PresentationConfig:
     through (an empty or absent list is a valid, honest no-op — not a
     config error); `ambient_gesture_roll_interval_seconds` bounds how
     often `maybe_roll_ambient_gesture()` can fire, independent of
-    `PresentationState.gesture_probability` itself. `jarvis_gesture_pulse_ticks`
+    `PresentationState.gesture_probability` itself.
+    `gesture_trigger_min_interval_seconds` (Sprint 5.15, scenario f)
+    applies the same interval-gate discipline to `trigger_event()`
+    itself, per `GestureTrigger` value — so a bug elsewhere calling
+    `trigger_event()` far more often than intended (e.g. a retry loop)
+    cannot flood a renderer with gesture calls either.
+    `jarvis_gesture_pulse_ticks`
     is `JarvisRenderer.trigger_gesture()`'s own accent-pulse duration on
     `SegmentedRingWidget` — added beyond this sprint's own originally-named
     config fields so that pulse's duration is config-driven rather than a
@@ -1063,6 +1079,7 @@ class PresentationConfig:
     vtube_studio_plugin_developer: str = "JARMINEI Project"
     vtube_studio_auth_token_path: str = "config/vtube_studio_token.json"
     vtube_studio_connection_timeout_seconds: float = 5.0
+    vtube_studio_reconnect_max_attempts: int = 3
     vtube_studio_parameter_mapping: dict[str, str] = field(
         default_factory=_default_vtube_studio_parameter_mapping
     )
@@ -1072,6 +1089,7 @@ class PresentationConfig:
 
     gesture_vocabulary: dict[str, list[str]] = field(default_factory=_default_gesture_vocabulary)
     ambient_gesture_roll_interval_seconds: float = 15.0
+    gesture_trigger_min_interval_seconds: float = 0.5
     jarvis_gesture_pulse_ticks: int = 10
 
     transition_max_duration_seconds: float = 2.5
@@ -1612,6 +1630,11 @@ class AppConfig:
                 "presentation.vtube_studio_connection_timeout_seconds must be positive, got "
                 f"{p.vtube_studio_connection_timeout_seconds}"
             )
+        if p.vtube_studio_reconnect_max_attempts <= 0:
+            raise ConfigError(
+                "presentation.vtube_studio_reconnect_max_attempts must be positive, got "
+                f"{p.vtube_studio_reconnect_max_attempts}"
+            )
         for state_field, parameter_name in p.vtube_studio_parameter_mapping.items():
             if not state_field.strip():
                 raise ConfigError(
@@ -1647,6 +1670,11 @@ class AppConfig:
             raise ConfigError(
                 "presentation.ambient_gesture_roll_interval_seconds must be positive, got "
                 f"{p.ambient_gesture_roll_interval_seconds}"
+            )
+        if p.gesture_trigger_min_interval_seconds <= 0:
+            raise ConfigError(
+                "presentation.gesture_trigger_min_interval_seconds must be positive, got "
+                f"{p.gesture_trigger_min_interval_seconds}"
             )
         if p.jarvis_gesture_pulse_ticks <= 0:
             raise ConfigError(

@@ -385,6 +385,10 @@ presentation:
   # own docstring for the full "why a file path, not an env var" reasoning.
   vtube_studio_auth_token_path: "config/vtube_studio_token.json"
   vtube_studio_connection_timeout_seconds: 5.0
+  # Sprint 5.15 (scenario a) — bounded background reconnect attempts,
+  # across a single disconnected session, before VTubeStudioAvatarRenderer
+  # gives up and degrades permanently to the existing silent no-op.
+  vtube_studio_reconnect_max_attempts: 3
   # PresentationState field name -> Live2D model parameter name. Real,
   # disclosed, unvalidated first-pass defaults — voice_warmth's default
   # is a placeholder custom-parameter name with no guaranteed effect;
@@ -439,6 +443,10 @@ presentation:
   # How often GestureEngine.maybe_roll_ambient_gesture() can fire at
   # most, independent of PresentationState.gesture_probability itself.
   ambient_gesture_roll_interval_seconds: 15.0
+  # Sprint 5.15 (scenario f) — rate-limits trigger_event() itself, per
+  # GestureTrigger value, so a bug elsewhere calling it far more often
+  # than intended cannot flood a renderer with gesture calls.
+  gesture_trigger_min_interval_seconds: 0.5
   # presentation/jarvis_renderer.py's own trigger_gesture() accent-pulse
   # duration (in SegmentedRingWidget ticks) — config-driven rather than
   # a hardcoded constant.

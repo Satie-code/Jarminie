@@ -24,6 +24,15 @@ no observer hook) — this widget polls `mounted_persona_name` on a
 `StatusPanel`/`_SystemStatusPanel` already use, only swapping its
 displayed child widget when the mounted persona actually changes (never
 tearing down and rebuilding on every tick).
+
+**Exception guarding widened (Sprint 5.16 adversarial re-read, a
+Post-Sprint Fix)**: `refresh()`'s own original try/except only wrapped
+the `mounted_persona_name` read — `_swap_displayed_widget()` (widget
+construction, `QLayout` mutation) ran unguarded, still inside the same
+`QTimer.timeout` slot with nothing upstream to catch a real failure
+there. Widened to cover the whole `refresh()` body, the same "a QTimer
+slot has no caller to guard it" reasoning Sprint 5.15's own scenario (c)
+already established for the two animation widgets.
 """
 
 from PySide6.QtCore import QTimer
@@ -68,30 +77,44 @@ class PresentationHostWidget(QWidget):
 
     def refresh(self) -> None:
         """Fail Gracefully: a transient PresentationController read
-        failure keeps whatever was last displayed, matching StatusPanel/
-        _SystemStatusPanel's own established refresh() shape."""
+        failure, OR a real widget-construction/layout failure inside
+        _swap_displayed_widget(), keeps whatever was last displayed —
+        matching StatusPanel/_SystemStatusPanel's own established
+        refresh() shape."""
         try:
             mounted_name = self._presentation_controller.mounted_persona_name
+            if mounted_name == self._displayed_persona_name:
+                return
+            self._swap_displayed_widget(mounted_name)
         except Exception:
             logger.exception("Presentation host refresh failed; keeping last displayed widget.")
-            return
-        if mounted_name == self._displayed_persona_name:
-            return
-        self._swap_displayed_widget(mounted_name)
 
     def _swap_displayed_widget(self, mounted_name: str | None) -> None:
+        """Sprint 5.16 (adversarial re-read, a Post-Sprint Fix): a second
+        real gap found alongside the missing exception guard above —
+        _displayed_persona_name used to be updated to mounted_name
+        BEFORE the new widget was actually built, so a genuine
+        widget()/status_widget() failure left it permanently mismatched
+        (refresh()'s own "mounted_name == self._displayed_persona_name"
+        no-op check would then always short-circuit, silently skipping
+        every future retry). Restructured so _displayed_persona_name is
+        set only after the new widget is actually built and added —
+        a failure now leaves the two genuinely out of sync, so the very
+        next refresh() tick naturally retries instead of getting stuck."""
         if self._displayed_widget is not None:
             self._layout.removeWidget(self._displayed_widget)
             self._displayed_widget.setParent(None)
             self._displayed_widget = None
-        self._displayed_persona_name = mounted_name
 
         if mounted_name == "jarvis":
-            self._displayed_widget = self._jarvis_renderer.widget()
+            new_widget = self._jarvis_renderer.widget()
         elif mounted_name == "minie":
-            self._displayed_widget = self._minie_renderer.status_widget()
+            new_widget = self._minie_renderer.status_widget()
         else:
+            self._displayed_persona_name = mounted_name
             return
 
-        self._layout.addWidget(self._displayed_widget)
-        self._displayed_widget.show()
+        self._layout.addWidget(new_widget)
+        new_widget.show()
+        self._displayed_widget = new_widget
+        self._displayed_persona_name = mounted_name

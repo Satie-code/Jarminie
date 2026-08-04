@@ -26,6 +26,15 @@ into `TransitionEngine`'s own `_call_overlay_safely()` wrapper — belt
 and suspenders, since that wrapper already catches any exception here,
 but a presentation-only overlay should never risk a real Qt failure
 propagating regardless.
+
+**Per-tick exception guarding (Sprint 5.16 adversarial re-read, a
+Post-Sprint Fix)**: `_on_tick()` is a `QTimer` slot with nothing
+upstream of it to catch an exception — the same risk class Sprint
+5.15's own scenario (c) fixed for `HolographicSphereWidget`/
+`SegmentedRingWidget`, missed for this file since it wasn't in that
+sprint's own Files to Modify list. Fixed here with the identical
+pattern: a single bad tick is caught, logged once per failure streak
+(reset on recovery), the last-painted frame retained.
 """
 
 from PySide6.QtCore import Qt, QTimer
@@ -63,6 +72,7 @@ class QtTransitionOverlay(QWidget):
         self._host = host
         self._phase: TransitionPhase | None = None
         self._pulse_phase = 0.0
+        self._tick_failure_logged = False
 
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -114,5 +124,16 @@ class QtTransitionOverlay(QWidget):
         painter.end()
 
     def _on_tick(self) -> None:
-        self._pulse_phase += 0.2
-        self.update()
+        """Sprint 5.16 (adversarial re-read): never raises — see this
+        module's own "Per-tick exception guarding" docstring section."""
+        try:
+            self._pulse_phase += 0.2
+            self.update()
+        except Exception:
+            if not self._tick_failure_logged:
+                logger.exception(
+                    "QtTransitionOverlay._on_tick() failed; retaining the last-painted frame."
+                )
+                self._tick_failure_logged = True
+            return
+        self._tick_failure_logged = False

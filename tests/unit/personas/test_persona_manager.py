@@ -388,3 +388,61 @@ def test_select_from_context_respects_the_priority_system(manager, context_analy
 
     assert switched is False
     assert manager.active_persona().name == "jarvis"
+
+
+# --- Sprint 5.24: SwitchReason.WELLNESS's own priority-rank placement
+# (personas/persona_manager.py's own module docstring — WELLNESS ranks
+# directly below CRITICAL_EMERGENCY/DAILY_ROUTINE, above EXPLICIT_
+# SELECTION/CONTEXT_DETECTION, a real, disclosed reordering that also
+# moved DAILY_ROUTINE). ------------------------------------------------
+
+
+def test_wellness_overrides_explicit_selection(manager):
+    manager.select("jarvis", SwitchReason.EXPLICIT_SELECTION)
+
+    switched = manager.select("minie", SwitchReason.WELLNESS)
+
+    assert switched is True
+    assert manager.active_persona().name == "minie"
+
+
+def test_wellness_overrides_context_detection(manager):
+    manager.select("jarvis", SwitchReason.CONTEXT_DETECTION)
+
+    switched = manager.select("minie", SwitchReason.WELLNESS)
+
+    assert switched is True
+    assert manager.active_persona().name == "minie"
+
+
+def test_explicit_selection_cannot_override_active_wellness(manager):
+    """The real reason this sprint's own force-switch-to-Minie is
+    reliable: a stale EXPLICIT_SELECTION/CONTEXT_DETECTION reason left
+    over from an earlier conversation could otherwise refuse the
+    wellness switch outright — this is the reverse assertion,
+    confirming WELLNESS, once active, cannot then be casually displaced
+    by an ordinary explicit selection either."""
+    manager.select("minie", SwitchReason.WELLNESS)
+
+    switched = manager.select("jarvis", SwitchReason.EXPLICIT_SELECTION)
+
+    assert switched is False
+    assert manager.active_persona().name == "minie"
+
+
+def test_daily_routine_overrides_wellness(manager):
+    manager.select("minie", SwitchReason.WELLNESS)
+
+    switched = manager.select("jarvis", SwitchReason.DAILY_ROUTINE)
+
+    assert switched is True
+    assert manager.active_persona().name == "jarvis"
+
+
+def test_critical_emergency_overrides_wellness(manager):
+    manager.select("minie", SwitchReason.WELLNESS)
+
+    switched = manager.select("jarvis", SwitchReason.CRITICAL_EMERGENCY)
+
+    assert switched is True
+    assert manager.active_persona().name == "jarvis"

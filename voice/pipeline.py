@@ -75,26 +75,48 @@ Sprint 4.18 (Scheduler & Internet Agent Integration) adds a SECOND,
 entirely independent wiring diagram — this project's first genuinely
 PROACTIVE (JARMINEI-initiated, not turn-triggered) behavior, registered
 as a TaskScheduler job from start() rather than triggered by any
-conversation turn:
+conversation turn. Sprint 5.24 (Companion Intelligence Integration)
+renames and widens it from a single-source reminder check into a real,
+exhaustive three-source dispatcher — see _check_and_announce_priority_item()'s
+own docstring for the full per-PriorityLevel dispatch table:
 
     (background, every scheduler_config.poll_interval_seconds)
-    _check_and_announce_due_reminder():
+    _check_and_announce_priority_item():
+        _maybe_enqueue_wellness_prompt() (5.24) -- WellnessTracker.
+            evaluate_triggers(interval_overrides=AdaptiveWellnessAdjuster.
+            compute_overrides()) -> a real WellnessPrompt, deduplicated
+            per still-crossed trigger type, enqueued as PriorityLevel.WELLNESS
+          |
         QuietModeController.current_mode() is DORMANT?  -- no -> return
         (a live session is active; Part 2's own "Queued" language for
-        Scheduled Reminders means this due item simply waits for the
-        next poll, it never interrupts)
+        Scheduled Reminders/Wellness/General Suggestions alike means a
+        due item simply waits for the next poll, it never interrupts)
           | yes
-        PriorityQueueManager.peek_next() names a SCHEDULED_REMINDER? -- no -> return
-          | yes
-        PriorityQueueManager.pop_next() -> ScheduledItem
+        PriorityQueueManager.peek_next() -- None -> return
+          | a PriorityItem
+        dispatch on peeked.priority (SCHEDULED_REMINDER/WELLNESS/
+        GENERAL_SUGGESTION each have their own real handler; an
+        unrecognized PriorityLevel logs a warning and leaves the item
+        queued rather than popping and discarding it):
+            SCHEDULED_REMINDER -> QuietModeController.activate(SCHEDULED_ALERT,
+                announce_first=(item.title, persona.voice_id)) -- unchanged
+                since Sprint 4.18
+            WELLNESS -> PersonaManager.select("minie", SwitchReason.WELLNESS)
+                -> QuietModeController.activate(SCHEDULED_ALERT,
+                announce_first=(prompt.message, "minie")) -> PersonaManager.
+                resume_previous() immediately after the (synchronous)
+                announcement completes -> WellnessEscalationManager.
+                register_prompt_shown()
+            GENERAL_SUGGESTION -> QuietModeController.activate(SCHEDULED_ALERT,
+                announce_first=(recommendation.text, persona.voice_id)) --
+                through whichever persona is already active, no switch
           |
-        QuietModeController.activate(SCHEDULED_ALERT,
-            announce_first=(item.title, persona.voice_id))
+        QuietModeController.activate(...)
             -> VoiceSessionManager.begin_session(announce_first=...)
-               speaks the reminder BEFORE utterance capture starts,
-               then re-arms listening exactly like any other session
-               (see voice/session_manager.py's own docstring for why
-               that ordering matters)
+               speaks the item BEFORE utterance capture starts, then
+               re-arms listening exactly like any other session (see
+               voice/session_manager.py's own docstring for why that
+               ordering matters)
 
 start() also registers four more TaskScheduler jobs, closing
 backlog/technical_debt.md items 11/15's still-open recurring-cadence
@@ -106,6 +128,24 @@ ConversationSessionStore.purge_older_than()/ActionAuditLog.
 purge_older_than() (both zero-arg-callable via their own configured-
 retention defaults) — all on scheduler_config.maintenance_interval_
 seconds. See this class's own start()/stop() for the exact job_ids.
+
+Sprint 5.24 adds up to three more TaskScheduler jobs (each guarded by a
+None-check on its own dependency, so a Level 5 Part B construction
+fallback — see main.py's own _null_level5_part_b_modules() — simply
+skips registering it, never crashing start() itself): a wellness-prompt
+detection/enqueue job on wellness_config.idle_check_interval_seconds
+(_maybe_enqueue_wellness_prompt(), a real, disclosed addition beyond
+this sprint's own literal five-job Data Flow list — WellnessTracker
+itself has no PriorityQueueManager dependency and is outside this
+sprint's own Files to Modify, so this class is the only place the
+WellnessTracker.evaluate_triggers() -> PriorityQueueManager.enqueue()
+step described in that Data Flow can actually live), plus
+PatternRecognizer.run_detection_pass()/RecommendationEngine.
+generate_recommendations() on learning_config.pattern_detection_
+interval_seconds/recommendation_generation_interval_seconds
+respectively — mirroring ReminderEngine.register()'s own "the source
+class owns its own enqueue job" precedent as closely as each collaborator's
+own Files-to-Modify scope allows.
 
 Resolving a real circular-construction problem (a call this sprint's own
 spec left implicit, not literally addressed): WakeWordDetector.on_detected
@@ -219,13 +259,15 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from config.schema import MemoryConfig, SchedulerConfig
+from analytics.dashboard_data import AnalyticsDashboardService
+from analytics.usage_tracker import UsageTracker
+from config.schema import LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
 from core.logging_setup import get_logger
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalysis, ContextAnalyzer
 from decision.intent_detector import IntentDetector
 from decision.llm_client import LlmError
-from decision.priority_queue import PriorityLevel, PriorityQueueManager
+from decision.priority_queue import PriorityItem, PriorityLevel, PriorityQueueManager
 from decision.response_generator import ResponseGenerator
 from device_control.action_engine import (
     ActionContext,
@@ -241,6 +283,8 @@ from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from learning.pattern_recognizer import PatternRecognizer
+from learning.recommendation import Recommendation, RecommendationEngine
 from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory, _score_significance
 from memory.lifecycle_manager import MemoryLifecycleManager
@@ -272,6 +316,10 @@ from voice.microphone import MicrophoneManager
 from voice.quiet_mode import ActivationReason, OperatingMode, QuietModeController
 from voice.session_manager import SessionEndReason, VoiceSessionManager
 from voice.wake_word import WakeWordDetector
+from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
+from wellness.escalation import WellnessEscalationManager
+from wellness.wellness_model import WellnessPrompt, WellnessTriggerType
+from wellness.wellness_tracker import WellnessTracker
 from workflow.workflow_executor import WorkflowExecutor, WorkflowRunResult
 from workflow.workflow_store import WorkflowStore
 
@@ -304,7 +352,16 @@ _MAINTENANCE_JOB_IDS: tuple[str, ...] = (
     "conversation_store_purge",
     "action_audit_log_purge",
 )
-_REMINDER_ANNOUNCEMENT_JOB_ID = "proactive_reminder_announcement"
+_PRIORITY_ITEM_ANNOUNCEMENT_JOB_ID = "proactive_priority_item_announcement"
+"""Renamed from _REMINDER_ANNOUNCEMENT_JOB_ID (Sprint 5.24) — the job
+itself now dispatches three priority sources, not just SCHEDULED_REMINDER
+(see _check_and_announce_priority_item()'s own docstring), the same
+"correct a name once its own scope has genuinely grown" precedent Sprint
+4.1's own Application Control -> Application Manager rename already
+established."""
+_WELLNESS_ENQUEUE_JOB_ID = "wellness_prompt_enqueue"
+_PATTERN_DETECTION_JOB_ID = "pattern_detection_pass"
+_RECOMMENDATION_GENERATION_JOB_ID = "recommendation_generation"
 
 
 def _parse_relative_time(transcript: str, now: datetime) -> datetime | None:
@@ -389,6 +446,15 @@ class CommunicationPipeline:
         companion_experience_engine: CompanionExperienceEngine,
         jarvis_renderer: JarvisRenderer,
         avatar_renderer: AvatarRenderer,
+        wellness_tracker: WellnessTracker | None,
+        wellness_escalation_manager: WellnessEscalationManager | None,
+        adaptive_wellness_adjuster: AdaptiveWellnessAdjuster | None,
+        dashboard_service: AnalyticsDashboardService | None,
+        usage_tracker: UsageTracker | None,
+        pattern_recognizer: PatternRecognizer | None,
+        recommendation_engine: RecommendationEngine | None,
+        learning_config: LearningConfig,
+        wellness_config: WellnessConfig,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -431,6 +497,52 @@ class CommunicationPipeline:
         self._companion_experience_engine = companion_experience_engine
         self._jarvis_renderer = jarvis_renderer
         self._avatar_renderer = avatar_renderer
+        # Sprint 5.24 — Level 5 Part B (Companion Intelligence). All six
+        # are optional, matching main.py's own _null_level5_part_b_modules()
+        # fallback (a genuine Part B construction failure passes literal
+        # None for each, per this sprint's own Files to Modify text — a
+        # simpler fallback shape than Part A's own always-real-but-inert
+        # objects, since none of these six ever get called unconditionally
+        # the way Part A's presentation objects do every single turn).
+        # usage_tracker itself has no direct call site in this class (it
+        # self-schedules via CoreManager, and dashboard_service already
+        # wraps usage_store directly) — accepted and stored anyway per
+        # this sprint's own explicit constructor-DI-growth list, the same
+        # "kept for symmetry/future use" precedent action_recovery_manager
+        # already established (_Level4Modules' own docstring).
+        self._wellness_tracker = wellness_tracker
+        self._wellness_escalation_manager = wellness_escalation_manager
+        self._adaptive_wellness_adjuster = adaptive_wellness_adjuster
+        self._dashboard_service = dashboard_service
+        self._usage_tracker = usage_tracker
+        self._pattern_recognizer = pattern_recognizer
+        self._recommendation_engine = recommendation_engine
+        self._learning_config = learning_config
+        self._wellness_config = wellness_config
+        # In-memory dedup, mirroring ReminderEngine._enqueued_item_ids'
+        # own identical precedent: evaluate_triggers() is a pure read with
+        # no "already enqueued" memory of its own, so without this a
+        # still-crossed trigger would be re-enqueued as a fresh duplicate
+        # PriorityItem on every single poll until it's actually announced.
+        self._pending_wellness_trigger_types: set[WellnessTriggerType] = set()
+        # generate_recommendations() is stateless/idempotent (learning/
+        # recommendation.py's own docstring) — re-running it against
+        # unchanged PatternStore data reproduces the same recommendations,
+        # keyed by based_on_pattern_id (stable across calls, unlike each
+        # call's own fresh recommendation_id) rather than by text, so a
+        # pattern whose confidence/description later changes is still
+        # recognized as "already surfaced," not silently re-enqueued.
+        self._enqueued_recommendation_pattern_ids: set[str] = set()
+        # Sprint 5.24 — _check_and_announce_priority_item()'s own dispatch
+        # table, exhaustive over every PriorityLevel this Sprint Book gives
+        # a real producer to. Built here (bound methods, not a class-level
+        # dict of unbound references) since the methods themselves are
+        # defined later in this same class body.
+        self._priority_item_handlers: dict[PriorityLevel, Callable[[PriorityItem], None]] = {
+            PriorityLevel.SCHEDULED_REMINDER: self._announce_scheduled_reminder,
+            PriorityLevel.WELLNESS: self._announce_wellness,
+            PriorityLevel.GENERAL_SUGGESTION: self._announce_general_suggestion,
+        }
         self._wired = False
 
         # Sprint 5.14's own new, genuinely-this-sprint's-own state (Sprint
@@ -466,7 +578,12 @@ class CommunicationPipeline:
         main.py's own docstring for the full reasoning); calling
         add_job() before TaskScheduler.start() has run raises
         RuntimeError, which would surface immediately as a real
-        CoreManager module-start failure, not a silent no-op."""
+        CoreManager module-start failure, not a silent no-op.
+
+        Sprint 5.24: also registers up to three Level 5 Part B jobs
+        (wellness-prompt enqueue, pattern detection, recommendation
+        generation), each guarded by a None-check on its own dependency
+        — see this class's own module docstring for the full reasoning."""
         self._turn_complete_relay.target = self._handle_turn_complete
         self._session_ended_relay.target = self._quiet_mode_controller._on_session_ended
         self._wired = True
@@ -493,10 +610,28 @@ class CommunicationPipeline:
             job_id=_MAINTENANCE_JOB_IDS[3],
         )
         self._task_scheduler.add_job(
-            self._check_and_announce_due_reminder,
+            self._check_and_announce_priority_item,
             self._scheduler_config.poll_interval_seconds,
-            job_id=_REMINDER_ANNOUNCEMENT_JOB_ID,
+            job_id=_PRIORITY_ITEM_ANNOUNCEMENT_JOB_ID,
         )
+        if self._wellness_tracker is not None:
+            self._task_scheduler.add_job(
+                self._maybe_enqueue_wellness_prompt,
+                self._wellness_config.idle_check_interval_seconds,
+                job_id=_WELLNESS_ENQUEUE_JOB_ID,
+            )
+        if self._pattern_recognizer is not None:
+            self._task_scheduler.add_job(
+                self._pattern_recognizer.run_detection_pass,
+                self._learning_config.pattern_detection_interval_seconds,
+                job_id=_PATTERN_DETECTION_JOB_ID,
+            )
+        if self._recommendation_engine is not None:
+            self._task_scheduler.add_job(
+                self._generate_and_enqueue_recommendations,
+                self._learning_config.recommendation_generation_interval_seconds,
+                job_id=_RECOMMENDATION_GENERATION_JOB_ID,
+            )
         logger.info("Communication Pipeline wiring connected.")
 
     def stop(self) -> None:
@@ -505,8 +640,16 @@ class CommunicationPipeline:
         at this point — main.py's reverse-shutdown-order guarantee
         (task_scheduler registered/started before communication_pipeline
         means it stops AFTER communication_pipeline) keeps this true in
-        real operation; see main.py's own docstring."""
-        self._task_scheduler.remove_job(_REMINDER_ANNOUNCEMENT_JOB_ID)
+        real operation; see main.py's own docstring. The three Sprint
+        5.24 job removals are unconditional (not re-guarded by the same
+        None-checks start() used) — TaskScheduler.remove_job() is
+        documented as a safe no-op for an unregistered job_id, so this is
+        simpler than mirroring start()'s own guards for no behavioral
+        difference."""
+        self._task_scheduler.remove_job(_PRIORITY_ITEM_ANNOUNCEMENT_JOB_ID)
+        self._task_scheduler.remove_job(_WELLNESS_ENQUEUE_JOB_ID)
+        self._task_scheduler.remove_job(_PATTERN_DETECTION_JOB_ID)
+        self._task_scheduler.remove_job(_RECOMMENDATION_GENERATION_JOB_ID)
         for job_id in _MAINTENANCE_JOB_IDS:
             self._task_scheduler.remove_job(job_id)
         self._reminder_engine.unregister()
@@ -650,6 +793,8 @@ class CommunicationPipeline:
                 reply = self._handle_scheduler_turn(decision_trace)
             elif selected_engine is EngineSelection.INTERNET_AGENT:
                 reply = self._handle_internet_agent_turn(decision_trace)
+            elif selected_engine is EngineSelection.WELLNESS:
+                reply = self._handle_wellness_turn(decision_trace)
             elif selected_engine is EngineSelection.EMOTION_SUPPORT:
                 # EMOTION_SUPPORT selects a tone within compose_reply_safely()'s
                 # own template path, not a distinct subsystem — see
@@ -1049,37 +1194,205 @@ class CommunicationPipeline:
             f"{corroborated_count} corroborated.)"
         )
 
-    def _check_and_announce_due_reminder(self) -> None:
-        """Sprint 4.18. TaskScheduler job body (registered in start(),
-        on scheduler_config.poll_interval_seconds) — this project's
-        first genuinely PROACTIVE (JARMINEI-initiated, not turn-
-        triggered) behavior. See this module's own docstring for the
-        full wiring diagram and Architecture Notes for the real
-        concurrency discipline this method's own call ordering exists
-        to satisfy.
+    def _handle_wellness_turn(self, trace: DecisionTrace) -> str:
+        """Sprint 5.24. Answers a live wellness self-check turn — routed
+        here by decision/authority.py's own keyword-gated WELLNESS branch
+        — from real WellnessTracker/AnalyticsDashboardService state,
+        never a fabricated number. trace itself is unused beyond its own
+        signature (matching this sprint's own Expected Functions text
+        exactly) — the reply is a live status report, not something
+        derived from the trace's own routing decision.
 
-        Part 2's own Priority Queue language for Scheduled Reminders is
-        explicit: "Queued" — a due item found while a session is
-        already ACTIVE is left untouched in the queue (peek_next(), not
-        popped) rather than interrupting; the next poll checks again.
-        peek_next() before pop_next() also means a future, still-
-        unhandled PriorityItem type (anything other than
-        SCHEDULED_REMINDER — no other live source exists yet, see
-        backlog/technical_debt.md item 17) is never silently consumed
-        by this method without understanding it."""
+        A real, disclosed narrowing: wellness_tracker.py is outside this
+        sprint's own Files to Modify, and WellnessTracker exposes no
+        public per-trigger elapsed-time accessor (only evaluate_
+        triggers(), a currently-due-or-not check) — so this composes
+        today's real total active time (AnalyticsDashboardService.
+        daily_summary()) with whatever evaluate_triggers() itself already
+        exposes publicly, rather than the richer "per-trigger elapsed
+        time" the sprint file's own Expected Functions text describes.
+        Degrades to an honest "I don't have enough information about
+        today yet" when Level 5 Part B modules are unavailable (the
+        null-fallback case) or when today's UsageStore has no data at
+        all — never a fabricated number."""
+        if self._wellness_tracker is None or self._dashboard_service is None:
+            return "I don't have enough information about today yet."
+        summary = self._dashboard_service.daily_summary(datetime.now(UTC).date())
+        if summary.total_active_seconds <= 0:
+            return "I don't have enough information about today yet."
+        active_minutes = round(summary.total_active_seconds / 60)
+        prompt = self._wellness_tracker.evaluate_triggers()
+        status = (
+            prompt.message if prompt is not None else "No wellness reminders are due right now."
+        )
+        return f"You've been active for about {active_minutes} minute(s) today. {status}"
+
+    def _check_and_announce_priority_item(self) -> None:
+        """Sprint 4.18 (as _check_and_announce_due_reminder), renamed and
+        widened Sprint 5.24 into a real, exhaustive three-source
+        dispatcher — this project's first genuinely PROACTIVE (JARMINEI-
+        initiated, not turn-triggered) behavior. TaskScheduler job body
+        (registered in start(), on scheduler_config.poll_interval_
+        seconds). See this module's own docstring for the full wiring
+        diagram and Architecture Notes for the real concurrency
+        discipline this method's own call ordering exists to satisfy.
+
+        _maybe_enqueue_wellness_prompt() runs unconditionally, even while
+        a live session is ACTIVE — Part 2's own "Queued" language applies
+        equally to detection (a due wellness trigger should still be
+        recorded) and to announcement (only the announcement itself waits
+        for DORMANT below), the identical distinction the peek-before-pop
+        discipline already draws for SCHEDULED_REMINDER.
+
+        Part 2's own Priority Queue "Queued" language is explicit for
+        every source: a due item found while a session is already ACTIVE
+        is left untouched in the queue (peek_next(), not popped) rather
+        than interrupting; the next poll checks again. peek_next() before
+        pop_next() also means a future, still-unhandled PriorityLevel
+        (IMPORTANT_ALERT — backlog/technical_debt.md item 17's one
+        genuinely still-open source after this sprint) is never silently
+        consumed without understanding it; self._priority_item_handlers
+        is exhaustive over every PriorityLevel this Sprint Book gives a
+        real producer to (SCHEDULED_REMINDER, WELLNESS,
+        GENERAL_SUGGESTION), so an unrecognized one logs a warning and
+        stays queued instead."""
+        self._maybe_enqueue_wellness_prompt()
+
         if self._quiet_mode_controller.current_mode() is not OperatingMode.DORMANT:
             return
         peeked = self._priority_queue_manager.peek_next()
-        if peeked is None or peeked.priority is not PriorityLevel.SCHEDULED_REMINDER:
+        if peeked is None:
             return
-
+        handler = self._priority_item_handlers.get(peeked.priority)
+        if handler is None:
+            logger.warning(
+                "PriorityLevel %s has no real announcement handler yet; leaving it queued.",
+                peeked.priority,
+            )
+            return
         item = self._priority_queue_manager.pop_next()
+        handler(item)
+
+    def _announce_scheduled_reminder(self, item: PriorityItem) -> None:
+        """Sprint 4.18, extracted unchanged from the old
+        _check_and_announce_due_reminder() as part of this sprint's own
+        dispatch-table widening."""
         scheduled_item: ScheduledItem = item.payload
         persona = self._persona_manager.active_persona()
         self._quiet_mode_controller.activate(
             ActivationReason.SCHEDULED_ALERT,
             announce_first=(scheduled_item.title, persona.voice_id),
         )
+
+    def _announce_wellness(self, item: PriorityItem) -> None:
+        """Sprint 5.24. Part 2's own "Owned exclusively by Minie" language
+        (stronger than anything said about reminders/suggestions) is why
+        this is the one announcement source that force-switches persona:
+        select(..., SwitchReason.WELLNESS) -> speak -> resume_previous(),
+        the lighter select()/resume_previous() pair (unchanged since
+        Sprint 2.11), never Sprint 5.10's full seven-phase
+        TransitionEngine — a wellness announcement is a brief, single-
+        utterance interruption, the same reasoning Sprint 4.18's own
+        SCHEDULED_ALERT announcements never invoking TransitionEngine
+        already established. select() failing here (unlikely given
+        WELLNESS's own now-elevated priority rank — see personas/
+        persona_manager.py's own module docstring for this sprint's
+        disclosed reordering) degrades to announcing through whichever
+        persona IS active rather than crashing this job; resume_previous()
+        is only called when select() actually applied, so a refused
+        switch never wrongly restores an unrelated older state.
+
+        Sprint 5.25 hardening (scenario e): the force-switch/announce/
+        resume sequence is now wrapped in a single try/except/finally —
+        a real induced failure anywhere in that sequence (select() itself
+        raising, or a later step raising after a switch already applied)
+        is logged and absorbed rather than propagating, and the finally
+        block guarantees resume_previous() still runs whenever switched
+        is True, so PersonaManager can never be left stuck on Minie.
+        When select() itself is what fails, switched stays False and
+        resume_previous() is correctly never attempted. Mirrors
+        presentation/lip_sync.py's own Sprint 5.11 "one mechanism, one
+        try/finally, guaranteeing the cleanup call regardless of how the
+        body failed" precedent."""
+        prompt: WellnessPrompt = item.payload
+        switched = False
+        try:
+            switched = self._persona_manager.select("minie", SwitchReason.WELLNESS)
+            persona = self._persona_manager.active_persona()
+            self._quiet_mode_controller.activate(
+                ActivationReason.SCHEDULED_ALERT,
+                announce_first=(prompt.message, persona.voice_id),
+            )
+        except Exception:
+            logger.exception(
+                "Wellness announcement failed; resuming previous persona if the "
+                "switch was already applied, never leaving PersonaManager stuck."
+            )
+        finally:
+            if switched:
+                self._persona_manager.resume_previous()
+        self._pending_wellness_trigger_types.discard(prompt.trigger_type)
+        if self._wellness_escalation_manager is not None:
+            self._wellness_escalation_manager.register_prompt_shown(prompt.trigger_type)
+
+    def _announce_general_suggestion(self, item: PriorityItem) -> None:
+        """Sprint 5.24. Announced through whichever persona is already
+        active, unchanged — like SCHEDULED_REMINDER, and unlike WELLNESS,
+        a suggestion never force-switches persona (Part 2 names no such
+        requirement for it)."""
+        recommendation: Recommendation = item.payload
+        persona = self._persona_manager.active_persona()
+        self._quiet_mode_controller.activate(
+            ActivationReason.SCHEDULED_ALERT,
+            announce_first=(recommendation.text, persona.voice_id),
+        )
+
+    def _maybe_enqueue_wellness_prompt(self) -> None:
+        """Sprint 5.24 — the real WellnessTracker.evaluate_triggers() ->
+        PriorityQueueManager.enqueue() step this module's own docstring
+        names but wellness_tracker.py itself cannot own (it has no
+        PriorityQueueManager dependency, and is outside this sprint's own
+        Files to Modify) — a real, disclosed gap this class fills
+        instead, the only place in the whole graph that legitimately can.
+
+        Deduplicated per still-crossed trigger type via
+        _pending_wellness_trigger_types (cleared once the prompt is
+        actually announced, in _announce_wellness() above) —
+        evaluate_triggers() is a pure read with no "already enqueued"
+        memory of its own, so without this dedup the same still-crossed
+        trigger would be re-enqueued as a fresh duplicate PriorityItem on
+        every single poll until it's actually announced."""
+        if self._wellness_tracker is None:
+            return
+        overrides = (
+            self._adaptive_wellness_adjuster.compute_overrides()
+            if self._adaptive_wellness_adjuster is not None
+            else None
+        )
+        prompt = self._wellness_tracker.evaluate_triggers(interval_overrides=overrides)
+        if prompt is None or prompt.trigger_type in self._pending_wellness_trigger_types:
+            return
+        self._pending_wellness_trigger_types.add(prompt.trigger_type)
+        self._priority_queue_manager.enqueue(
+            prompt, PriorityLevel.WELLNESS, source="wellness_tracker"
+        )
+
+    def _generate_and_enqueue_recommendations(self) -> None:
+        """Sprint 5.24. RecommendationEngine.generate_recommendations() is
+        deliberately stateless/idempotent (learning/recommendation.py's
+        own docstring, which explicitly defers deduplication to "Sprint
+        5.24's own live-caller concern") — deduplicated here per
+        based_on_pattern_id (stable across calls, unlike each call's own
+        fresh recommendation_id) via _enqueued_recommendation_pattern_ids."""
+        if self._recommendation_engine is None:
+            return
+        for recommendation in self._recommendation_engine.generate_recommendations():
+            if recommendation.based_on_pattern_id in self._enqueued_recommendation_pattern_ids:
+                continue
+            self._enqueued_recommendation_pattern_ids.add(recommendation.based_on_pattern_id)
+            self._priority_queue_manager.enqueue(
+                recommendation, PriorityLevel.GENERAL_SUGGESTION, source="recommendation_engine"
+            )
 
 
 def _describe_action_result(result: ActionResult, target: str) -> str:

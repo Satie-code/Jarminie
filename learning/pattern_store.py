@@ -31,10 +31,15 @@ fresh pattern_id/first_observed_at="now") on every single detection pass
 without ever duplicating a row or losing a pattern's own true
 first-detected timestamp.
 
-Deliberately NOT given Fail Gracefully hardening this sprint, matching
-CalendarStore's/UsageStore's identical precedent — no real caller exists
-yet to meaningfully degrade for; Sprint 5.25's job once Sprint 5.24 gives
-it one.
+Sprint 5.25 hardening (scenario b): list_by_type()/list_all() degrade to
+[] on a real SQLite failure, matching CalendarStore.list_due_within()'s/
+UsageStore.list_samples_since()'s own precedent — their real callers
+(Sprint 5.21's PatternRecognizer counter-model reads, Sprint 5.23's
+RecommendationEngine, Sprint 5.24's live wellness-turn/TaskScheduler call
+sites) already treat "no patterns found" as an ordinary, valid input.
+upsert() (the write path) is deliberately left unwrapped, the same
+"wrapping the write path here would risk a false success the caller
+never actually got" reasoning CalendarStore.save() already established.
 """
 
 from __future__ import annotations
@@ -123,14 +128,27 @@ class PatternStore:
         )
 
     def list_by_type(self, pattern_type: PatternType) -> list[LearnedPattern]:
-        rows = self._sqlite_client.query(
-            f"SELECT {_SELECT_COLUMNS} FROM learned_patterns WHERE pattern_type = ?",
-            (pattern_type.value,),
-        )
+        """Sprint 5.25 hardening (scenario b): a SQLite failure degrades
+        to an empty list rather than raising — see this module's own
+        docstring."""
+        try:
+            rows = self._sqlite_client.query(
+                f"SELECT {_SELECT_COLUMNS} FROM learned_patterns WHERE pattern_type = ?",
+                (pattern_type.value,),
+            )
+        except Exception:
+            logger.exception("Failed to query patterns by type; treating as none found.")
+            return []
         return [self._build_pattern(row) for row in rows]
 
     def list_all(self) -> list[LearnedPattern]:
-        rows = self._sqlite_client.query(f"SELECT {_SELECT_COLUMNS} FROM learned_patterns")
+        """Sprint 5.25 hardening (scenario b): same SQLite-failure
+        degrade as list_by_type() above."""
+        try:
+            rows = self._sqlite_client.query(f"SELECT {_SELECT_COLUMNS} FROM learned_patterns")
+        except Exception:
+            logger.exception("Failed to query all patterns; treating as none found.")
+            return []
         return [self._build_pattern(row) for row in rows]
 
     def _build_pattern(self, row: tuple) -> LearnedPattern:

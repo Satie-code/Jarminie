@@ -314,5 +314,11 @@ def test_level5_part_a_full_acceptance_scenario(
         "emotion_detection_engine",
         "emotional_state_manager",
         "presentation_controller",
+        # Sprint 5.24 (Level 5 Part B — Companion Intelligence).
+        "usage_store",
+        "usage_tracker",
+        "pattern_store",
+        "pattern_recognizer",
+        "wellness_tracker",
     }
     assert all(state == "running" for state in states.values())

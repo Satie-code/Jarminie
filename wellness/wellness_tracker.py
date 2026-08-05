@@ -34,12 +34,17 @@ trigger's own counter without disturbing the others. LATE_NIGHT has no
 counter at all — it is a pure function of the current wall-clock hour
 against the configured wrapping window, so acknowledge_prompt() is a
 safe, documented no-op for it.
+
+Sprint 5.25 hardening (scenario c): _sample_idle_seconds() degrades a
+real win32api failure to "not significantly inactive" rather than
+raising — see that method's own docstring.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pywintypes
 import win32api
 
 from config.schema import WellnessConfig
@@ -111,6 +116,7 @@ class WellnessTracker:
             WellnessTriggerType.OVERWORK: 0.0,
         }
         self._last_prompt: WellnessPrompt | None = None
+        self._win32_failure_active = False
 
     def start(self) -> None:
         self._task_scheduler.add_job(
@@ -207,8 +213,27 @@ class WellnessTracker:
         logger.info("Wellness prompt acknowledged: %s", trigger_type.value)
 
     def _sample_idle_seconds(self) -> float:
-        last_input_tick = win32api.GetLastInputInfo()
-        current_tick = win32api.GetTickCount()
+        """Sprint 5.25 hardening (scenario c): a real (if rare) win32api
+        failure degrades to 0.0 — "not significantly inactive," the
+        conservative choice, since under-resetting a genuine continuous-
+        activity streak is safer than spuriously resetting it on a
+        transient API hiccup. Logged once per failure streak, not
+        per-tick (mirrors presentation/'s own HolographicSphereWidget/
+        SegmentedRingWidget _on_tick() Sprint 5.15 precedent), and again
+        once on recovery. pywintypes.error specifically, not a bare
+        Exception, matching device_control/application_manager.py's/
+        window_manager.py's own established win32-failure convention."""
+        try:
+            last_input_tick = win32api.GetLastInputInfo()
+            current_tick = win32api.GetTickCount()
+        except pywintypes.error:
+            if not self._win32_failure_active:
+                logger.exception("win32api idle-time query failed; treating tick as active.")
+                self._win32_failure_active = True
+            return 0.0
+        if self._win32_failure_active:
+            logger.info("win32api idle-time query recovered.")
+            self._win32_failure_active = False
         return max(0.0, (current_tick - last_input_tick) / 1000.0)
 
     def _on_tick(self) -> None:

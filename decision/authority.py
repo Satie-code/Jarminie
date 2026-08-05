@@ -19,7 +19,7 @@ never modify this enum):
     WORKFLOW                 - wired: CommunicationPipeline._handle_workflow_turn() (4.11)
     SCHEDULER                - wired: CommunicationPipeline._handle_scheduler_turn() (4.18)
     INTERNET_AGENT           - wired: CommunicationPipeline._handle_internet_agent_turn() (4.18)
-    WELLNESS                 - reserved: Level 5 (Wellness Engine, Part B)
+    WELLNESS                 - wired: CommunicationPipeline._handle_wellness_turn() (5.24)
     EMOTION_SUPPORT          - wired: selects Persona.compose_reply()'s tone-adapted
                                 CONVERSATIONAL_RESPONSE path (5.4) — a *style* choice, not
                                 a distinct subsystem dispatch; CommunicationPipeline still
@@ -53,6 +53,23 @@ is expected to follow":
   _handle_scheduler_turn() is deliberately create-only (see its own
   docstring), so routing a query there would produce a confusing,
   unhandled case. A real future consideration, not built speculatively.
+
+WELLNESS routing (Sprint 5.24, _determine_engine()), checked BEFORE the
+EMOTION_SUPPORT branch below so it can preempt both of that branch's own
+eligible categories: an INFORMATIONAL or EMOTIONAL_SUPPORT intent whose
+raw transcript names wellness-shaped self-check language (a literal
+"how am i doing"/"should i take a break"/"my screen time" etc. keyword —
+see _WELLNESS_KEYWORDS) routes to WELLNESS regardless of authority_level
+— unlike every other keyword-gated branch in this file, this one is not
+authority-gated, since asking about one's own wellness status is
+INFORM-shaped by nature (a live status query, not a request to act).
+CommunicationPipeline._handle_wellness_turn() answers it directly from
+WellnessTracker's own current state plus AnalyticsDashboardService.
+daily_summary() — a live, honest status report. This is a routing
+decision only, the same "no live dependency on the concrete engine"
+discipline _resolve_action_engine() already established for DEVICE_
+CONTROL/WORKFLOW — this class has no live WellnessTracker/
+AnalyticsDashboardService dependency of its own.
 
 EMOTION_SUPPORT routing (Sprint 5.4, _determine_engine()): an
 EMOTIONAL_SUPPORT intent routes to EMOTION_SUPPORT only when
@@ -128,14 +145,16 @@ This is a genuine implementation-time decision (not spelled out by this
 sprint's own spec), harmless at Level 3 since the whitelist is always
 empty regardless of what string is checked against it.
 
-selected_engine is never WELLNESS in the real returned DecisionTrace —
-that value remains fully reserved (Level 5 Part B). An EMOTIONAL_SUPPORT
-intent at INFORM authority (the common case in the real, currently-wired
-pipeline) still degrades to CONVERSATIONAL_RESPONSE with the same honest
-"this looks like a task for the Wellness Engine, which doesn't exist yet"
-capability-gap wording in reasoning_text this docstring described before
-Sprint 5.4 — only a non-INFORM authority_level unlocks the real,
-narrower EMOTION_SUPPORT branch documented above.
+**Superseded note (Sprint 5.24)**: selected_engine CAN now be WELLNESS in
+the real returned DecisionTrace — see the WELLNESS routing paragraph
+above. An EMOTIONAL_SUPPORT intent at INFORM authority with no wellness
+keyword match still degrades to plain CONVERSATIONAL_RESPONSE (only a
+non-INFORM authority_level unlocks the real, narrower EMOTION_SUPPORT
+branch documented above) — this narrow residual gap no longer gets its
+own "doesn't exist yet" reasoning_text sentence, since the Wellness
+Engine genuinely does exist now; _INFERRED_FUTURE_ENGINE (the mechanism
+that produced that wording) is removed as of this sprint, having had
+exactly one entry, this one, now obsolete.
 
 Sprint 3.13 hardening (scenario e): evaluate()'s own body is wrapped in
 a try/except — any internal exception (a malformed input, a bug in
@@ -198,20 +217,6 @@ class DecisionTrace:
     decided_at: datetime
 
 
-# intent.category -> the engine that would ideally handle this request,
-# once it exists. Only categories with a genuine future-capability gap
-# appear here — categories already well-served by CONVERSATIONAL_
-# RESPONSE/INFORM_ONLY (MEMORY_RECALL, CASUAL_CONVERSATION, UNKNOWN,
-# INFORMATIONAL, EMERGENCY) are deliberately absent. ACTION_REQUEST is
-# no longer here as of Sprint 4.11 — Device Control is a real,
-# resolvable engine now (see _resolve_action_engine()), not merely an
-# inferred future one; an unresolvable ACTION_REQUEST (no concrete
-# target) gets its own honest wording directly in _build_reasoning()
-# instead of this generic "doesn't exist yet" table.
-_INFERRED_FUTURE_ENGINE: dict[IntentCategory, EngineSelection] = {
-    IntentCategory.EMOTIONAL_SUPPORT: EngineSelection.WELLNESS,
-}
-
 _WORKFLOW_KEYWORDS: tuple[str, ...] = ("workflow", "routine", "automation", "sequence")
 """Substrings in the raw transcript that indicate an ACTION_REQUEST names
 a stored *workflow* rather than a single device-control target (an
@@ -254,6 +259,26 @@ _CURRENT_INFORMATION_KEYWORDS: tuple[str, ...] = (
 information rather than something answerable from the model's own
 knowledge (Sprint 4.18) — same small, literal, non-NLU discipline as
 _WORKFLOW_KEYWORDS/_SCHEDULER_KEYWORDS above."""
+
+
+_WELLNESS_KEYWORDS: tuple[str, ...] = (
+    "how am i doing",
+    "should i take a break",
+    "my screen time",
+    "am i overworking",
+    "wellness check",
+    "how's my wellness",
+)
+"""Substrings indicating an INFORMATIONAL/EMOTIONAL_SUPPORT intent is a
+wellness self-check rather than a plain question or a request for
+emotional support (Sprint 5.24) — same small, literal, non-NLU
+discipline as _WORKFLOW_KEYWORDS/_SCHEDULER_KEYWORDS/_CURRENT_
+INFORMATION_KEYWORDS above."""
+
+
+def _mentions_wellness_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _WELLNESS_KEYWORDS)
 
 
 def _mentions_scheduler_keywords(transcript: str) -> bool:
@@ -395,6 +420,11 @@ class AuthorityEvaluator:
         context_analysis: ContextAnalysis,
         authority_level: AuthorityLevel,
     ) -> EngineSelection:
+        if intent.category in (
+            IntentCategory.INFORMATIONAL,
+            IntentCategory.EMOTIONAL_SUPPORT,
+        ) and _mentions_wellness_keywords(intent.raw_transcript):
+            return EngineSelection.WELLNESS
         if (
             intent.category == IntentCategory.EMOTIONAL_SUPPORT
             and authority_level != AuthorityLevel.INFORM
@@ -484,6 +514,11 @@ def _build_reasoning(
             "This needs current or external information, so I'll check "
             f"{_ENGINE_DISPLAY_NAMES[EngineSelection.INTERNET_AGENT]}."
         )
+    elif selected_engine is EngineSelection.WELLNESS:
+        parts.append(
+            "This is a wellness self-check, so I'll answer from "
+            f"{_ENGINE_DISPLAY_NAMES[EngineSelection.WELLNESS]}'s own current status."
+        )
     elif selected_engine is EngineSelection.EMOTION_SUPPORT:
         parts.append("This calls for emotional support, so I'll respond with an adapted tone.")
     elif intent.category is IntentCategory.ACTION_REQUEST:
@@ -499,14 +534,6 @@ def _build_reasoning(
                 f"This looks like a request for {device_control_name}, but I couldn't "
                 "identify a specific target (an application, file, or workflow name) to "
                 "act on, so I'll respond conversationally instead."
-            )
-    else:
-        future_engine = _INFERRED_FUTURE_ENGINE.get(intent.category)
-        if future_engine is not None:
-            display_name = _ENGINE_DISPLAY_NAMES[future_engine]
-            parts.append(
-                f"This looks like a task for {display_name}, which doesn't exist yet at "
-                "this level of the system - answering conversationally instead."
             )
 
     if retrieved_memories:

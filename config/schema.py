@@ -1236,6 +1236,27 @@ class LearningConfig:
     these, never an LLM call, so a recommendation's exact wording for a
     given pattern is always the same, predictable string (Phase 5.4's own
     "No unpredictable behavior" Acceptance Criterion, applied literally).
+
+    pattern_detection_interval_seconds/recommendation_generation_interval_
+    seconds (Sprint 5.24 — Companion Intelligence Integration) are the
+    real, periodic TaskScheduler cadences voice/pipeline.py's
+    CommunicationPipeline.start() registers for
+    PatternRecognizer.run_detection_pass()/RecommendationEngine.
+    generate_recommendations() — the sprint file's own Files to Modify
+    left which config section owns these two fields as "a genuine, small
+    implementation-time judgment call, resolved directly during
+    implementation." Landed here, in LearningConfig, rather than
+    SchedulerConfig or WellnessConfig — both PatternRecognizer and
+    RecommendationEngine already live in learning/, mirroring
+    AnalyticsConfig.sample_interval_seconds/WellnessConfig.idle_check_
+    interval_seconds's own identical "each engine's own config section
+    owns its own cadence" precedent, rather than growing SchedulerConfig
+    into a dumping ground for every engine's own polling interval.
+    Both default to a daily-scale cadence, far longer than
+    SchedulerConfig.poll_interval_seconds — neither needs to run often,
+    the same reasoning SchedulerConfig.maintenance_interval_seconds's own
+    docstring already gives for its own much-longer-than-poll_interval_
+    seconds default.
     """
 
     pattern_min_occurrences: int = 5
@@ -1246,6 +1267,8 @@ class LearningConfig:
     recommendation_templates: dict[str, str] = field(
         default_factory=_default_recommendation_templates
     )
+    pattern_detection_interval_seconds: float = 86400.0
+    recommendation_generation_interval_seconds: float = 86400.0
 
 
 # WellnessTriggerType's five values (wellness/wellness_model.py), duplicated
@@ -2206,3 +2229,13 @@ class AppConfig:
                     f"learning.recommendation_templates[{pattern_type_value!r}] must contain a "
                     "{subject} placeholder"
                 )
+        if learning_config.pattern_detection_interval_seconds <= 0:
+            raise ConfigError(
+                "learning.pattern_detection_interval_seconds must be positive, got "
+                f"{learning_config.pattern_detection_interval_seconds}"
+            )
+        if learning_config.recommendation_generation_interval_seconds <= 0:
+            raise ConfigError(
+                "learning.recommendation_generation_interval_seconds must be positive, got "
+                f"{learning_config.recommendation_generation_interval_seconds}"
+            )

@@ -16,10 +16,16 @@ usage_model.py's own module docstring for why this grouping happens at
 read time rather than via a mutable in-memory "current session"
 tracked across polls.
 
-Deliberately NOT given Fail Gracefully hardening this sprint, matching
-CalendarStore's identical Sprint 4.14 precedent — no real caller exists
-yet to meaningfully degrade for (Sprint 5.20/5.21/5.24's job, once
-real callers exist; Sprint 5.25's job to actually harden it).
+Sprint 5.25 hardening (scenario b): list_samples_since() degrades to []
+on a real SQLite failure, matching CalendarStore.list_due_within()'s own
+Sprint 4.19 precedent — its real callers (Sprint 5.20's
+AnalyticsDashboardService, Sprint 5.24's live turn/TaskScheduler call
+sites) already treat "no samples" as an ordinary, valid input.
+list_sessions_since() inherits the same degrade automatically, since it
+derives its own result entirely from list_samples_since(). record_sample()
+(the write path) is deliberately left unwrapped, the same
+"wrapping the write path here would risk a false success the caller
+never actually got" reasoning CalendarStore.save() already established.
 
 UsageStore has zero knowledge of Wellness, Learning, or any dashboard —
 this class answers only "what was the foreground application, and
@@ -91,12 +97,20 @@ class UsageStore:
 
     def list_samples_since(self, since: datetime) -> list[AppFocusSample]:
         """Oldest-first — session derivation below needs chronological
-        order; nothing in this sprint needs newest-first."""
-        rows = self._sqlite_client.query(
-            "SELECT sample_id, process_name, window_title, sampled_at "
-            "FROM app_focus_samples WHERE sampled_at >= ? ORDER BY sampled_at ASC",
-            (since.isoformat(),),
-        )
+        order; nothing in this sprint needs newest-first.
+
+        Sprint 5.25 hardening (scenario b): a SQLite failure degrades to
+        an empty list rather than raising — see this module's own
+        docstring."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT sample_id, process_name, window_title, sampled_at "
+                "FROM app_focus_samples WHERE sampled_at >= ? ORDER BY sampled_at ASC",
+                (since.isoformat(),),
+            )
+        except Exception:
+            logger.exception("Failed to query usage samples; treating as none recorded.")
+            return []
         return [self._build_sample(row) for row in rows]
 
     def list_sessions_since(self, since: datetime) -> list[UsageSession]:

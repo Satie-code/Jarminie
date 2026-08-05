@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.schema import MemoryConfig, SchedulerConfig
+from config.schema import LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
 from decision.authority import EngineSelection
 from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
@@ -25,6 +25,7 @@ from emotion.state_manager import EmotionalState
 from internet.search_provider import SearchResult
 from internet.source_validator import Citation
 from internet.summarizer import ResearchSummary
+from learning.recommendation import Recommendation
 from personas.persona_manager import SwitchReason
 from presentation.adaptive_workspace import WorkspaceProfile
 from scheduler.scheduler_model import ItemType, ScheduledItem
@@ -32,6 +33,7 @@ from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
 from voice.quiet_mode import ActivationReason, OperatingMode
 from voice.session_manager import SessionEndReason
+from wellness.wellness_model import WellnessPrompt, WellnessTriggerType
 from workflow.workflow_executor import WorkflowRunResult
 
 
@@ -139,6 +141,23 @@ def collaborators():
     jarvis_renderer = MagicMock()
     avatar_renderer = MagicMock()
 
+    # Sprint 5.24 (Level 5 Part B) collaborators. wellness_tracker.
+    # evaluate_triggers() defaults to None (no prompt currently due) —
+    # the same "sensible no-op default" discipline priority_queue_
+    # manager.peek_next()/pop_next() above already established — so an
+    # unconfigured test's own _maybe_enqueue_wellness_prompt() call
+    # never has an accidental enqueue side effect.
+    wellness_tracker = MagicMock()
+    wellness_tracker.evaluate_triggers.return_value = None
+    wellness_escalation_manager = MagicMock()
+    adaptive_wellness_adjuster = MagicMock()
+    adaptive_wellness_adjuster.compute_overrides.return_value = {}
+    dashboard_service = MagicMock()
+    usage_tracker = MagicMock()
+    pattern_recognizer = MagicMock()
+    recommendation_engine = MagicMock()
+    recommendation_engine.generate_recommendations.return_value = []
+
     return {
         "mic": MagicMock(),
         "wake_word_detector": MagicMock(),
@@ -181,6 +200,15 @@ def collaborators():
         "companion_experience_engine": companion_experience_engine,
         "jarvis_renderer": jarvis_renderer,
         "avatar_renderer": avatar_renderer,
+        "wellness_tracker": wellness_tracker,
+        "wellness_escalation_manager": wellness_escalation_manager,
+        "adaptive_wellness_adjuster": adaptive_wellness_adjuster,
+        "dashboard_service": dashboard_service,
+        "usage_tracker": usage_tracker,
+        "pattern_recognizer": pattern_recognizer,
+        "recommendation_engine": recommendation_engine,
+        "learning_config": LearningConfig(),
+        "wellness_config": WellnessConfig(),
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -190,8 +218,11 @@ def collaborators():
     }
 
 
-@pytest.fixture
-def pipeline(collaborators):
+def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
+    """Shared by the pipeline fixture below and any test that needs a
+    pipeline built from a deliberately-modified collaborators dict (e.g.
+    a Level 5 Part B dependency forced to None) — avoids duplicating this
+    whole constructor call a second time."""
     return CommunicationPipeline(
         mic=collaborators["mic"],
         wake_word_detector=collaborators["wake_word_detector"],
@@ -234,7 +265,21 @@ def pipeline(collaborators):
         companion_experience_engine=collaborators["companion_experience_engine"],
         jarvis_renderer=collaborators["jarvis_renderer"],
         avatar_renderer=collaborators["avatar_renderer"],
+        wellness_tracker=collaborators["wellness_tracker"],
+        wellness_escalation_manager=collaborators["wellness_escalation_manager"],
+        adaptive_wellness_adjuster=collaborators["adaptive_wellness_adjuster"],
+        dashboard_service=collaborators["dashboard_service"],
+        usage_tracker=collaborators["usage_tracker"],
+        pattern_recognizer=collaborators["pattern_recognizer"],
+        recommendation_engine=collaborators["recommendation_engine"],
+        learning_config=collaborators["learning_config"],
+        wellness_config=collaborators["wellness_config"],
     )
+
+
+@pytest.fixture
+def pipeline(collaborators):
+    return _build_pipeline(collaborators)
 
 
 def test_health_check_false_before_start(pipeline):
@@ -281,7 +326,10 @@ def test_start_registers_every_maintenance_job(pipeline, collaborators):
         "memory_lifecycle_monthly_review",
         "conversation_store_purge",
         "action_audit_log_purge",
-        "proactive_reminder_announcement",
+        "proactive_priority_item_announcement",
+        "wellness_prompt_enqueue",
+        "pattern_detection_pass",
+        "recommendation_generation",
     }
 
 
@@ -291,14 +339,25 @@ def test_start_registers_maintenance_jobs_with_the_configured_interval(pipeline,
     add_job = collaborators["task_scheduler"].add_job
     interval_for_job_id = {call.kwargs["job_id"]: call.args[1] for call in add_job.call_args_list}
     scheduler_config = collaborators["scheduler_config"]
+    learning_config = collaborators["learning_config"]
+    wellness_config = collaborators["wellness_config"]
     assert interval_for_job_id["memory_lifecycle_cleanup_pass"] == (
         scheduler_config.maintenance_interval_seconds
     )
     assert interval_for_job_id["conversation_store_purge"] == (
         scheduler_config.maintenance_interval_seconds
     )
-    assert interval_for_job_id["proactive_reminder_announcement"] == (
+    assert interval_for_job_id["proactive_priority_item_announcement"] == (
         scheduler_config.poll_interval_seconds
+    )
+    assert interval_for_job_id["wellness_prompt_enqueue"] == (
+        wellness_config.idle_check_interval_seconds
+    )
+    assert interval_for_job_id["pattern_detection_pass"] == (
+        learning_config.pattern_detection_interval_seconds
+    )
+    assert interval_for_job_id["recommendation_generation"] == (
+        learning_config.recommendation_generation_interval_seconds
     )
 
 
@@ -319,9 +378,36 @@ def test_start_registers_maintenance_jobs_with_the_real_bound_methods(pipeline, 
     assert func_for_job_id["action_audit_log_purge"] == (
         collaborators["action_audit_log"].purge_older_than
     )
-    assert func_for_job_id["proactive_reminder_announcement"] == (
-        pipeline._check_and_announce_due_reminder
+    assert func_for_job_id["proactive_priority_item_announcement"] == (
+        pipeline._check_and_announce_priority_item
     )
+    assert func_for_job_id["wellness_prompt_enqueue"] == pipeline._maybe_enqueue_wellness_prompt
+    assert func_for_job_id["pattern_detection_pass"] == (
+        collaborators["pattern_recognizer"].run_detection_pass
+    )
+    assert func_for_job_id["recommendation_generation"] == (
+        pipeline._generate_and_enqueue_recommendations
+    )
+
+
+def test_start_does_not_register_wellness_or_learning_jobs_when_dependencies_are_none(
+    collaborators,
+):
+    """The None-guards in start() — see CommunicationPipeline's own
+    docstring for why (a genuine Level 5 Part B construction failure,
+    main.py's own null-fallback)."""
+    collaborators["wellness_tracker"] = None
+    collaborators["pattern_recognizer"] = None
+    collaborators["recommendation_engine"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    registered_job_ids = {call.kwargs["job_id"] for call in add_job.call_args_list}
+    assert "wellness_prompt_enqueue" not in registered_job_ids
+    assert "pattern_detection_pass" not in registered_job_ids
+    assert "recommendation_generation" not in registered_job_ids
 
 
 def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collaborators):
@@ -336,7 +422,10 @@ def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collab
         "memory_lifecycle_monthly_review",
         "conversation_store_purge",
         "action_audit_log_purge",
-        "proactive_reminder_announcement",
+        "proactive_priority_item_announcement",
+        "wellness_prompt_enqueue",
+        "pattern_detection_pass",
+        "recommendation_generation",
     }
     collaborators["reminder_engine"].unregister.assert_called_once()
 
@@ -918,38 +1007,38 @@ def test_internet_agent_turn_with_no_results_reports_it_and_never_summarizes(
 # --- Proactive reminder announcement (Sprint 4.18) ----------------------------
 
 
-def test_check_and_announce_due_reminder_skips_when_a_session_is_active(pipeline, collaborators):
+def test_check_and_announce_priority_item_skips_when_a_session_is_active(pipeline, collaborators):
     collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.ACTIVE
 
-    pipeline._check_and_announce_due_reminder()
+    pipeline._check_and_announce_priority_item()
 
     collaborators["priority_queue_manager"].peek_next.assert_not_called()
     collaborators["quiet_mode_controller"].activate.assert_not_called()
 
 
-def test_check_and_announce_due_reminder_skips_when_queue_is_empty(pipeline, collaborators):
+def test_check_and_announce_priority_item_skips_when_queue_is_empty(pipeline, collaborators):
     collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
     collaborators["priority_queue_manager"].peek_next.return_value = None
 
-    pipeline._check_and_announce_due_reminder()
+    pipeline._check_and_announce_priority_item()
 
     collaborators["priority_queue_manager"].pop_next.assert_not_called()
     collaborators["quiet_mode_controller"].activate.assert_not_called()
 
 
-def test_check_and_announce_due_reminder_skips_a_non_reminder_item(pipeline, collaborators):
+def test_check_and_announce_priority_item_skips_a_non_reminder_item(pipeline, collaborators):
     peeked = MagicMock()
     peeked.priority = PriorityLevel.IMPORTANT_ALERT
     collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
     collaborators["priority_queue_manager"].peek_next.return_value = peeked
 
-    pipeline._check_and_announce_due_reminder()
+    pipeline._check_and_announce_priority_item()
 
     collaborators["priority_queue_manager"].pop_next.assert_not_called()
     collaborators["quiet_mode_controller"].activate.assert_not_called()
 
 
-def test_check_and_announce_due_reminder_announces_a_due_reminder(pipeline, collaborators):
+def test_check_and_announce_priority_item_announces_a_due_reminder(pipeline, collaborators):
     scheduled_item = ScheduledItem(
         item_id="item-1",
         item_type=ItemType.EVENT,
@@ -965,12 +1054,289 @@ def test_check_and_announce_due_reminder_announces_a_due_reminder(pipeline, coll
     collaborators["priority_queue_manager"].peek_next.return_value = peeked
     collaborators["priority_queue_manager"].pop_next.return_value = popped
 
-    pipeline._check_and_announce_due_reminder()
+    pipeline._check_and_announce_priority_item()
 
     collaborators["priority_queue_manager"].pop_next.assert_called_once()
     collaborators["quiet_mode_controller"].activate.assert_called_once_with(
         ActivationReason.SCHEDULED_ALERT, announce_first=("Team standup", "p340")
     )
+
+
+# --- Sprint 5.24: WELLNESS/GENERAL_SUGGESTION proactive announcement -----------
+
+
+def test_check_and_announce_priority_item_announces_wellness_with_forced_switch_and_resume(
+    pipeline, collaborators
+):
+    minie = MagicMock()
+    minie.name = "minie"
+    minie.voice_id = "m110"
+    collaborators["persona_manager"].select.return_value = True
+    collaborators["persona_manager"].active_persona.return_value = minie
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.BREAK,
+        message="You've been active for a while — consider taking a short break.",
+        triggered_at=datetime.now(UTC),
+    )
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.WELLNESS
+    popped = MagicMock()
+    popped.payload = prompt
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["persona_manager"].select.assert_called_once_with(
+        "minie", SwitchReason.WELLNESS
+    )
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=(prompt.message, "m110")
+    )
+    collaborators["persona_manager"].resume_previous.assert_called_once()
+    collaborators["wellness_escalation_manager"].register_prompt_shown.assert_called_once_with(
+        WellnessTriggerType.BREAK
+    )
+
+
+def test_check_and_announce_priority_item_announces_wellness_without_resume_when_refused(
+    pipeline, collaborators
+):
+    """select() is refused (e.g. a genuine CRITICAL_EMERGENCY is already
+    active) — the announcement still goes out through whichever persona
+    IS active, but resume_previous() must not be called, since nothing
+    was actually switched."""
+    collaborators["persona_manager"].select.return_value = False
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.HYDRATION,
+        message="It might be a good time to drink some water.",
+        triggered_at=datetime.now(UTC),
+    )
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.WELLNESS
+    popped = MagicMock()
+    popped.payload = prompt
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=(prompt.message, "p340")
+    )
+    collaborators["persona_manager"].resume_previous.assert_not_called()
+
+
+def test_check_and_announce_priority_item_announces_general_suggestion_no_switch(
+    pipeline, collaborators
+):
+    recommendation = Recommendation(
+        text="You often use devenv.exe — want me to open it next time?",
+        based_on_pattern_id="pattern-1",
+        generated_at=datetime.now(UTC),
+    )
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.GENERAL_SUGGESTION
+    popped = MagicMock()
+    popped.payload = recommendation
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["persona_manager"].select.assert_not_called()
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=(recommendation.text, "p340")
+    )
+
+
+def test_maybe_enqueue_wellness_prompt_enqueues_when_a_prompt_is_produced(pipeline, collaborators):
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.EYE_PROTECTION, message="m", triggered_at=datetime.now(UTC)
+    )
+    collaborators["wellness_tracker"].evaluate_triggers.return_value = prompt
+
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    collaborators["priority_queue_manager"].enqueue.assert_called_once_with(
+        prompt, PriorityLevel.WELLNESS, source="wellness_tracker"
+    )
+
+
+def test_maybe_enqueue_wellness_prompt_passes_adaptive_wellness_overrides(pipeline, collaborators):
+    overrides = {WellnessTriggerType.BREAK: 1.2}
+    collaborators["adaptive_wellness_adjuster"].compute_overrides.return_value = overrides
+
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    collaborators["wellness_tracker"].evaluate_triggers.assert_called_once_with(
+        interval_overrides=overrides
+    )
+
+
+def test_maybe_enqueue_wellness_prompt_noop_when_none_produced(pipeline, collaborators):
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    collaborators["priority_queue_manager"].enqueue.assert_not_called()
+
+
+def test_maybe_enqueue_wellness_prompt_dedups_a_still_pending_trigger_type(pipeline, collaborators):
+    """evaluate_triggers() is a pure read with no memory of its own — the
+    dedup living in CommunicationPipeline is what stops a still-crossed
+    trigger from being enqueued as a fresh duplicate on every poll."""
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.BREAK, message="m", triggered_at=datetime.now(UTC)
+    )
+    collaborators["wellness_tracker"].evaluate_triggers.return_value = prompt
+
+    pipeline._maybe_enqueue_wellness_prompt()
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    collaborators["priority_queue_manager"].enqueue.assert_called_once()
+
+
+def test_maybe_enqueue_wellness_prompt_reenqueues_after_being_announced(pipeline, collaborators):
+    """The dedup entry is cleared by _announce_wellness() once the prompt
+    is actually spoken — a still-crossed trigger can legitimately fire
+    again afterward."""
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.BREAK, message="m", triggered_at=datetime.now(UTC)
+    )
+    collaborators["wellness_tracker"].evaluate_triggers.return_value = prompt
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.WELLNESS
+    popped = MagicMock()
+    popped.payload = prompt
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_priority_item()  # enqueues, then announces+clears dedup
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    assert collaborators["priority_queue_manager"].enqueue.call_count == 2
+
+
+def test_maybe_enqueue_wellness_prompt_noop_when_wellness_tracker_is_none(collaborators):
+    collaborators["wellness_tracker"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._maybe_enqueue_wellness_prompt()
+
+    collaborators["priority_queue_manager"].enqueue.assert_not_called()
+
+
+def test_generate_and_enqueue_recommendations_enqueues_new_recommendations(pipeline, collaborators):
+    recommendation = Recommendation(
+        text="t", based_on_pattern_id="pattern-1", generated_at=datetime.now(UTC)
+    )
+    collaborators["recommendation_engine"].generate_recommendations.return_value = [recommendation]
+
+    pipeline._generate_and_enqueue_recommendations()
+
+    collaborators["priority_queue_manager"].enqueue.assert_called_once_with(
+        recommendation, PriorityLevel.GENERAL_SUGGESTION, source="recommendation_engine"
+    )
+
+
+def test_generate_and_enqueue_recommendations_dedups_by_pattern_id(pipeline, collaborators):
+    recommendation = Recommendation(
+        text="t", based_on_pattern_id="pattern-1", generated_at=datetime.now(UTC)
+    )
+    collaborators["recommendation_engine"].generate_recommendations.return_value = [recommendation]
+
+    pipeline._generate_and_enqueue_recommendations()
+    pipeline._generate_and_enqueue_recommendations()
+
+    collaborators["priority_queue_manager"].enqueue.assert_called_once()
+
+
+def test_generate_and_enqueue_recommendations_noop_when_recommendation_engine_is_none(
+    collaborators,
+):
+    collaborators["recommendation_engine"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._generate_and_enqueue_recommendations()
+
+    collaborators["priority_queue_manager"].enqueue.assert_not_called()
+
+
+# --- Sprint 5.24: EngineSelection.WELLNESS live-turn routing --------------------
+
+
+def test_handle_turn_complete_routes_wellness_engine_selection(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.WELLNESS
+    summary = MagicMock()
+    summary.total_active_seconds = 1200.0
+    collaborators["dashboard_service"].daily_summary.return_value = summary
+
+    pipeline._handle_turn_complete("how am I doing today?", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "You've been active for about 20 minute(s) today. No wellness reminders are due right now.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
+    )
+
+
+def test_handle_wellness_turn_reports_active_time_and_a_due_prompt(pipeline, collaborators):
+    summary = MagicMock()
+    summary.total_active_seconds = 1800.0
+    collaborators["dashboard_service"].daily_summary.return_value = summary
+    prompt = WellnessPrompt(
+        trigger_type=WellnessTriggerType.BREAK,
+        message="take a break",
+        triggered_at=datetime.now(UTC),
+    )
+    collaborators["wellness_tracker"].evaluate_triggers.return_value = prompt
+
+    reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
+
+    assert reply == "You've been active for about 30 minute(s) today. take a break"
+
+
+def test_handle_wellness_turn_reports_nothing_due_when_no_prompt(pipeline, collaborators):
+    summary = MagicMock()
+    summary.total_active_seconds = 600.0
+    collaborators["dashboard_service"].daily_summary.return_value = summary
+
+    reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
+
+    assert reply == (
+        "You've been active for about 10 minute(s) today. No wellness reminders are due right now."
+    )
+
+
+def test_handle_wellness_turn_degrades_honestly_when_no_usage_data(pipeline, collaborators):
+    summary = MagicMock()
+    summary.total_active_seconds = 0.0
+    collaborators["dashboard_service"].daily_summary.return_value = summary
+
+    reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
+
+    assert reply == "I don't have enough information about today yet."
+
+
+def test_handle_wellness_turn_degrades_when_wellness_tracker_is_none(collaborators):
+    collaborators["wellness_tracker"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
+
+    assert reply == "I don't have enough information about today yet."
+
+
+def test_handle_wellness_turn_degrades_when_dashboard_service_is_none(collaborators):
+    collaborators["dashboard_service"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
+
+    assert reply == "I don't have enough information about today yet."
 
 
 # --- Sprint 4.19 hardening: adversarial sweep -----------------------------------
@@ -990,7 +1356,7 @@ def test_check_and_announce_due_reminder_announces_a_due_reminder(pipeline, coll
 #     guard already exists (calendar_store.save(), Sprint 4.19
 #     scenario e, tested separately with its own exact reply text above
 #     — included here too for real sweep completeness).
-# (2) _check_and_announce_due_reminder() is a bare TaskScheduler job
+# (2) _check_and_announce_priority_item() is a bare TaskScheduler job
 #     body with no try/except of its own, by design (see this module's
 #     docstring) — its collaborators are all in-memory, already-hardened
 #     objects with no real external I/O of their own, so a fault here is
@@ -1120,7 +1486,7 @@ def test_live_turn_sweep_every_scheduler_and_internet_agent_call_site_never_prop
         "quiet_mode_controller.activate_raises",
     ],
 )
-def test_check_and_announce_due_reminder_sweep_every_call_site_raises_by_design(
+def test_check_and_announce_priority_item_sweep_every_call_site_raises_by_design(
     pipeline, collaborators, faulty_collaborator, faulty_method
 ):
     """Sweep (2) — see this section's own header comment. Deliberately
@@ -1133,4 +1499,4 @@ def test_check_and_announce_due_reminder_sweep_every_call_site_raises_by_design(
     )
 
     with pytest.raises(RuntimeError, match="simulated collaborator failure"):
-        pipeline._check_and_announce_due_reminder()
+        pipeline._check_and_announce_priority_item()

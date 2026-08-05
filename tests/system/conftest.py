@@ -26,15 +26,21 @@ from unittest.mock import MagicMock
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from analytics.dashboard_data import AnalyticsDashboardService
+from analytics.usage_store import UsageStore
+from analytics.usage_tracker import UsageTracker
 from config.schema import (
+    AnalyticsConfig,
     AppConfig,
     DatabaseConfig,
     DeviceControlConfig,
     InternetConfig,
+    LearningConfig,
     MemoryConfig,
     SchedulerConfig,
     SecurityConfig,
     VoiceConfig,
+    WellnessConfig,
     WorkflowConfig,
 )
 from core.manager import CoreManager
@@ -58,6 +64,10 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from learning.pattern_recognizer import PatternRecognizer
+from learning.pattern_store import PatternStore
+from learning.preference_learner import PreferenceLearner
+from learning.recommendation import RecommendationEngine
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory
@@ -96,6 +106,9 @@ from voice.quiet_mode import OperatingMode, QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import TranscriptionResult
 from voice.wake_word import WakeWordDetector
+from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
+from wellness.escalation import WellnessEscalationManager
+from wellness.wellness_tracker import WellnessTracker
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
 
@@ -313,7 +326,14 @@ def voice_config() -> VoiceConfig:
     )
 
 
-def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig):
+def _app_harness_impl(
+    tmp_path,
+    voice_config,
+    scheduler_config: SchedulerConfig,
+    wellness_config: WellnessConfig | None = None,
+    learning_config: LearningConfig | None = None,
+    analytics_config: AnalyticsConfig | None = None,
+):
     """Builds the real Level 2 + Level 3 module graph exactly as main.py's
     _register_level2_modules()/_register_level3_modules() do, registers
     every ManagedModule with a real CoreManager, and drives it through
@@ -328,6 +348,21 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     observe real recurrence (a proactive reminder announcement, the
     three maintenance passes firing more than once) within a bounded
     system test.
+
+    wellness_config/learning_config/analytics_config (Sprint 5.26,
+    additive, all optional) mirror this same caller-supplied shape —
+    tests/system/test_level5_part_b_acceptance.py's own scripted
+    scenario deliberately keeps these at their own realistic (slow)
+    defaults throughout (directly advancing WellnessTracker's own
+    counters/calling job bodies synchronously instead — see that file's
+    own docstring for why: WellnessTracker._on_tick() reads the real
+    machine's own win32api idle time, so speeding up idle_check_interval_
+    seconds risks a real, environment-dependent reset racing a directly-
+    set counter mid-test), while its own dedicated job-recurrence test
+    opts into a fast variant of all three via a new fast_level5_part_b_
+    app_harness fixture below, the same "fast interval only where a test
+    specifically needs real recurrence" discipline scheduler_config
+    itself already established at Sprint 4.20.
 
     fast_scheduler_app_harness relies on core_manager.shutdown()'s own
     plain reverse-registration-order stop, unmodified — task_scheduler/
@@ -354,6 +389,9 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
             chroma_path=str(tmp_path / "chroma"),
         ),
         memory=MemoryConfig(chroma_collection_prefix="app_harness"),
+        wellness=wellness_config if wellness_config is not None else WellnessConfig(),
+        learning=learning_config if learning_config is not None else LearningConfig(),
+        analytics=analytics_config if analytics_config is not None else AnalyticsConfig(),
     )
     resource_monitor = ResourceMonitor(config.resources)
     core_manager = CoreManager(config, resource_monitor, config_loader=MagicMock())
@@ -517,6 +555,33 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     voice_personality_modulator = VoicePersonalityModulator(config.presentation)
     lip_sync_driver = LipSyncDriver(config.presentation)
 
+    # Sprint 5.24 — Level 5 Part B (Companion Intelligence), matching
+    # main.py's own _construct_level5_part_b_modules() exactly (real
+    # classes throughout, each store getting its own fresh SqliteClient
+    # against the identical database file — the same established
+    # per-store-not-shared precedent every other store construction in
+    # this fixture already follows).
+    usage_sqlite_client = SqliteClient(config.database.sqlite_path)
+    usage_store = UsageStore(usage_sqlite_client, config.analytics)
+    usage_tracker = UsageTracker(task_scheduler, usage_store, config.analytics)
+
+    wellness_escalation_manager = WellnessEscalationManager(config.wellness)
+
+    pattern_sqlite_client = SqliteClient(config.database.sqlite_path)
+    pattern_store = PatternStore(pattern_sqlite_client)
+    adaptive_wellness_adjuster = AdaptiveWellnessAdjuster(pattern_store, config.wellness)
+
+    wellness_tracker = WellnessTracker(
+        task_scheduler, config.wellness, emotional_state_manager, wellness_escalation_manager
+    )
+
+    dashboard_service = AnalyticsDashboardService(usage_store, config.analytics)
+    pattern_recognizer = PatternRecognizer(
+        usage_store, dashboard_service, pattern_store, config.learning
+    )
+    preference_learner = PreferenceLearner(memory_store, pattern_store, config.learning)
+    recommendation_engine = RecommendationEngine(pattern_store, config.learning)
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -559,6 +624,15 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         companion_experience_engine=companion_experience_engine,
         jarvis_renderer=jarvis_renderer,
         avatar_renderer=avatar_renderer,
+        wellness_tracker=wellness_tracker,
+        wellness_escalation_manager=wellness_escalation_manager,
+        adaptive_wellness_adjuster=adaptive_wellness_adjuster,
+        dashboard_service=dashboard_service,
+        usage_tracker=usage_tracker,
+        pattern_recognizer=pattern_recognizer,
+        recommendation_engine=recommendation_engine,
+        learning_config=config.learning,
+        wellness_config=config.wellness,
     )
 
     # task_scheduler/calendar_store registered FIRST, before even
@@ -611,11 +685,21 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
     core_manager.register_module("emotion_detection_engine", emotion_detection_engine)
     core_manager.register_module("emotional_state_manager", emotional_state_manager)
     core_manager.register_module("presentation_controller", presentation_controller)
+    # Sprint 5.24 — Level 5 Part B, registered last (main.py's own
+    # _register_level5_part_b_modules() ordering): stores before their
+    # own dependents (usage_store before usage_tracker, pattern_store
+    # before pattern_recognizer).
+    core_manager.register_module("usage_store", usage_store)
+    core_manager.register_module("usage_tracker", usage_tracker)
+    core_manager.register_module("pattern_store", pattern_store)
+    core_manager.register_module("pattern_recognizer", pattern_recognizer)
+    core_manager.register_module("wellness_tracker", wellness_tracker)
 
     core_manager.startup()
 
     harness = SimpleNamespace(
         core_manager=core_manager,
+        pipeline=pipeline,
         mic=mic,
         audio_backend=audio_backend,
         stt=stt,
@@ -675,6 +759,17 @@ def _app_harness_impl(tmp_path, voice_config, scheduler_config: SchedulerConfig)
         companion_experience_engine=companion_experience_engine,
         voice_personality_modulator=voice_personality_modulator,
         lip_sync_driver=lip_sync_driver,
+        # Sprint 5.24 (Level 5 Part B) additions.
+        usage_store=usage_store,
+        usage_tracker=usage_tracker,
+        pattern_store=pattern_store,
+        pattern_recognizer=pattern_recognizer,
+        wellness_tracker=wellness_tracker,
+        wellness_escalation_manager=wellness_escalation_manager,
+        adaptive_wellness_adjuster=adaptive_wellness_adjuster,
+        dashboard_service=dashboard_service,
+        preference_learner=preference_learner,
+        recommendation_engine=recommendation_engine,
     )
     try:
         yield harness
@@ -726,6 +821,36 @@ def fast_scheduler_app_harness(tmp_path, voice_config, qapp):
     the real, complete CoreManager graph."""
     fast_config = SchedulerConfig(poll_interval_seconds=0.3, maintenance_interval_seconds=0.3)
     yield from _app_harness_impl(tmp_path, voice_config, fast_config)
+
+
+@pytest.fixture
+def fast_level5_part_b_app_harness(tmp_path, voice_config, qapp):
+    """Identical object graph to app_harness, but with short scheduler_
+    config.poll_interval_seconds PLUS short wellness_config.idle_check_
+    interval_seconds/learning_config.pattern_detection_interval_seconds/
+    recommendation_generation_interval_seconds/analytics_config.sample_
+    interval_seconds (Sprint 5.26) — for test_level5_part_b_acceptance.py's
+    own dedicated job-recurrence test only, matching fast_scheduler_app_
+    harness's own "not shared with any other test file" precedent and
+    tests/integration/conftest.py's own identical fast_level5_part_b_
+    harness fixture (Sprint 5.25). maintenance_interval_seconds is
+    deliberately left at SchedulerConfig()'s own realistic default — that
+    test has no need to observe the maintenance passes recur, only the
+    four Level 5 Part B jobs."""
+    fast_scheduler_config = SchedulerConfig(poll_interval_seconds=0.3)
+    fast_wellness_config = WellnessConfig(idle_check_interval_seconds=0.3)
+    fast_learning_config = LearningConfig(
+        pattern_detection_interval_seconds=0.3, recommendation_generation_interval_seconds=0.3
+    )
+    fast_analytics_config = AnalyticsConfig(sample_interval_seconds=0.3)
+    yield from _app_harness_impl(
+        tmp_path,
+        voice_config,
+        fast_scheduler_config,
+        wellness_config=fast_wellness_config,
+        learning_config=fast_learning_config,
+        analytics_config=fast_analytics_config,
+    )
 
 
 @pytest.fixture

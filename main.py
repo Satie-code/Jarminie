@@ -21,8 +21,11 @@ else — see `main()`'s own docstring/body for the full root cause and the
 import sys
 from dataclasses import dataclass, replace
 
+from analytics.dashboard_data import AnalyticsDashboardService
+from analytics.usage_store import UsageStore
+from analytics.usage_tracker import UsageTracker
 from config import ConfigLoader
-from config.schema import AppConfig, MemoryConfig, SchedulerConfig
+from config.schema import AppConfig, LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
 from core import configure_logging
 from core.logging_setup import get_logger
 from core.manager import CoreManager
@@ -47,6 +50,10 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider_registry import create_search_provider_with_fallback
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from learning.pattern_recognizer import PatternRecognizer
+from learning.pattern_store import PatternStore
+from learning.preference_learner import PreferenceLearner
+from learning.recommendation import RecommendationEngine
 from memory.chroma_client import ChromaMemoryClient
 from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory
@@ -87,6 +94,9 @@ from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import WhisperSpeechToText
 from voice.text_to_speech import CoquiTextToSpeech, SoundDeviceAudioOutput
 from voice.wake_word import OpenWakeWordEngine, WakeWordDetector
+from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
+from wellness.escalation import WellnessEscalationManager
+from wellness.wellness_tracker import WellnessTracker
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
 
@@ -222,6 +232,42 @@ class _Level5Modules:
     available: bool = True
 
 
+@dataclass
+class _Level5PartBModules:
+    """Bundles every Level 5 Part B (Companion Intelligence — Wellness/
+    Analytics/Learning) object CommunicationPipeline or CoreManager
+    registration needs (Sprint 5.24). Mirrors _Level5Modules' own shape
+    including Sprint 5.15's null-fallback-on-construction-failure
+    discipline, but with a deliberately SIMPLER fallback than that
+    dataclass's own always-real-but-inert objects: every field here is
+    typed Type | None (matching CommunicationPipeline's own new
+    constructor parameters, this sprint's own literal text), since none
+    of Part B's objects are called unconditionally on every single turn
+    the way Part A's presentation objects are — a plain None threaded
+    through and guarded at each real call site is simpler than
+    constructing a whole parallel inert object graph for objects nothing
+    calls unless a real WELLNESS-routed turn or a real TaskScheduler job
+    tick actually reaches them.
+
+    Only usage_store/usage_tracker/pattern_store/pattern_recognizer/
+    wellness_tracker are real ManagedModules — wellness_escalation_manager/
+    adaptive_wellness_adjuster/dashboard_service/preference_learner/
+    recommendation_engine are all plain, lifecycle-free collaborators, per
+    each one's own originating sprint (5.19/5.22/5.20/5.23 respectively)."""
+
+    usage_store: UsageStore | None
+    usage_tracker: UsageTracker | None
+    wellness_tracker: WellnessTracker | None
+    wellness_escalation_manager: WellnessEscalationManager | None
+    adaptive_wellness_adjuster: AdaptiveWellnessAdjuster | None
+    pattern_store: PatternStore | None
+    pattern_recognizer: PatternRecognizer | None
+    dashboard_service: AnalyticsDashboardService | None
+    preference_learner: PreferenceLearner | None
+    recommendation_engine: RecommendationEngine | None
+    available: bool = True
+
+
 def _prewarm_tts_before_pyside6() -> None:
     """Must run before ANY import that could pull in PySide6, including
     the local `from ui.app import run_app` immediately below this call
@@ -315,18 +361,20 @@ def main() -> int:
     # (needs Level 2's persona_manager/quiet_mode_controller and Level
     # 3's memory_store — constructed after Level 2 for that reason,
     # per _Level5Modules' own docstring; before-or-after Level 4/4B is
-    # immaterial, neither depends on Level 5), then the pipeline itself
-    # (needs all five). Registration order is intentionally different —
-    # see _register_level4_part_b_early()'s, _register_level3_modules()'s,
-    # and _register_level4_modules()'s own docstrings for the two
-    # distinct ordering constraints this project now balances: Level 3/4/5
-    # Part A/4B's remaining registrations all happen AFTER
-    # communication_pipeline (keeping the wake_word_detector-to-pipeline
-    # relay-wiring gap tight), while task_scheduler/calendar_store are
-    # the one deliberate exception, registered FIRST, before even Level
-    # 2 — CommunicationPipeline.start() (Sprint 4.18) calls
-    # task_scheduler.add_job() directly, which requires task_scheduler
-    # to already be started.
+    # immaterial, neither depends on Level 5), then Level 5 Part B (needs
+    # Level 4B's task_scheduler and Level 5 Part A's own
+    # emotional_state_manager — constructed after both for that reason),
+    # then the pipeline itself (needs all six). Registration order is
+    # intentionally different — see _register_level4_part_b_early()'s,
+    # _register_level3_modules()'s, and _register_level4_modules()'s own
+    # docstrings for the two distinct ordering constraints this project
+    # now balances: Level 3/4/5 Part A/4B/5B's remaining registrations
+    # all happen AFTER communication_pipeline (keeping the
+    # wake_word_detector-to-pipeline relay-wiring gap tight), while
+    # task_scheduler/calendar_store are the one deliberate exception,
+    # registered FIRST, before even Level 2 — CommunicationPipeline.
+    # start() (Sprint 4.18) calls task_scheduler.add_job() directly,
+    # which requires task_scheduler to already be started.
     level3_modules = _construct_level3_modules(config, resource_monitor)
     level2_modules = _construct_level2_modules(config)
     level4_modules = _construct_level4_modules(
@@ -353,6 +401,28 @@ def main() -> int:
         )
         level5_modules = _null_level5_modules(config, core_manager, level2_modules, level3_modules)
 
+    # Sprint 5.24, mirroring Sprint 5.15 scenario (e)'s own discipline for
+    # Level 5 Part A immediately above: a genuine Level 5 Part B
+    # construction failure must not take Levels 1-5 Part A down with it.
+    # Constructed after level5_modules is resolved (whether by the real
+    # path or its own null fallback) — WellnessTracker's own optional
+    # stress-sensitivity input needs level5_modules.emotional_state_manager,
+    # which _null_level5_modules() still constructs for real either way
+    # (see that function's own docstring).
+    try:
+        level5b_modules = _construct_level5_part_b_modules(
+            config,
+            level4b_modules.task_scheduler,
+            level5_modules.emotional_state_manager,
+            level3_modules.memory_store,
+        )
+    except Exception:
+        logger.exception(
+            "Level 5 Part B construction failed; continuing startup with Levels 1-5 Part A "
+            "intact and Level 5 Part B unavailable."
+        )
+        level5b_modules = _null_level5_part_b_modules()
+
     # Resolves the real circular-construction problem Sprint 5.10's own
     # docstring named explicitly: PersonaManager (Level 2) must be
     # constructed with on_switch already set, but its real target,
@@ -368,7 +438,7 @@ def main() -> int:
 
     pipeline = _construct_pipeline(
         level2_modules, level3_modules, level4_modules, level4b_modules, level5_modules,
-        config.scheduler, config.memory,
+        level5b_modules, config.scheduler, config.memory, config.learning, config.wellness,
     )
 
     _register_level4_part_b_early(core_manager, level4b_modules)
@@ -376,6 +446,7 @@ def main() -> int:
     _register_level3_modules(core_manager, level3_modules)
     _register_level4_modules(core_manager, level4_modules)
     _register_level5_modules(core_manager, level5_modules)
+    _register_level5_part_b_modules(core_manager, level5b_modules)
 
     # ui.app is deliberately imported here, locally, rather than at this
     # module's own top level, so that _prewarm_tts_before_pyside6() above
@@ -841,22 +912,125 @@ def _null_level5_modules(
     )
 
 
+def _construct_level5_part_b_modules(
+    config: AppConfig,
+    task_scheduler: TaskScheduler,
+    emotional_state_manager: EmotionalStateManager | None,
+    memory_store: MemoryStore,
+) -> _Level5PartBModules:
+    """Construct every Level 5 Part B (Companion Intelligence) subsystem
+    via DI — construction only, no CoreManager registration (see
+    _register_level5_part_b_modules() below). Needs task_scheduler
+    (UsageTracker/WellnessTracker both reuse it, per Sprint 4.15's own
+    established TaskScheduler.add_job()/remove_job() precedent),
+    emotional_state_manager (WellnessTracker's own optional stress-
+    sensitivity input, Sprint 5.18) and memory_store (PreferenceLearner's
+    own direct MemoryStore dependency, Sprint 5.23) already constructed.
+
+    **A real, disclosed deviation from this sprint file's own literal
+    Expected Functions signature**: the spec names a single shared
+    `sqlite_client: SqliteClient` parameter, but every other _construct_
+    level*_modules() function in this file (Level 3/4/4B) instead builds
+    a FRESH SqliteClient(database_config.sqlite_path) per store — never
+    one shared instance across multiple store classes, even when they
+    point at the identical database file (see _construct_level4_modules()'s
+    own audit_sqlite_client/workflow_sqlite_client for the established
+    precedent). Followed that established, repeatedly-reinforced
+    convention here instead — usage_store/pattern_store each get their
+    own SqliteClient — rather than the sprint file's own single-parameter
+    signature, which conflicts with it.
+
+    emotional_state_manager is typed | None to match the sprint file's
+    own literal Expected Functions signature, but in real operation
+    (main()'s own call site) is always a real object — _null_level5_modules()
+    still constructs a genuine EmotionalStateManager even on a Level 5
+    Part A construction failure (see that function's own docstring), so
+    WellnessTracker's own optional stress-sensitivity input is never
+    actually absent in practice."""
+    database_config = config.database
+    analytics_config = config.analytics
+    wellness_config = config.wellness
+    learning_config = config.learning
+
+    usage_sqlite_client = SqliteClient(database_config.sqlite_path)
+    usage_store = UsageStore(usage_sqlite_client, analytics_config)
+    usage_tracker = UsageTracker(task_scheduler, usage_store, analytics_config)
+
+    wellness_escalation_manager = WellnessEscalationManager(wellness_config)
+
+    pattern_sqlite_client = SqliteClient(database_config.sqlite_path)
+    pattern_store = PatternStore(pattern_sqlite_client)
+    adaptive_wellness_adjuster = AdaptiveWellnessAdjuster(pattern_store, wellness_config)
+
+    wellness_tracker = WellnessTracker(
+        task_scheduler, wellness_config, emotional_state_manager, wellness_escalation_manager
+    )
+
+    dashboard_service = AnalyticsDashboardService(usage_store, analytics_config)
+    pattern_recognizer = PatternRecognizer(
+        usage_store, dashboard_service, pattern_store, learning_config
+    )
+    preference_learner = PreferenceLearner(memory_store, pattern_store, learning_config)
+    recommendation_engine = RecommendationEngine(pattern_store, learning_config)
+
+    return _Level5PartBModules(
+        usage_store=usage_store,
+        usage_tracker=usage_tracker,
+        wellness_tracker=wellness_tracker,
+        wellness_escalation_manager=wellness_escalation_manager,
+        adaptive_wellness_adjuster=adaptive_wellness_adjuster,
+        pattern_store=pattern_store,
+        pattern_recognizer=pattern_recognizer,
+        dashboard_service=dashboard_service,
+        preference_learner=preference_learner,
+        recommendation_engine=recommendation_engine,
+    )
+
+
+def _null_level5_part_b_modules() -> _Level5PartBModules:
+    """Sprint 5.24's own fallback, used only when
+    _construct_level5_part_b_modules() itself raised — mirrors Sprint
+    5.15 scenario (e)'s "a broken subsystem must not take the rest of
+    startup down with it" discipline, applied here with the simpler
+    all-None shape _Level5PartBModules' own docstring explains (every
+    downstream caller — CommunicationPipeline's new constructor
+    parameters, this same file's own _register_level5_part_b_modules()
+    below — already tolerates None for each of these ten fields)."""
+    return _Level5PartBModules(
+        usage_store=None,
+        usage_tracker=None,
+        wellness_tracker=None,
+        wellness_escalation_manager=None,
+        adaptive_wellness_adjuster=None,
+        pattern_store=None,
+        pattern_recognizer=None,
+        dashboard_service=None,
+        preference_learner=None,
+        recommendation_engine=None,
+        available=False,
+    )
+
+
 def _construct_pipeline(
     level2_modules: _Level2Modules,
     level3_modules: _Level3Modules,
     level4_modules: _Level4Modules,
     level4b_modules: _Level4PartBModules,
     level5_modules: _Level5Modules,
+    level5b_modules: _Level5PartBModules,
     scheduler_config: SchedulerConfig,
     memory_config: MemoryConfig,
+    learning_config: LearningConfig,
+    wellness_config: WellnessConfig,
 ) -> CommunicationPipeline:
     """Built last, once every level's prerequisite objects exist —
     CommunicationPipeline is the one object that needs Level 2, 3, 4, 4B,
-    AND 5 collaborators at once. scheduler_config/memory_config are
-    passed separately (rather than threaded through a *Modules bundle)
-    since they're plain config slices, not constructed objects, matching
-    how every other *_config value already reaches this function's own
-    callers directly from AppConfig."""
+    5, AND 5B collaborators at once. scheduler_config/memory_config/
+    learning_config/wellness_config are passed separately (rather than
+    threaded through a *Modules bundle) since they're plain config
+    slices, not constructed objects, matching how every other *_config
+    value already reaches this function's own callers directly from
+    AppConfig."""
     return CommunicationPipeline(
         mic=level2_modules.mic,
         wake_word_detector=level2_modules.wake_word_detector,
@@ -899,6 +1073,15 @@ def _construct_pipeline(
         companion_experience_engine=level5_modules.companion_experience_engine,
         jarvis_renderer=level5_modules.jarvis_renderer,
         avatar_renderer=level5_modules.avatar_renderer,
+        wellness_tracker=level5b_modules.wellness_tracker,
+        wellness_escalation_manager=level5b_modules.wellness_escalation_manager,
+        adaptive_wellness_adjuster=level5b_modules.adaptive_wellness_adjuster,
+        dashboard_service=level5b_modules.dashboard_service,
+        usage_tracker=level5b_modules.usage_tracker,
+        pattern_recognizer=level5b_modules.pattern_recognizer,
+        recommendation_engine=level5b_modules.recommendation_engine,
+        learning_config=learning_config,
+        wellness_config=wellness_config,
     )
 
 
@@ -1067,6 +1250,55 @@ def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5M
     core_manager.register_module(
         "presentation_controller", level5_modules.presentation_controller
     )
+
+
+def _register_level5_part_b_modules(
+    core_manager: CoreManager, level5b_modules: _Level5PartBModules
+) -> None:
+    """Registered after every Level 2/3/4/5 module (see main()'s own
+    ordering comment) — same "keep the wake_word_detector-to-
+    communication_pipeline relay-wiring gap tight" discipline every
+    prior level's own registration function already established. Nothing
+    here has any real start()-order dependency on the other four, so
+    registration order among them just follows natural dependency
+    locality (analytics foundation, then the learning layer built on top
+    of it, then wellness last).
+
+    Only usage_store/usage_tracker/pattern_store/pattern_recognizer/
+    wellness_tracker are real ManagedModules among everything Level 5
+    Part B constructs — wellness_escalation_manager/adaptive_wellness_
+    adjuster/dashboard_service/preference_learner/recommendation_engine
+    are all plain, lifecycle-free collaborators (each one's own
+    originating sprint documented this explicitly), so they are never
+    registered — the identical "only register what has a real lifecycle"
+    discipline every prior level's own registration function already
+    established.
+
+    Sprint 5.24's own fallback: if level5b_modules.available is False
+    (the main()-level construction fallback fired), none of the five are
+    registered at all — CoreManager simply never learns these objects
+    exist, matching every prior level's own scenario-(e)-style fallback."""
+    if not level5b_modules.available:
+        logger.info(
+            "Level 5 Part B construction fallback is active; skipping CoreManager "
+            "registration for usage_store/usage_tracker/pattern_store/pattern_recognizer/"
+            "wellness_tracker."
+        )
+        return
+    # available=True is only ever set by _construct_level5_part_b_modules()'s
+    # own real return, which never leaves a field None — asserted here
+    # purely to narrow the type checker's view of _Level5PartBModules'
+    # own Type | None fields, not because this is a runtime possibility.
+    assert level5b_modules.usage_store is not None
+    assert level5b_modules.usage_tracker is not None
+    assert level5b_modules.pattern_store is not None
+    assert level5b_modules.pattern_recognizer is not None
+    assert level5b_modules.wellness_tracker is not None
+    core_manager.register_module("usage_store", level5b_modules.usage_store)
+    core_manager.register_module("usage_tracker", level5b_modules.usage_tracker)
+    core_manager.register_module("pattern_store", level5b_modules.pattern_store)
+    core_manager.register_module("pattern_recognizer", level5b_modules.pattern_recognizer)
+    core_manager.register_module("wellness_tracker", level5b_modules.wellness_tracker)
 
 
 if __name__ == "__main__":

@@ -2,26 +2,55 @@
 may be active" and Part 2's priority-ordered switching rules
 (02_System_Architecture.md's Persona Switching Rules):
 
-    Priority | SwitchReason         | Status (Level 2)
+    Priority | SwitchReason         | Status
     ---------|----------------------|----------------------------------
     1        | CRITICAL_EMERGENCY   | Reserved — needs the Authority
              |                      | System (Level 3, Sprint 3.10).
-    2        | EXPLICIT_SELECTION   | Wired — configured trigger phrases
+    2        | DAILY_ROUTINE        | Reserved — needs the Scheduler
+             |                      | (Level 4, Sprint 4.8+); still no
+             |                      | live caller as of Sprint 5.24.
+    3        | WELLNESS             | Wired (Sprint 5.24) —
+             |                      | voice/pipeline.py's own proactive
+             |                      | wellness announcement force-
+             |                      | switches to Minie via this reason,
+             |                      | then resume_previous() restores
+             |                      | whatever was active before.
+    4        | EXPLICIT_SELECTION   | Wired — configured trigger phrases
              |                      | (VoiceConfig.jarvis_trigger_phrases /
              |                      | minie_trigger_phrases), no NLU.
-    3        | CONTEXT_DETECTION    | Wired — a crude keyword-list
+    5        | CONTEXT_DETECTION    | Wired — a crude keyword-list
              |                      | heuristic, an explicit placeholder
              |                      | for Sprint 3.8's real Context
              |                      | Analysis (built on Sprint 3.7 Intent
              |                      | Detection + Ollama).
-    4        | DAILY_ROUTINE        | Reserved — needs the Scheduler
-             |                      | (Level 4, Sprint 4.8+).
 
-Only two of the four reasons have a real trigger in Level 2 (Explicit
+Three of the five reasons have a real trigger (Wellness, Explicit
 Selection, Context Detection); the other two are named now — never wired
 to a caller — so the priority mechanism doesn't need reshaping when
-Sprint 3.10 and Sprint 4.8+ eventually supply them. Same pattern already
-established for ActivationReason in Quiet Mode Controller (Sprint 2.6).
+Sprint 3.10 eventually supplies CRITICAL_EMERGENCY's own real caller (a
+DAILY_ROUTINE caller remains a genuinely open future gap — nothing in
+this Sprint Book names one). Same pattern already established for
+ActivationReason in Quiet Mode Controller (Sprint 2.6).
+
+**Sprint 5.24's own real, disclosed reordering**: DAILY_ROUTINE moved
+from priority 4 (least urgent) to priority 2, with WELLNESS inserted
+directly after it at priority 3 — both now rank above EXPLICIT_SELECTION/
+CONTEXT_DETECTION. sprint_5_24.md's own Architecture Notes text is
+internally inconsistent read literally ("placed directly below
+DAILY_ROUTINE" cannot simultaneously mean "above CONTEXT_DETECTION/
+EXPLICIT_SELECTION" under the pre-5.24 ordering, where DAILY_ROUTINE
+itself already ranked below both) — resolved by moving DAILY_ROUTINE
+alongside WELLNESS rather than leaving it at the bottom, which is also
+the only reading under which the sprint's own Acceptance Criteria (a
+real, reliable force-switch to Minie for a wellness announcement) is
+actually achievable: with WELLNESS ranked below EXPLICIT_SELECTION/
+CONTEXT_DETECTION, any stale `_active_reason` left over from an earlier,
+unrelated conversation (context detection or an explicit "hey jarvis"
+almost always precedes a period of DORMANT idle time) would refuse the
+wellness switch outright via select()'s own priority-refusal rule. Zero
+production risk: DAILY_ROUTINE has never had a live caller anywhere in
+this codebase, so no existing tested behavior depends on its prior
+position.
 
 detect_context_heuristic()'s keyword lists are a known-crude placeholder,
 likely to misclassify in practice — acceptable for Level 2, not a hidden
@@ -97,12 +126,15 @@ _JARVIS_HEURISTIC_KEYWORDS: tuple[str, ...] = (
 
 class SwitchReason(Enum):
     """Declaration order encodes priority directly (most urgent first),
-    matching Part 2's numbered list — see this module's docstring."""
+    matching Part 2's numbered list — see this module's docstring,
+    including Sprint 5.24's own disclosed DAILY_ROUTINE/WELLNESS
+    reordering."""
 
     CRITICAL_EMERGENCY = "critical_emergency"
+    DAILY_ROUTINE = "daily_routine"
+    WELLNESS = "wellness"
     EXPLICIT_SELECTION = "explicit_selection"
     CONTEXT_DETECTION = "context_detection"
-    DAILY_ROUTINE = "daily_routine"
 
 
 _PRIORITY_ORDER: tuple[SwitchReason, ...] = tuple(SwitchReason)

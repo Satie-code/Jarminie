@@ -157,7 +157,17 @@ def test_action_request_never_actually_selects_device_control(evaluator):
     assert "Device Control" in trace.reasoning_text
 
 
-def test_emotional_support_never_actually_selects_wellness(evaluator):
+def test_emotional_support_at_inform_authority_with_no_wellness_keyword_falls_back(evaluator):
+    """Superseded by Sprint 5.24: EMOTIONAL_SUPPORT at INFORM authority
+    with no wellness-shaped keyword in the transcript still falls back
+    to plain CONVERSATIONAL_RESPONSE — this pre-5.24 test's own original
+    name/assertion ("never actually selects wellness" / a reasoning_text
+    naming "Wellness Engine") is no longer true in general (WELLNESS is
+    now real and reachable — see the dedicated WELLNESS routing section
+    below); this residual, keyword-less case is the one still-honest
+    remaining gap, and `_INFERRED_FUTURE_ENGINE` (the mechanism that
+    produced the old "doesn't exist yet" wording) is gone, so no special
+    reasoning_text sentence is appended for it anymore either."""
     trace = evaluator.evaluate(
         make_intent(IntentCategory.EMOTIONAL_SUPPORT),
         make_context_analysis(),
@@ -165,7 +175,7 @@ def test_emotional_support_never_actually_selects_wellness(evaluator):
         PriorityLevel.GENERAL_SUGGESTION,
     )
     assert trace.selected_engine is EngineSelection.CONVERSATIONAL_RESPONSE
-    assert "Wellness Engine" in trace.reasoning_text
+    assert "Wellness Engine" not in trace.reasoning_text
 
 
 # --- EMOTION_SUPPORT routing (Sprint 5.4) --------------------------------------
@@ -368,6 +378,84 @@ def test_informational_intent_without_current_information_keyword_stays_inform_o
         PriorityLevel.GENERAL_SUGGESTION,
     )
     assert trace.selected_engine is EngineSelection.INFORM_ONLY
+
+
+# --- Sprint 5.24: real WELLNESS routing -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "how am I doing today?",
+        "should I take a break?",
+        "what's my screen time been like?",
+        "am I overworking myself?",
+    ],
+)
+def test_informational_intent_with_wellness_keyword_selects_wellness(evaluator, transcript):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript=transcript),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.WELLNESS
+    assert "wellness" in trace.reasoning_text.lower()
+
+
+def test_emotional_support_intent_with_wellness_keyword_selects_wellness_at_inform_authority(
+    evaluator,
+):
+    """The one authority-independent branch in this file: WELLNESS
+    preempts EMOTION_SUPPORT's own authority_level != INFORM gate
+    entirely — a wellness self-check is INFORM-shaped by nature."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.EMOTIONAL_SUPPORT, raw_transcript="how am I doing today?"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.authority_level is AuthorityLevel.INFORM
+    assert trace.selected_engine is EngineSelection.WELLNESS
+
+
+def test_emotional_support_intent_with_wellness_keyword_selects_wellness_over_emotion_support(
+    evaluator,
+):
+    """Same wellness-keyword transcript, but at RECOMMEND authority
+    (where EMOTION_SUPPORT would otherwise apply) — WELLNESS still wins,
+    proving the ordering, not just the INFORM-authority coincidence."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.EMOTIONAL_SUPPORT, raw_transcript="should I take a break?"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.CRITICAL_EMERGENCY,
+    )
+    assert trace.authority_level is AuthorityLevel.RECOMMEND
+    assert trace.selected_engine is EngineSelection.WELLNESS
+
+
+def test_action_request_with_wellness_keyword_does_not_select_wellness(evaluator):
+    """WELLNESS is narrowly gated to INFORMATIONAL/EMOTIONAL_SUPPORT
+    only — an ACTION_REQUEST mentioning the same words is routed by its
+    own, unrelated rules instead."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="how am I doing today?"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is not EngineSelection.WELLNESS
+
+
+def test_informational_intent_without_wellness_keyword_does_not_select_wellness(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript="what is the capital of France"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is not EngineSelection.WELLNESS
 
 
 # --- reasoning_text -------------------------------------------------------------

@@ -649,3 +649,11 @@ learning:
     conversation_style: >-
       You seem to engage more with {subject}'s conversational style — want me to default to
       {subject} more often?
+  # Sprint 5.24 — Companion Intelligence Integration. How often
+  # voice/pipeline.py's CommunicationPipeline runs PatternRecognizer.
+  # run_detection_pass()/RecommendationEngine.generate_recommendations()
+  # as real, recurring TaskScheduler jobs. Daily-scale by default — far
+  # longer than scheduler.poll_interval_seconds, since neither needs to
+  # run often.
+  pattern_detection_interval_seconds: 86400.0
+  recommendation_generation_interval_seconds: 86400.0

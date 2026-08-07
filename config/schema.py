@@ -1421,6 +1421,65 @@ class WellnessConfig:
 
 
 @dataclass
+class PlanningConfig:
+    """Planning Engine settings (Sprint 6.1 — Planning Engine, Level 6
+    Part A: Autonomous Intelligence & Cognitive Architecture).
+
+    max_milestones_per_goal/max_tasks_per_milestone are defensive upper
+    bounds on PlanningEngine.decompose_goal()'s own LLM output, not
+    product requirements — a decomposition that returns more is
+    truncated (logged once, not per-item) rather than silently accepted
+    or treated as an error, the same "defensive bound enforced at the
+    parse boundary" discipline WellnessConfig.max_postponements_before_
+    hard_limit/AnalyticsConfig.top_applications_limit already establish
+    for their own respective LLM/data-driven surfaces.
+
+    decomposition_timeout_seconds is this class's own dedicated per-call
+    timeout, deliberately longer than ModelConfig.ollama_timeout_seconds'
+    own 10.0s default — goal decomposition is a larger, more open-ended
+    generation (potentially several milestones, each with several tasks)
+    than Intent Detection/Context Analysis's short, fixed-line-count
+    answers, the same "a longer generation needs a longer timeout"
+    reasoning internet/summarizer.py's own Summarizer already applied
+    for research summarization.
+
+    max_task_dependencies (Sprint 6.2 — Task Graph) is a defensive upper
+    bound on incoming TaskEdges per task — how many prerequisites a
+    single Task may have — preventing a pathological or LLM-hallucinated
+    dependency explosion from ever being accepted by
+    TaskGraph.add_dependency(), the same "defensive bound enforced at
+    the write boundary" discipline max_milestones_per_goal/
+    max_tasks_per_milestone above already establish.
+    """
+
+    max_milestones_per_goal: int = 5
+    max_tasks_per_milestone: int = 8
+    decomposition_timeout_seconds: float = 45.0
+    max_task_dependencies: int = 20
+
+
+@dataclass
+class ContextEngineConfig:
+    """Context Engine settings (Sprint 6.3 — Context Engine, Level 6
+    Part A).
+
+    memory_lookback_count mirrors ContextManager's own recent_turn_window
+    shape (Sprint 2.8) — how many recent MemoryRecords ContextEngine.
+    build() includes, passed straight through to MemoryStore.recent()'s
+    own existing limit parameter.
+
+    usage_lookback_hours/calendar_lookahead_hours bound how far back
+    "current apps" and how far ahead "upcoming" respectively reach —
+    real, disclosed, unvalidated first-pass windows, the same tuned-
+    constant caveat every comparable default in this codebase carries.
+    """
+
+    memory_lookback_count: int = 10
+    usage_lookback_hours: float = 4.0
+    calendar_lookahead_hours: float = 24.0
+
+
+@dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
     never the whole AppConfig (see Architecture Notes in sprint_1_2.md)."""
@@ -1442,6 +1501,8 @@ class AppConfig:
     analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
     wellness: WellnessConfig = field(default_factory=WellnessConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
+    context_engine: ContextEngineConfig = field(default_factory=ContextEngineConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -1462,6 +1523,8 @@ class AppConfig:
         self._validate_analytics()
         self._validate_wellness()
         self._validate_learning()
+        self._validate_planning()
+        self._validate_context_engine()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -2238,4 +2301,44 @@ class AppConfig:
             raise ConfigError(
                 "learning.recommendation_generation_interval_seconds must be positive, got "
                 f"{learning_config.recommendation_generation_interval_seconds}"
+            )
+
+    def _validate_planning(self) -> None:
+        p = self.planning
+        if p.max_milestones_per_goal <= 0:
+            raise ConfigError(
+                "planning.max_milestones_per_goal must be positive, got "
+                f"{p.max_milestones_per_goal}"
+            )
+        if p.max_tasks_per_milestone <= 0:
+            raise ConfigError(
+                "planning.max_tasks_per_milestone must be positive, got "
+                f"{p.max_tasks_per_milestone}"
+            )
+        if p.decomposition_timeout_seconds <= 0:
+            raise ConfigError(
+                "planning.decomposition_timeout_seconds must be positive, got "
+                f"{p.decomposition_timeout_seconds}"
+            )
+        if p.max_task_dependencies <= 0:
+            raise ConfigError(
+                f"planning.max_task_dependencies must be positive, got {p.max_task_dependencies}"
+            )
+
+    def _validate_context_engine(self) -> None:
+        c = self.context_engine
+        if c.memory_lookback_count <= 0:
+            raise ConfigError(
+                f"context_engine.memory_lookback_count must be positive, got "
+                f"{c.memory_lookback_count}"
+            )
+        if c.usage_lookback_hours <= 0:
+            raise ConfigError(
+                f"context_engine.usage_lookback_hours must be positive, got "
+                f"{c.usage_lookback_hours}"
+            )
+        if c.calendar_lookahead_hours <= 0:
+            raise ConfigError(
+                "context_engine.calendar_lookahead_hours must be positive, got "
+                f"{c.calendar_lookahead_hours}"
             )

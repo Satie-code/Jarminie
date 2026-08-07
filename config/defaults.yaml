@@ -657,3 +657,30 @@ learning:
   # run often.
   pattern_detection_interval_seconds: 86400.0
   recommendation_generation_interval_seconds: 86400.0
+
+planning:
+  # Sprint 6.1 — Planning Engine, Level 6 Part A (Autonomous Intelligence
+  # & Cognitive Architecture). Defensive upper bounds on
+  # PlanningEngine.decompose_goal()'s own LLM output, not product
+  # requirements — an over-long decomposition is truncated, not rejected.
+  max_milestones_per_goal: 5
+  max_tasks_per_milestone: 8
+  # Deliberately longer than models.ollama_timeout_seconds' own 10s
+  # default — goal decomposition is a larger, more open-ended generation
+  # than Intent Detection/Context Analysis's short, fixed-line-count
+  # answers.
+  decomposition_timeout_seconds: 45.0
+  # Sprint 6.2 — Task Graph. A defensive upper bound on incoming
+  # TaskEdges per task (how many prerequisites a single task may have),
+  # enforced by TaskGraph.add_dependency() — not a product requirement.
+  max_task_dependencies: 20
+
+context_engine:
+  # Sprint 6.3 — Context Engine, Level 6 Part A. How many recent
+  # MemoryRecords ContextEngine.build() includes, mirroring
+  # ContextManager's own recent_turn_window shape (Sprint 2.8).
+  memory_lookback_count: 10
+  # How far back counts as "current apps" / how far ahead counts as
+  # "upcoming" scheduled items — real, unvalidated first-pass windows.
+  usage_lookback_hours: 4.0
+  calendar_lookahead_hours: 24.0

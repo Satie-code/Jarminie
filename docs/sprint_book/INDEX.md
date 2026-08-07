@@ -10,7 +10,23 @@ Each sprint file lives at `docs/sprint_book/sprint_<level>_<index>.md`.
 
 ## Detail Status
 
-Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) was expanded to full detail on 2026-07-31**, per an explicit request now that Part A is frozen — see `sprint_4_14.md`–`sprint_4_20.md` and the "Level 4 Part B breakdown changes" note below. **Level 5 Part A (Emotional Intelligence & Presentation Layer) was expanded to full detail on 2026-08-02**, per an explicit request now that Level 4 is complete — see `sprint_5_1.md`–`sprint_5_16.md` and the "Level 5 breakdown changes" note below. **Level 5 Part B (Companion Intelligence) was expanded to full detail on 2026-08-04**, per an explicit request now that Part A is frozen — see `sprint_5_17.md`–`sprint_5_26.md` and the "Level 5 Part B breakdown changes" note below. **Level 6 remains at roadmap granularity only** — full per-sprint detail will be written once it becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+Per an explicit scoping decision (2026-07-11): **Level 1 sprints are fully specified** (all 16+ template sections). **Level 2 was expanded to full detail on 2026-07-16**, per an explicit request now that Level 1 is complete and released — see `sprint_2_1.md`–`sprint_2_14.md`. **Level 3 was expanded to full detail on 2026-07-18**, per an explicit request now that Level 2 is complete (pending only its outstanding manual real-hardware verification) — see `sprint_3_1.md`–`sprint_3_14.md` and the breakdown note below. **Level 4 Part A (Device Control & Workflow Automation) was expanded to full detail on 2026-07-20**, per an explicit request now that Level 3 is complete and released — see `sprint_4_1.md`–`sprint_4_13.md` and the "Level 4 breakdown changes" note below. **Level 4 Part B (Scheduler & Internet Agent) was expanded to full detail on 2026-07-31**, per an explicit request now that Part A is frozen — see `sprint_4_14.md`–`sprint_4_20.md` and the "Level 4 Part B breakdown changes" note below. **Level 5 Part A (Emotional Intelligence & Presentation Layer) was expanded to full detail on 2026-08-02**, per an explicit request now that Level 4 is complete — see `sprint_5_1.md`–`sprint_5_16.md` and the "Level 5 breakdown changes" note below. **Level 5 Part B (Companion Intelligence) was expanded to full detail on 2026-08-04**, per an explicit request now that Part A is frozen — see `sprint_5_17.md`–`sprint_5_26.md` and the "Level 5 Part B breakdown changes" note below. **Level 6 Part A (Autonomous Intelligence & Cognitive Architecture) was expanded to full detail on 2026-08-06**, per an explicit commissioning brief now that Level 5 is complete — see `sprint_6/sprint_6_1.md`–`sprint_6_15.md` and the "Level 6 breakdown changes" note below. **Level 6 Part B (Stabilization) remains at roadmap granularity only** — full per-sprint detail will be written once it becomes current, so technical design (classes/interfaces) reflects what came before rather than upfront speculation. Expand any sprint early on request.
+
+### Level 6 breakdown changes (2026-08-06)
+
+The commissioning brief for this expansion ("Generate the complete engineering Sprint Book for LEVEL 6 — Autonomous Intelligence, Cognitive Architecture & Proactive Assistance") described a Level 6 substantially different from the one already on this roadmap: `04_Master_Implementation_Plan.md`'s own locked spec names Level 6 as "Stabilization" (Phases 6.1–6.5: Performance, Reliability, Security, Documentation, Final Testing — preparing Version 1), and this file's own prior roadmap-granularity table (sprints 6.1–6.8) already reflected exactly that. Per `feedback_jarminei_workflow.md`'s "ask, don't assume" rule and `feedback_jarminei_autonomy_guardrails.md`'s "ask first before any change that alters the approved plan," this was surfaced via `AskUserQuestion` before any sprint file was written — mirroring the identical gate Level 5 Part A's own commissioning brief required (see the "Level 5 breakdown changes" note below).
+
+**The user chose the same Part A/Part B split every scope-expanding Level since Level 4 has already used**: **Part A — Autonomous Intelligence & Cognitive Architecture** (this expansion, sprints 6.1–6.15): Planning Engine, Task Graph, Context Engine, Reasoning Engine, Decision Engine v2, Knowledge Graph, Learning Engine v2, Proactive Assistant, Multi-Step Workflow Engine, Self Evaluation, Explainability Layer, Adaptive Prioritization, plus the now-standard Integration/Hardening/Freeze trio. **Part B — Stabilization** (the original roadmap content, renumbered 6.16–6.23 below, continuing this Level's own sprint-index sequence rather than restarting — the identical convention Level 5 Part B's 5.17–5.26 already established for itself): Performance, Reliability, Security, Documentation, Final Testing, unchanged in name and scope from the original roadmap-granularity plan, only renumbered.
+
+**`v1.0` ("Official JARMINEI Release," per [04_Master_Implementation_Plan.md](../04_Master_Implementation_Plan.md)) is not redefined by this split and is not tagged until both parts freeze** — identical discipline to `v0.4`'s and `v0.5`'s own two-part gating (see the Milestones table below).
+
+Three further design decisions, made explicitly during expansion rather than left implicit:
+
+1. **A real gap in the brief's own suggested sprint progression, found and corrected the same way `docs/sprint_book/INDEX.md`'s own "Level 3 breakdown changes" note already corrected an equivalent one**: the brief's "NEW CORE SYSTEMS" list names thirteen systems including "Self Evaluation," but its own suggested numbered progression (6.1 Planning Engine … 6.14 Testing & Freeze) has no corresponding slot for it at all. Resolved the same way the Level 3 gap was resolved — insert a real sprint (6.10) rather than silently drop a system the brief itself named. See [sprint_6/sprint_6_10.md](sprint_6/sprint_6_10.md)'s own Engineering Rationale.
+2. **Cross-System Coordination (the brief's own 13th named system) is deliberately not given its own component sprint or class** — it is realized as Sprint 6.13's own composition-root wiring, exactly as every prior Level's Integration sprint has already coordinated its own Level's subsystems without a dedicated "coordinator" class ever existing anywhere in this codebase. Building a standalone coordinator would itself be the tight coupling the brief's own "without tight coupling" instruction warns against. See [sprint_6/sprint_6_13.md](sprint_6/sprint_6_13.md)'s own Engineering Rationale.
+3. **Five new top-level packages are introduced**: `planning/` (6.1/6.2, extended 6.10), `context/` (6.3), `reasoning/` (6.4, extended 6.11), `knowledge/` (6.6), `proactive/` (6.8) — the same one-engine-one-folder reason `emotion/` (Sprint 1.1) and `presentation/` (Level 5 Part A) were each introduced. Recorded here as the point of decision, `backlog/technical_debt.md` entries deferred to Sprint 6.13 (Integration), the sprint that first makes each folder real. Three existing packages are extended rather than forked: `decision/` gains `decision_engine_v2.py` (6.5) and `adaptive_prioritizer.py` (6.12); `learning/` gains four new `PatternType` detectors (6.7); `workflow/` gains `task_graph_adapter.py`/`session_resumption.py` (6.9) — each sprint's own Engineering Rationale states explicitly why extension, not a new package, was the right call.
+
+No stop-and-ask gate beyond the Part A/Part B split itself was needed for this expansion — every architectural fork point encountered (new package vs. extend an existing one; how risk/confirmation gating should work; how the Explainability Layer relates to the existing `DecisionTrace` mechanism) had a clear textual or precedent-based answer, unlike Level 5 Part A's own renderer-technology question, which had none.
 
 ### Level 5 breakdown changes (2026-08-02)
 
@@ -231,18 +247,42 @@ See the "Level 5 breakdown changes (2026-08-02)" note above for why this table i
 | 5.25 | Error Handling & Recovery Hardening, Part B (Companion Intelligence) | reliability | 5.24 | Medium | [sprint_5_25.md](sprint_5/sprint_5_25.md) — **Complete** |
 | 5.26 | Integration Testing & Level Freeze (Part B) | level gate | 5.25 | Medium–High | [sprint_5_26.md](sprint_5/sprint_5_26.md) — **Complete** |
 
-## LEVEL 6 — Stabilization → Release v1.0
+## LEVEL 6 — Autonomous Intelligence & Cognitive Architecture / Stabilization → Release v1.0
+
+See the "Level 6 breakdown changes (2026-08-06)" note above for why this table is split into two Sprint Books, mirroring Level 4's and Level 5's own splits — Part A (below) is now fully specified; Part B remains at roadmap granularity, renumbered to continue this Level's own sprint-index sequence.
+
+### Part A — Autonomous Intelligence & Cognitive Architecture (fully specified 2026-08-06)
+
+| Sprint | Name                                                | Depends On                  | Complexity  | Detail                              |
+| ------ | ---------------------------------------------------- | ---------------------------- | ----------- | ------------------------------------ |
+| 6.1    | Planning Engine                                      | 3.1–3.6, Ollama runtime       | Medium      | [sprint_6_1.md](sprint_6/sprint_6_1.md) — **Complete** |
+| 6.2    | Task Graph                                           | 6.1, 3.1                     | Medium–High | [sprint_6_2.md](sprint_6/sprint_6_2.md) — **Complete** |
+| 6.3    | Context Engine                                       | 2.8, 3.1–3.9, 5.17/5.20, 4.14, 1.4 | Medium | [sprint_6_3.md](sprint_6/sprint_6_3.md) — **Complete** |
+| 6.4    | Reasoning Engine                                     | 6.1, 6.2, 6.3, Ollama runtime | Medium      | [sprint_6_4.md](sprint_6/sprint_6_4.md) |
+| 6.5    | Decision Engine v2                                   | 3.11, 4.7, 6.4, 3.10          | Medium–High | [sprint_6_5.md](sprint_6/sprint_6_5.md) |
+| 6.6    | Knowledge Graph                                      | 3.1, 6.1                     | Medium–High | [sprint_6_6.md](sprint_6/sprint_6_6.md) |
+| 6.7    | Learning Engine v2                                   | 5.17/5.20, 5.21, 5.23, 4.9, 6.6 (soft) | Medium | [sprint_6_7.md](sprint_6/sprint_6_7.md) |
+| 6.8    | Proactive Assistant                                  | 6.3, 6.5, 6.6, 6.7, 4.15, 3.10 | High       | [sprint_6_8.md](sprint_6/sprint_6_8.md) |
+| 6.9    | Multi-Step Workflow Engine                           | 4.9, 4.10, 4.2, 6.2, 6.5, 6.6, 6.3 | Medium–High | [sprint_6_9.md](sprint_6/sprint_6_9.md) |
+| 6.10   | Self Evaluation                                      | 6.2, 6.9, 6.4                | Medium      | [sprint_6_10.md](sprint_6/sprint_6_10.md) |
+| 6.11   | Explainability Layer                                 | 3.11, 6.4, 6.1, 6.2, 6.5, 6.10 | Medium     | [sprint_6_11.md](sprint_6/sprint_6_11.md) |
+| 6.12   | Adaptive Prioritization                              | 3.10, 6.5, 6.3, 6.8           | Medium–High | [sprint_6_12.md](sprint_6/sprint_6_12.md) |
+| 6.13   | Autonomous Intelligence Integration                  | 6.1–6.12, 2.12, 3.11, 5.24    | High        | [sprint_6_13.md](sprint_6/sprint_6_13.md) |
+| 6.14   | Error Handling & Recovery Hardening (Part A)         | 6.13                          | Medium      | [sprint_6_14.md](sprint_6/sprint_6_14.md) |
+| 6.15   | Integration Testing & Level Freeze (Part A)          | 6.14                          | Medium–High | [sprint_6_15.md](sprint_6/sprint_6_15.md) |
+
+### Part B — Stabilization (roadmap granularity only; renumbered — see "Level 6 breakdown changes" note above)
 
 | Sprint | Name                                               | Phase | Depends On | Complexity  |
 | ------ | -------------------------------------------------- | ----- | ---------- | ----------- |
-| 6.1    | Startup & Caching Optimization                     | 6.1   | all prior  | Medium      |
-| 6.2    | Async Background Task Audit                        | 6.1   | all prior  | Medium      |
-| 6.3    | Stress & Recovery Testing                          | 6.2   | all prior  | Medium–High |
-| 6.4    | Resource Protection & Fail-Gracefully Verification | 6.2   | 1.4, 4.6   | Medium      |
-| 6.5    | Permission & Encryption Audit                      | 6.3   | all prior  | Medium–High |
-| 6.6    | Privacy Verification                               | 6.3   | all prior  | Medium      |
-| 6.7    | Full Documentation Pass                            | 6.4   | all prior  | Low–Medium  |
-| 6.8    | Full Test Suite Pass (unit/integration/system/UAT) | 6.5   | all prior  | High        |
+| 6.16   | Startup & Caching Optimization                     | 6.1   | all prior  | Medium      |
+| 6.17   | Async Background Task Audit                        | 6.1   | all prior  | Medium      |
+| 6.18   | Stress & Recovery Testing                          | 6.2   | all prior  | Medium–High |
+| 6.19   | Resource Protection & Fail-Gracefully Verification | 6.2   | 1.4, 4.6, Level 6 Part A | Medium |
+| 6.20   | Permission & Encryption Audit                      | 6.3   | all prior  | Medium–High |
+| 6.21   | Privacy Verification                               | 6.3   | all prior, esp. Level 6 Part A's Knowledge Graph/Proactive Assistant | Medium |
+| 6.22   | Full Documentation Pass                            | 6.4   | all prior  | Low–Medium  |
+| 6.23   | Full Test Suite Pass (unit/integration/system/UAT) | 6.5   | all prior  | High        |
 
 ---
 
@@ -257,7 +297,8 @@ See the "Level 5 breakdown changes (2026-08-02)" note above for why this table i
 | 0.4     | 4.20         | Complete productivity assistant (gated on BOTH Part A/4.13 AND Part B/4.20 — corrected from the original `4.11`, which predates the Part A/B split) |
 | —       | 5.16         | Level 5 Part A complete (Emotional Intelligence & Presentation Layer) — not a semver tag; see `sprint_5_16.md`'s Purpose and the "Level 5 breakdown changes" note above |
 | 0.5     | 5.26         | Complete personal AI companion (gated on BOTH Part A/5.16 AND Part B/5.26 — corrected from the original `5.9`, which predates the Part A/B split, then from `5.23`, which predated Part B's own 2026-08-04 renumbering/expansion) |
-| 1.0     | 6.8          | Official JARMINEI Release                             |
+| —       | 6.15         | Level 6 Part A complete (Autonomous Intelligence & Cognitive Architecture) — not a semver tag; see `sprint_6/sprint_6_15.md`'s Purpose and the "Level 6 breakdown changes" note above |
+| 1.0     | 6.23         | Official JARMINEI Release (gated on BOTH Part A/6.15 AND Part B/6.23 — corrected from the original `6.8`, which predates the Part A/B split) |
 
 ## Recommendations (not part of the official roadmap — flagged separately per the Development Guide's constraints)
 

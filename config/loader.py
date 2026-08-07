@@ -17,6 +17,7 @@ from config.errors import ConfigError
 from config.schema import (
     AnalyticsConfig,
     AppConfig,
+    ContextEngineConfig,
     DatabaseConfig,
     DeviceControlConfig,
     EmotionConfig,
@@ -25,6 +26,7 @@ from config.schema import (
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
+    PlanningConfig,
     PresentationConfig,
     ResourceThresholds,
     SchedulerConfig,
@@ -63,6 +65,8 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "analytics": AnalyticsConfig,
     "wellness": WellnessConfig,
     "learning": LearningConfig,
+    "planning": PlanningConfig,
+    "context_engine": ContextEngineConfig,
 }
 
 

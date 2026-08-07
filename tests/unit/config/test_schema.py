@@ -5,12 +5,14 @@ import pytest
 from config.errors import ConfigError
 from config.schema import (
     AppConfig,
+    ContextEngineConfig,
     DatabaseConfig,
     DeviceControlConfig,
     EmotionConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
+    PlanningConfig,
     PresentationConfig,
     ResourceThresholds,
     UIConfig,
@@ -574,3 +576,62 @@ def test_minie_expression_thresholds_out_of_range_value_raises():
 
 def test_default_vtube_studio_config_is_valid():
     AppConfig(presentation=PresentationConfig()).validate()
+
+
+# --- planning (Sprint 6.1 — Planning Engine, Level 6 Part A) ---------------------------
+# Note: AnalyticsConfig/WellnessConfig/LearningConfig (Sprints 5.17-5.23) have no
+# validation test coverage anywhere in this suite — a real, pre-existing gap found while
+# adding this section, out of this sprint's own scope to backfill.
+
+
+def test_default_planning_config_is_valid():
+    AppConfig(planning=PlanningConfig()).validate()
+
+
+def test_non_positive_max_milestones_per_goal_raises():
+    config = AppConfig(planning=PlanningConfig(max_milestones_per_goal=0))
+    with pytest.raises(ConfigError, match="max_milestones_per_goal"):
+        config.validate()
+
+
+def test_non_positive_max_tasks_per_milestone_raises():
+    config = AppConfig(planning=PlanningConfig(max_tasks_per_milestone=0))
+    with pytest.raises(ConfigError, match="max_tasks_per_milestone"):
+        config.validate()
+
+
+def test_non_positive_decomposition_timeout_seconds_raises():
+    config = AppConfig(planning=PlanningConfig(decomposition_timeout_seconds=0.0))
+    with pytest.raises(ConfigError, match="decomposition_timeout_seconds"):
+        config.validate()
+
+
+def test_non_positive_max_task_dependencies_raises():
+    config = AppConfig(planning=PlanningConfig(max_task_dependencies=0))
+    with pytest.raises(ConfigError, match="max_task_dependencies"):
+        config.validate()
+
+
+# --- context_engine (Sprint 6.3 — Context Engine, Level 6 Part A) -----------------------
+
+
+def test_default_context_engine_config_is_valid():
+    AppConfig(context_engine=ContextEngineConfig()).validate()
+
+
+def test_non_positive_memory_lookback_count_raises():
+    config = AppConfig(context_engine=ContextEngineConfig(memory_lookback_count=0))
+    with pytest.raises(ConfigError, match="memory_lookback_count"):
+        config.validate()
+
+
+def test_non_positive_usage_lookback_hours_raises():
+    config = AppConfig(context_engine=ContextEngineConfig(usage_lookback_hours=0.0))
+    with pytest.raises(ConfigError, match="usage_lookback_hours"):
+        config.validate()
+
+
+def test_non_positive_calendar_lookahead_hours_raises():
+    config = AppConfig(context_engine=ContextEngineConfig(calendar_lookahead_hours=0.0))
+    with pytest.raises(ConfigError, match="calendar_lookahead_hours"):
+        config.validate()

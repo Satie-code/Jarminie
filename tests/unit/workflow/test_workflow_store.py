@@ -7,7 +7,7 @@ import pytest
 from config.schema import WorkflowConfig
 from database.sqlite_client import SqliteClient
 from device_control.action_engine import ActionType
-from workflow.workflow_model import WorkflowDefinition, WorkflowStep
+from workflow.workflow_model import WorkflowDefinition, WorkflowRun, WorkflowStep
 from workflow.workflow_store import WorkflowStore
 
 
@@ -194,6 +194,65 @@ def test_persistence_survives_close_and_reopen(tmp_path):
     assert fetched is not None
     assert fetched.name == definition.name
     assert len(fetched.steps) == len(definition.steps)
+
+
+# --- record_run()/list_run_history() (Sprint 6.7 — Learning Engine v2) -------------
+
+
+def test_record_run_is_reflected_in_list_run_history(store):
+    run_at = datetime(2026, 8, 9, 9, 0, 0, tzinfo=UTC)
+
+    store.record_run("wf-1", run_at)
+
+    history = store.list_run_history()
+    assert history == [WorkflowRun(workflow_id="wf-1", run_at=run_at)]
+
+
+def test_list_run_history_with_no_recorded_runs_returns_empty_list(store):
+    assert store.list_run_history() == []
+
+
+def test_record_run_can_be_called_multiple_times_for_the_same_workflow(store):
+    store.record_run("wf-1", datetime(2026, 8, 9, 9, 0, 0, tzinfo=UTC))
+    store.record_run("wf-1", datetime(2026, 8, 9, 10, 0, 0, tzinfo=UTC))
+    store.record_run("wf-2", datetime(2026, 8, 9, 11, 0, 0, tzinfo=UTC))
+
+    history = store.list_run_history()
+
+    assert len(history) == 3
+    assert sum(1 for run in history if run.workflow_id == "wf-1") == 2
+    assert sum(1 for run in history if run.workflow_id == "wf-2") == 1
+
+
+def test_run_history_survives_close_and_reopen(tmp_path):
+    db_path = str(tmp_path / "persist_runs.db")
+    run_at = datetime(2026, 8, 9, 9, 0, 0, tzinfo=UTC)
+
+    client1 = SqliteClient(db_path)
+    store1 = WorkflowStore(client1, WorkflowConfig())
+    store1.start()
+    store1.record_run("wf-1", run_at)
+    store1.stop()
+
+    client2 = SqliteClient(db_path)
+    store2 = WorkflowStore(client2, WorkflowConfig())
+    store2.start()
+    history = store2.list_run_history()
+    store2.stop()
+
+    assert history == [WorkflowRun(workflow_id="wf-1", run_at=run_at)]
+
+
+def test_list_run_history_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    store, client = _make_raising_store(tmp_path)
+    try:
+        store.record_run("wf-1", datetime(2026, 8, 9, 9, 0, 0, tzinfo=UTC))
+        client.raise_on_query = True
+
+        assert store.list_run_history() == []
+    finally:
+        client.raise_on_query = False
+        store.stop()
 
 
 # --- health_check() ------------------------------------------------------------------

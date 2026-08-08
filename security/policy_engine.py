@@ -69,6 +69,15 @@ _DEFAULT_RISK_LEVELS: dict[str, RiskLevel] = {
     "folder_delete": RiskLevel.HIGH,
     "system_command": RiskLevel.HIGH,
     "workflow_step": RiskLevel.HIGH,
+    # Sprint 6.9 (Multi-Step Workflow Engine) widened ActionType with
+    # OPEN_URL — this file is not in that sprint's own Files to Modify
+    # list, but a real, disclosed, necessary consequence of widening the
+    # enum: without an explicit entry here, test_policy_engine.py's own
+    # exhaustive test_every_action_type_has_a_default_risk_level_covered_
+    # by_this_test() would fail. LOW, matching launch_application's own
+    # precedent — "hand a URL to the OS's default handler" is the same
+    # risk class as launching a tracked executable.
+    "open_url": RiskLevel.LOW,
 }
 
 _FALLBACK_RISK_LEVEL = RiskLevel.MEDIUM

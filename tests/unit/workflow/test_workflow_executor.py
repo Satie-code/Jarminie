@@ -61,9 +61,13 @@ def make_definition(
 class FakeWorkflowStore:
     def __init__(self, definition: WorkflowDefinition | None) -> None:
         self._definition = definition
+        self.recorded_runs: list[tuple[str, datetime]] = []
 
     def get(self, workflow_id: str) -> WorkflowDefinition | None:
         return self._definition
+
+    def record_run(self, workflow_id: str, run_at: datetime) -> None:
+        self.recorded_runs.append((workflow_id, run_at))
 
 
 class FakeActionRegistry:
@@ -308,6 +312,98 @@ def test_nonexistent_workflow_id_degrades_to_reportable_abort_not_exception():
     assert result.whole_workflow_confirmation is None
     assert confirmation_service.requests == []
     assert registry.dispatched == []
+
+
+# --- Sprint 6.7 (Learning Engine v2): record_run() call site ------------------------
+
+
+def _make_executor_with_visible_workflow_store(
+    definition: WorkflowDefinition | None,
+    confirmation_outcome: ConfirmationOutcome = ConfirmationOutcome.CONFIRMED,
+) -> tuple[WorkflowExecutor, FakeWorkflowStore, FakeActionRegistry]:
+    workflow_store = FakeWorkflowStore(definition)
+    registry = FakeActionRegistry()
+    executor = WorkflowExecutor(
+        workflow_store=workflow_store,
+        action_registry=registry,
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=FakeConfirmationService(confirmation_outcome),
+        workflow_config=WorkflowConfig(),
+    )
+    return executor, workflow_store, registry
+
+
+def test_record_run_called_once_a_workflow_starts_executing():
+    steps = [make_step(i) for i in range(3)]
+    definition = make_definition(steps)
+    executor, workflow_store, _ = _make_executor_with_visible_workflow_store(definition)
+
+    result = executor.run("wf-1", BASE_CONTEXT)
+
+    assert workflow_store.recorded_runs == [("wf-1", result.started_at)]
+
+
+def test_record_run_not_called_for_a_disabled_workflow():
+    steps = [make_step(i) for i in range(3)]
+    definition = make_definition(steps, is_enabled=False)
+    executor, workflow_store, _ = _make_executor_with_visible_workflow_store(definition)
+
+    executor.run("wf-1", BASE_CONTEXT)
+
+    assert workflow_store.recorded_runs == []
+
+
+def test_record_run_not_called_for_a_nonexistent_workflow():
+    executor, workflow_store, _ = _make_executor_with_visible_workflow_store(definition=None)
+
+    executor.run("does-not-exist", BASE_CONTEXT)
+
+    assert workflow_store.recorded_runs == []
+
+
+def test_record_run_not_called_when_whole_workflow_confirmation_is_declined():
+    steps = [make_step(i) for i in range(5)]  # triggers the whole-workflow prompt
+    definition = make_definition(steps)
+    executor, workflow_store, _ = _make_executor_with_visible_workflow_store(
+        definition, confirmation_outcome=ConfirmationOutcome.DECLINED
+    )
+
+    executor.run("wf-1", BASE_CONTEXT)
+
+    assert workflow_store.recorded_runs == []
+
+
+class RaisingRecordRunWorkflowStore:
+    """A real, non-raising get() (the run must genuinely start) paired
+    with a record_run() that raises — proves a run-history recording
+    failure never aborts or affects the real workflow execution."""
+
+    def __init__(self, definition: WorkflowDefinition) -> None:
+        self._definition = definition
+
+    def get(self, workflow_id: str) -> WorkflowDefinition | None:
+        return self._definition
+
+    def record_run(self, workflow_id: str, run_at) -> None:
+        raise RuntimeError("record_run() exploded")
+
+
+def test_record_run_failure_does_not_abort_the_run():
+    steps = [make_step(i) for i in range(3)]
+    definition = make_definition(steps)
+    registry = FakeActionRegistry()
+    executor = WorkflowExecutor(
+        workflow_store=RaisingRecordRunWorkflowStore(definition),
+        action_registry=registry,
+        permission_policy_engine=PermissionPolicyEngine(SecurityConfig()),
+        confirmation_service=FakeConfirmationService(),
+        workflow_config=WorkflowConfig(),
+    )
+
+    result = executor.run("wf-1", BASE_CONTEXT)  # must not raise
+
+    assert result.aborted_early is False
+    assert len(registry.dispatched) == 3
 
 
 # --- Sprint 4.12 hardening (scenario d): internal faults never propagate ------------

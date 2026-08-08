@@ -37,7 +37,7 @@ from config.schema import WorkflowConfig
 from core.logging_setup import get_logger
 from database.sqlite_client import SqliteClient
 from device_control.action_engine import ActionType
-from workflow.workflow_model import WorkflowDefinition, WorkflowStep
+from workflow.workflow_model import WorkflowDefinition, WorkflowRun, WorkflowStep
 
 logger = get_logger(__name__)
 
@@ -63,6 +63,16 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
 )
 """
 
+_CREATE_WORKFLOW_RUNS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id TEXT NOT NULL,
+    run_at TEXT NOT NULL
+)
+"""
+"""Sprint 6.7 (Learning Engine v2) addition — see WorkflowRun's own
+docstring (workflow_model.py) for why this table exists at all."""
+
 
 class WorkflowStore:
     """Constructor DI: (sqlite_client, workflow_config)."""
@@ -76,6 +86,7 @@ class WorkflowStore:
         self._sqlite_client.connect()
         self._sqlite_client.execute(_CREATE_WORKFLOWS_TABLE_SQL)
         self._sqlite_client.execute(_CREATE_WORKFLOW_STEPS_TABLE_SQL)
+        self._sqlite_client.execute(_CREATE_WORKFLOW_RUNS_TABLE_SQL)
         self._started = True
         logger.info("Workflow store started.")
 
@@ -189,6 +200,36 @@ class WorkflowStore:
             (int(is_enabled), workflow_id),
         )
         return True
+
+    def record_run(self, workflow_id: str, run_at: datetime) -> None:
+        """Sprint 6.7 addition — see WorkflowRun's own docstring
+        (workflow_model.py). Deliberately left unwrapped at this level,
+        matching save()'s own "the write path stays unwrapped, the
+        caller wraps it" precedent — workflow_executor.py's own call
+        site is what guards this, so a run-history recording failure
+        never risks a false impression that a real workflow execution
+        itself failed."""
+        self._sqlite_client.execute(
+            "INSERT INTO workflow_runs (workflow_id, run_at) VALUES (?, ?)",
+            (workflow_id, run_at.isoformat()),
+        )
+
+    def list_run_history(self) -> list[WorkflowRun]:
+        """Sprint 6.7 addition, given a real caller immediately
+        (learning/pattern_recognizer.py's detect_preferred_workflows()) —
+        hardened the same way list_all() already is: a SQLite failure
+        degrades to an empty list rather than raising, so a broken
+        run-history read never breaks pattern detection, only starves it
+        of evidence for one pass."""
+        try:
+            rows = self._sqlite_client.query("SELECT workflow_id, run_at FROM workflow_runs")
+            return [
+                WorkflowRun(workflow_id=row[0], run_at=datetime.fromisoformat(row[1]))
+                for row in rows
+            ]
+        except Exception:
+            logger.exception("Failed to list workflow run history.")
+            return []
 
     def _build_definition(self, row: tuple) -> WorkflowDefinition:
         workflow_id, name, created_by, created_at, is_enabled = row

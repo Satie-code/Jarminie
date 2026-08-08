@@ -258,12 +258,12 @@ See the "Level 6 breakdown changes (2026-08-06)" note above for why this table i
 | 6.1    | Planning Engine                                      | 3.1–3.6, Ollama runtime       | Medium      | [sprint_6_1.md](sprint_6/sprint_6_1.md) — **Complete** |
 | 6.2    | Task Graph                                           | 6.1, 3.1                     | Medium–High | [sprint_6_2.md](sprint_6/sprint_6_2.md) — **Complete** |
 | 6.3    | Context Engine                                       | 2.8, 3.1–3.9, 5.17/5.20, 4.14, 1.4 | Medium | [sprint_6_3.md](sprint_6/sprint_6_3.md) — **Complete** |
-| 6.4    | Reasoning Engine                                     | 6.1, 6.2, 6.3, Ollama runtime | Medium      | [sprint_6_4.md](sprint_6/sprint_6_4.md) |
-| 6.5    | Decision Engine v2                                   | 3.11, 4.7, 6.4, 3.10          | Medium–High | [sprint_6_5.md](sprint_6/sprint_6_5.md) |
-| 6.6    | Knowledge Graph                                      | 3.1, 6.1                     | Medium–High | [sprint_6_6.md](sprint_6/sprint_6_6.md) |
-| 6.7    | Learning Engine v2                                   | 5.17/5.20, 5.21, 5.23, 4.9, 6.6 (soft) | Medium | [sprint_6_7.md](sprint_6/sprint_6_7.md) |
-| 6.8    | Proactive Assistant                                  | 6.3, 6.5, 6.6, 6.7, 4.15, 3.10 | High       | [sprint_6_8.md](sprint_6/sprint_6_8.md) |
-| 6.9    | Multi-Step Workflow Engine                           | 4.9, 4.10, 4.2, 6.2, 6.5, 6.6, 6.3 | Medium–High | [sprint_6_9.md](sprint_6/sprint_6_9.md) |
+| 6.4    | Reasoning Engine                                     | 6.1, 6.2, 6.3, Ollama runtime | Medium      | [sprint_6_4.md](sprint_6/sprint_6_4.md) — **Complete** |
+| 6.5    | Decision Engine v2                                   | 3.11, 4.7, 6.4, 3.10          | Medium–High | [sprint_6_5.md](sprint_6/sprint_6_5.md) — **Complete** |
+| 6.6    | Knowledge Graph                                      | 3.1, 6.1                     | Medium–High | [sprint_6_6.md](sprint_6/sprint_6_6.md) — **Complete** |
+| 6.7    | Learning Engine v2                                   | 5.17/5.20, 5.21, 5.23, 4.9, 6.6 (soft) | Medium | [sprint_6_7.md](sprint_6/sprint_6_7.md) — **Complete** |
+| 6.8    | Proactive Assistant                                  | 6.3, 6.5, 6.6, 6.7, 4.15, 3.10 | High       | [sprint_6_8.md](sprint_6/sprint_6_8.md) — **Complete** |
+| 6.9    | Multi-Step Workflow Engine                           | 4.9, 4.10, 4.2, 6.2, 6.5, 6.6, 6.3 | Medium–High | [sprint_6_9.md](sprint_6/sprint_6_9.md) — **Complete** |
 | 6.10   | Self Evaluation                                      | 6.2, 6.9, 6.4                | Medium      | [sprint_6_10.md](sprint_6/sprint_6_10.md) |
 | 6.11   | Explainability Layer                                 | 3.11, 6.4, 6.1, 6.2, 6.5, 6.10 | Medium     | [sprint_6_11.md](sprint_6/sprint_6_11.md) |
 | 6.12   | Adaptive Prioritization                              | 3.10, 6.5, 6.3, 6.8           | Medium–High | [sprint_6_12.md](sprint_6/sprint_6_12.md) |

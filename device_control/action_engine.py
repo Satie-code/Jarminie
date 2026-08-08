@@ -53,7 +53,12 @@ would be pointless and noisy, per this sprint's own Acceptance Criteria."""
 
 class ActionType(Enum):
     """Every concrete action Sprints 4.2-4.10 implement, declared once
-    here so no executor invents its own ad hoc type strings."""
+    here so no executor invents its own ad hoc type strings. OPEN_URL
+    (Sprint 6.9 — Multi-Step Workflow Engine, Level 6 Part A) widens this
+    deliberately closed-by-design enum for a genuine capability gap:
+    ApplicationManager.launch() calls subprocess.Popen() directly, which
+    cannot open a bare URL the way it can an executable — see
+    device_control/application_manager.py's own open_url() docstring."""
 
     LAUNCH_APPLICATION = "launch_application"
     CLOSE_APPLICATION = "close_application"
@@ -71,6 +76,7 @@ class ActionType(Enum):
     WINDOW_CLOSE = "window_close"
     SYSTEM_COMMAND = "system_command"
     WORKFLOW_STEP = "workflow_step"
+    OPEN_URL = "open_url"
 
 
 class ActionStatus(Enum):

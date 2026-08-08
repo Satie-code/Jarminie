@@ -43,7 +43,7 @@ try:
 except Exception:
     pass
 
-import sys
+import sys  # noqa: I001 — must stay after the prewarm block above, not sorted into it
 from dataclasses import dataclass, replace
 
 from analytics.dashboard_data import AnalyticsDashboardService
@@ -95,7 +95,7 @@ from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.memory_store import LazyMemoryStore, MemoryStore, MemoryStoreProtocol
 from memory.persona_scoped_memory import PersonaScopedMemory
 from memory.retrieval_engine import MemoryRetrievalEngine
-from memory.short_term_memory import ShortTermMemory 
+from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager

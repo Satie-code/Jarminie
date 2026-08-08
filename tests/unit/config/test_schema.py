@@ -7,13 +7,18 @@ from config.schema import (
     AppConfig,
     ContextEngineConfig,
     DatabaseConfig,
+    DecisionEngineConfig,
     DeviceControlConfig,
     EmotionConfig,
+    KnowledgeGraphConfig,
+    LearningConfig,
     LoggingConfig,
     MemoryConfig,
     ModelConfig,
     PlanningConfig,
     PresentationConfig,
+    ProactiveConfig,
+    ReasoningConfig,
     ResourceThresholds,
     RuntimeConfig,
     UIConfig,
@@ -293,6 +298,23 @@ def test_blank_allowed_file_roots_entry_raises():
         config.validate()
 
 
+def test_default_allowed_url_schemes_is_valid():
+    AppConfig().validate()
+    assert AppConfig().device_control.allowed_url_schemes == ["https", "http"]
+
+
+def test_empty_allowed_url_schemes_raises():
+    config = AppConfig(device_control=DeviceControlConfig(allowed_url_schemes=[]))
+    with pytest.raises(ConfigError, match="allowed_url_schemes"):
+        config.validate()
+
+
+def test_blank_allowed_url_schemes_entry_raises():
+    config = AppConfig(device_control=DeviceControlConfig(allowed_url_schemes=["https", "  "]))
+    with pytest.raises(ConfigError, match="allowed_url_schemes"):
+        config.validate()
+
+
 # --- WorkflowConfig (Sprint 4.10 additions) ----------------------------------------
 
 
@@ -307,6 +329,12 @@ def test_blank_large_workflow_confirmation_prompt_template_raises():
         workflow=WorkflowConfig(large_workflow_confirmation_prompt_template="   ")
     )
     with pytest.raises(ConfigError, match="large_workflow_confirmation_prompt_template"):
+        config.validate()
+
+
+def test_non_positive_max_steps_from_task_graph_raises():
+    config = AppConfig(workflow=WorkflowConfig(max_steps_from_task_graph=0))
+    with pytest.raises(ConfigError, match="max_steps_from_task_graph"):
         config.validate()
 
 
@@ -635,6 +663,180 @@ def test_non_positive_usage_lookback_hours_raises():
 def test_non_positive_calendar_lookahead_hours_raises():
     config = AppConfig(context_engine=ContextEngineConfig(calendar_lookahead_hours=0.0))
     with pytest.raises(ConfigError, match="calendar_lookahead_hours"):
+        config.validate()
+
+
+# --- reasoning (Sprint 6.4 — Reasoning Engine, Level 6 Part A) ---------------------------
+
+
+def test_default_reasoning_config_is_valid():
+    AppConfig(reasoning=ReasoningConfig()).validate()
+
+
+def test_non_positive_max_alternatives_raises():
+    config = AppConfig(reasoning=ReasoningConfig(max_alternatives=0))
+    with pytest.raises(ConfigError, match="max_alternatives"):
+        config.validate()
+
+
+def test_non_positive_reasoning_timeout_seconds_raises():
+    config = AppConfig(reasoning=ReasoningConfig(reasoning_timeout_seconds=0.0))
+    with pytest.raises(ConfigError, match="reasoning_timeout_seconds"):
+        config.validate()
+
+
+# --- decision_engine_v2 (Sprint 6.5 — Decision Engine v2, Level 6 Part A) ----------------
+
+
+def test_default_decision_engine_config_is_valid():
+    AppConfig(decision_engine_v2=DecisionEngineConfig()).validate()
+
+
+def test_decision_engine_weights_not_summing_to_one_raises():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(
+            risk_weight=0.5, confidence_weight=0.5, priority_weight=0.5
+        )
+    )
+    with pytest.raises(ConfigError, match="must sum to 1.0"):
+        config.validate()
+
+
+def test_decision_engine_weights_summing_to_one_within_tolerance_is_valid():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(
+            risk_weight=0.4, confidence_weight=0.35, priority_weight=0.25000001
+        )
+    )
+    config.validate()
+
+
+def test_decision_engine_weight_below_zero_raises():
+    config = AppConfig(decision_engine_v2=DecisionEngineConfig(risk_weight=-0.1))
+    with pytest.raises(ConfigError, match="risk_weight"):
+        config.validate()
+
+
+def test_decision_engine_weight_above_one_raises():
+    config = AppConfig(decision_engine_v2=DecisionEngineConfig(confidence_weight=1.5))
+    with pytest.raises(ConfigError, match="confidence_weight"):
+        config.validate()
+
+
+# --- knowledge_graph (Sprint 6.6 — Knowledge Graph, Level 6 Part A) ----------------------
+
+
+def test_default_knowledge_graph_config_is_valid():
+    AppConfig(knowledge_graph=KnowledgeGraphConfig()).validate()
+
+
+def test_non_positive_max_traversal_depth_raises():
+    config = AppConfig(knowledge_graph=KnowledgeGraphConfig(max_traversal_depth=0))
+    with pytest.raises(ConfigError, match="max_traversal_depth"):
+        config.validate()
+
+
+def test_non_positive_max_relationships_per_entity_raises():
+    config = AppConfig(knowledge_graph=KnowledgeGraphConfig(max_relationships_per_entity=0))
+    with pytest.raises(ConfigError, match="max_relationships_per_entity"):
+        config.validate()
+
+
+# --- learning, Sprint 6.7 additions only (Learning Engine v2, Level 6 Part A) ------------
+# Note: LearningConfig's pre-existing (Sprint 5.21/5.23) fields have no validation test
+# coverage anywhere in this suite — a real, pre-existing gap (see item 73's own disclosure
+# of this same gap for AnalyticsConfig/WellnessConfig/LearningConfig), out of this sprint's
+# own scope to backfill; only the four fields this sprint actually added are covered here.
+
+
+def test_default_learning_config_is_valid():
+    AppConfig(learning=LearningConfig()).validate()
+
+
+def test_non_positive_preferred_workflow_min_runs_raises():
+    config = AppConfig(learning=LearningConfig(preferred_workflow_min_runs=0))
+    with pytest.raises(ConfigError, match="preferred_workflow_min_runs"):
+        config.validate()
+
+
+def test_non_positive_preferred_tool_min_sessions_raises():
+    config = AppConfig(learning=LearningConfig(preferred_tool_min_sessions=0))
+    with pytest.raises(ConfigError, match="preferred_tool_min_sessions"):
+        config.validate()
+
+
+def test_non_positive_daily_routine_min_days_raises():
+    config = AppConfig(learning=LearningConfig(daily_routine_min_days=0))
+    with pytest.raises(ConfigError, match="daily_routine_min_days"):
+        config.validate()
+
+
+def test_non_positive_study_schedule_min_sessions_raises():
+    config = AppConfig(learning=LearningConfig(study_schedule_min_sessions=0))
+    with pytest.raises(ConfigError, match="study_schedule_min_sessions"):
+        config.validate()
+
+
+# --- proactive (Sprint 6.8 — Proactive Assistant, Level 6 Part A) -----------------------
+
+
+def test_default_proactive_config_is_valid():
+    AppConfig(proactive=ProactiveConfig()).validate()
+
+
+def test_non_positive_evaluation_interval_seconds_raises():
+    config = AppConfig(proactive=ProactiveConfig(evaluation_interval_seconds=0.0))
+    with pytest.raises(ConfigError, match="evaluation_interval_seconds"):
+        config.validate()
+
+
+def test_non_positive_deadline_warning_hours_raises():
+    config = AppConfig(proactive=ProactiveConfig(deadline_warning_hours=0.0))
+    with pytest.raises(ConfigError, match="deadline_warning_hours"):
+        config.validate()
+
+
+def test_battery_critical_percent_out_of_range_raises():
+    config = AppConfig(proactive=ProactiveConfig(battery_critical_percent=0.0))
+    with pytest.raises(ConfigError, match="battery_critical_percent"):
+        config.validate()
+
+
+def test_non_positive_long_session_hours_raises():
+    config = AppConfig(proactive=ProactiveConfig(long_session_hours=0.0))
+    with pytest.raises(ConfigError, match="long_session_hours"):
+        config.validate()
+
+
+def test_missed_meal_window_start_hour_out_of_range_raises():
+    config = AppConfig(proactive=ProactiveConfig(missed_meal_window_start_hour=24))
+    with pytest.raises(ConfigError, match="missed_meal_window_start_hour"):
+        config.validate()
+
+
+def test_missed_meal_window_end_hour_out_of_range_raises():
+    config = AppConfig(proactive=ProactiveConfig(missed_meal_window_end_hour=-1))
+    with pytest.raises(ConfigError, match="missed_meal_window_end_hour"):
+        config.validate()
+
+
+def test_missed_meal_window_end_hour_before_start_hour_raises():
+    config = AppConfig(
+        proactive=ProactiveConfig(missed_meal_window_start_hour=14, missed_meal_window_end_hour=12)
+    )
+    with pytest.raises(ConfigError, match="missed_meal_window_end_hour"):
+        config.validate()
+
+
+def test_non_positive_project_inactivity_days_raises():
+    config = AppConfig(proactive=ProactiveConfig(project_inactivity_days=0))
+    with pytest.raises(ConfigError, match="project_inactivity_days"):
+        config.validate()
+
+
+def test_non_positive_trigger_cooldown_seconds_raises():
+    config = AppConfig(proactive=ProactiveConfig(trigger_cooldown_seconds=0.0))
+    with pytest.raises(ConfigError, match="trigger_cooldown_seconds"):
         config.validate()
 
 

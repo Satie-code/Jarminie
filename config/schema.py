@@ -373,6 +373,25 @@ class DeviceControlConfig:
     TrackedApplication.readiness_confirmed=False, still ActionStatus.
     SUCCEEDED (the process DID spawn) — see device_control/
     application_manager.py's own docstring.
+
+    allowed_url_schemes (Sprint 6.9 — Multi-Step Workflow Engine) is
+    ApplicationManager.open_url()'s own explicit scheme allowlist —
+    webbrowser.open() itself performs no scheme validation, so this is
+    the only real safety boundary between a malformed/malicious URL and
+    the OS's default handler. This sprint's own Files to Modify text
+    named `WorkflowConfig` as this field's home, but ApplicationManager
+    is constructed with only DeviceControlConfig (never WorkflowConfig)
+    — placing it there instead is a disclosed correction, not a literal
+    reading, since the alternative would require widening
+    ApplicationManager's own constructor signature and rippling into
+    main.py's existing, unauthorized-by-this-sprint construction call.
+    Typed list[str], not tuple[str, ...] as that same sprint text
+    literally wrote — every other list-shaped field in this codebase
+    (approved_commands, allowed_file_roots, resource_gate_action_types,
+    hard_denylist) is list[str], because YAML deserializes to a real
+    list and config/loader.py performs no tuple coercion; a tuple-typed
+    field would silently hold a list once loaded from defaults.yaml
+    anyway, a real, disclosed inconsistency this correction avoids.
     """
 
     application_allowlist: list[str] | None = None
@@ -388,6 +407,7 @@ class DeviceControlConfig:
     audit_log_retention_days: int = 90
     max_retry_attempts: int = 2
     application_launch_readiness_check_seconds: float = 0.5
+    allowed_url_schemes: list[str] = field(default_factory=lambda: ["https", "http"])
 
 
 _VALID_RISK_LEVEL_VALUES: frozenset[str] = frozenset({"low", "medium", "high"})
@@ -446,6 +466,13 @@ class WorkflowConfig:
     workflow/workflow_executor.py's own docstring for why this is a
     distinct question from Sprint 4.7's per-step confirmation, not a
     duplicate of it.
+
+    max_steps_from_task_graph (Sprint 6.9 — Multi-Step Workflow Engine) is
+    a defensive bound on TaskGraphWorkflowAdapter.build_workflow()'s own
+    translation of TaskGraph.ready_tasks() into WorkflowSteps — mirrors
+    PlanningConfig's own "bounding, not requiring" shape: a pathologically
+    large TaskGraph should never silently produce an unreviewable giant
+    workflow.
     """
 
     max_steps_per_workflow: int = 20
@@ -454,6 +481,7 @@ class WorkflowConfig:
         "This workflow '{name}' will run {step_count} actions, including "
         "{high_risk_count} higher-risk steps. Should I proceed?"
     )
+    max_steps_from_task_graph: int = 15
 
 
 @dataclass
@@ -1171,6 +1199,10 @@ _LEARNING_PATTERN_TYPES: tuple[str, ...] = (
     "frequent_application",
     "work_habit",
     "conversation_style",
+    "preferred_workflow",
+    "preferred_tool",
+    "daily_routine",
+    "study_schedule",
 )
 
 
@@ -1198,6 +1230,18 @@ def _default_recommendation_templates() -> dict[str, str]:
         "conversation_style": (
             "You seem to engage more with {subject}'s conversational style — want me to "
             "default to {subject} more often?"
+        ),
+        "preferred_workflow": (
+            "You often run the '{subject}' workflow — want me to suggest it more proactively?"
+        ),
+        "preferred_tool": (
+            "You often use {subject} for focused work — want me to treat it as a preferred tool?"
+        ),
+        "daily_routine": (
+            "You seem to have a daily routine around {subject} — want me to build around it?"
+        ),
+        "study_schedule": (
+            "You typically study or work around {subject} — want me to protect that time?"
         ),
     }
 
@@ -1257,6 +1301,20 @@ class LearningConfig:
     the same reasoning SchedulerConfig.maintenance_interval_seconds's own
     docstring already gives for its own much-longer-than-poll_interval_
     seconds default.
+
+    preferred_workflow_min_runs/preferred_tool_min_sessions/
+    daily_routine_min_days/study_schedule_min_sessions (Sprint 6.7 —
+    Learning Engine v2, Level 6 Part A) are the four new detectors' own
+    evidence thresholds, each dedicated rather than reusing
+    pattern_min_occurrences directly — mirroring conversation_style_min_
+    records's own precedent of a detector-specific evidence gate. All
+    four detectors still additionally require pattern_min_days worth of
+    distinct-day evidence (PatternRecognizer._clears_both_gates()),
+    except daily_routine_min_days itself, which REPLACES pattern_min_days
+    as detect_daily_routine()'s own day-count gate — deliberately a
+    stricter bar (5 vs. 3 by default) than "preferred time" needs, since
+    a genuine daily routine is a stronger claim than a merely-preferred
+    time-of-day.
     """
 
     pattern_min_occurrences: int = 5
@@ -1269,6 +1327,10 @@ class LearningConfig:
     )
     pattern_detection_interval_seconds: float = 86400.0
     recommendation_generation_interval_seconds: float = 86400.0
+    preferred_workflow_min_runs: int = 3
+    preferred_tool_min_sessions: int = 5
+    daily_routine_min_days: int = 5
+    study_schedule_min_sessions: int = 4
 
 
 # WellnessTriggerType's five values (wellness/wellness_model.py), duplicated
@@ -1480,6 +1542,111 @@ class ContextEngineConfig:
 
 
 @dataclass
+class ReasoningConfig:
+    """Reasoning Engine settings (Sprint 6.4 — Reasoning Engine, Level 6
+    Part A).
+
+    max_alternatives is a defensive upper bound on ReasoningEngine.
+    alternatives()'s own LLM output, not a product requirement — the
+    same "defensive bound enforced at the parse boundary" discipline
+    PlanningConfig.max_milestones_per_goal/ContextEngineConfig's own
+    lookback fields already establish for their respective LLM/data-
+    driven surfaces.
+
+    reasoning_timeout_seconds is this class's own dedicated per-call
+    timeout, deliberately longer than ModelConfig.ollama_timeout_seconds'
+    own 10.0s default, mirroring PlanningConfig.decomposition_timeout_
+    seconds' identical "a longer, more open-ended generation needs a
+    longer timeout" reasoning.
+    """
+
+    max_alternatives: int = 3
+    reasoning_timeout_seconds: float = 30.0
+
+
+@dataclass
+class DecisionEngineConfig:
+    """Decision Engine v2 settings (Sprint 6.5 — Decision Engine v2,
+    Level 6 Part A).
+
+    risk_weight/confidence_weight/priority_weight are DecisionEngineV2.
+    rank_actions()'s own composite-score blend weights and must sum to
+    1.0 — the same validation pattern MemoryConfig's five Dynamic Memory
+    Formula weights (Sprint 3.5) and its retrieval_similarity_weight/
+    retrieval_confidence_weight pair (Sprint 3.9) already establish. This
+    sprint's own text cited EmotionConfig as the precedent instead, but
+    EmotionConfig has no weight-sum validation anywhere in this
+    codebase — a disclosed correction, following the real, existing
+    pattern rather than the sprint file's own inaccurate citation.
+
+    Real, disclosed, unvalidated first-pass defaults — a candidate for
+    adjustment once Sprint 6.15's real-usage verification pass observes
+    actual ranking behavior, per this sprint's own Potential Risks.
+    """
+
+    risk_weight: float = 0.4
+    confidence_weight: float = 0.35
+    priority_weight: float = 0.25
+
+
+@dataclass
+class KnowledgeGraphConfig:
+    """Knowledge Graph settings (Sprint 6.6 — Knowledge Graph, Level 6
+    Part A).
+
+    max_traversal_depth is a defensive upper bound on KnowledgeGraphStore.
+    related_entities()'s own breadth-first traversal, not a product
+    requirement — a caller requesting a deeper walk is silently clamped,
+    never rejected, the same "defensive bound enforced at the read
+    boundary" discipline PlanningConfig.max_task_dependencies established
+    at the write boundary. An unbounded graph walk over user-authored
+    data is a real, if unlikely, performance/DoS-shaped risk even purely
+    locally.
+
+    max_relationships_per_entity bounds how many relationship rows may
+    touch a single entity (as either endpoint) before
+    KnowledgeGraphStore.add_relationship() raises TooManyRelationshipsError
+    — see that method's own docstring for why both endpoints are checked.
+    """
+
+    max_traversal_depth: int = 3
+    max_relationships_per_entity: int = 50
+
+
+@dataclass
+class ProactiveConfig:
+    """Proactive Assistant settings (Sprint 6.8 — Proactive Assistant,
+    Level 6 Part A).
+
+    evaluation_interval_seconds is deliberately coarser than Wellness's
+    own idle_check_interval_seconds — proactive triggers are, by design,
+    lower-frequency/higher-deliberation than wellness prompts.
+
+    missed_meal_window_start_hour/missed_meal_window_end_hour bound a
+    single, configurable lunch window — a dinner-window pair is a
+    plausible future addition, not built without a named second window
+    in this brief.
+
+    trigger_cooldown_seconds is the shared per-ProactiveTriggerType
+    dedup window — a fired trigger will not re-fire for this long,
+    regardless of whether its own condition is still true.
+
+    All defaults are real, disclosed, unvalidated first-pass guesses —
+    the same tuned-constant caveat every comparable default in this
+    codebase carries.
+    """
+
+    evaluation_interval_seconds: float = 300.0
+    deadline_warning_hours: float = 24.0
+    battery_critical_percent: float = 15.0
+    long_session_hours: float = 3.0
+    missed_meal_window_start_hour: int = 12
+    missed_meal_window_end_hour: int = 14
+    project_inactivity_days: int = 7
+    trigger_cooldown_seconds: float = 3600.0
+
+
+@dataclass
 class RuntimeConfig:
     """Runtime Manager settings (Runtime Phase 9 — Runtime Refactor
     Sprint). Governs idle-timeout eviction for the currently-lazy
@@ -1526,6 +1693,10 @@ class AppConfig:
     learning: LearningConfig = field(default_factory=LearningConfig)
     planning: PlanningConfig = field(default_factory=PlanningConfig)
     context_engine: ContextEngineConfig = field(default_factory=ContextEngineConfig)
+    reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
+    decision_engine_v2: DecisionEngineConfig = field(default_factory=DecisionEngineConfig)
+    knowledge_graph: KnowledgeGraphConfig = field(default_factory=KnowledgeGraphConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     def validate(self) -> None:
@@ -1549,6 +1720,10 @@ class AppConfig:
         self._validate_learning()
         self._validate_planning()
         self._validate_context_engine()
+        self._validate_reasoning()
+        self._validate_decision_engine_v2()
+        self._validate_knowledge_graph()
+        self._validate_proactive()
         self._validate_runtime()
 
     def _validate_resources(self) -> None:
@@ -1799,6 +1974,13 @@ class AppConfig:
                 "device_control.application_launch_readiness_check_seconds must be positive, "
                 f"got {self.device_control.application_launch_readiness_check_seconds}"
             )
+        if not self.device_control.allowed_url_schemes:
+            raise ConfigError("device_control.allowed_url_schemes must not be empty")
+        for scheme in self.device_control.allowed_url_schemes:
+            if not scheme or not scheme.strip():
+                raise ConfigError(
+                    "device_control.allowed_url_schemes must not contain empty strings"
+                )
 
     def _validate_security(self) -> None:
         for action_type_key, risk_level_value in self.security.risk_policies.items():
@@ -1832,6 +2014,11 @@ class AppConfig:
         if not self.workflow.large_workflow_confirmation_prompt_template.strip():
             raise ConfigError(
                 "workflow.large_workflow_confirmation_prompt_template must not be blank"
+            )
+        if self.workflow.max_steps_from_task_graph <= 0:
+            raise ConfigError(
+                "workflow.max_steps_from_task_graph must be positive, "
+                f"got {self.workflow.max_steps_from_task_graph}"
             )
 
     def _validate_scheduler(self) -> None:
@@ -2327,6 +2514,26 @@ class AppConfig:
                 "learning.recommendation_generation_interval_seconds must be positive, got "
                 f"{learning_config.recommendation_generation_interval_seconds}"
             )
+        if learning_config.preferred_workflow_min_runs <= 0:
+            raise ConfigError(
+                "learning.preferred_workflow_min_runs must be positive, got "
+                f"{learning_config.preferred_workflow_min_runs}"
+            )
+        if learning_config.preferred_tool_min_sessions <= 0:
+            raise ConfigError(
+                "learning.preferred_tool_min_sessions must be positive, got "
+                f"{learning_config.preferred_tool_min_sessions}"
+            )
+        if learning_config.daily_routine_min_days <= 0:
+            raise ConfigError(
+                "learning.daily_routine_min_days must be positive, got "
+                f"{learning_config.daily_routine_min_days}"
+            )
+        if learning_config.study_schedule_min_sessions <= 0:
+            raise ConfigError(
+                "learning.study_schedule_min_sessions must be positive, got "
+                f"{learning_config.study_schedule_min_sessions}"
+            )
 
     def _validate_planning(self) -> None:
         p = self.planning
@@ -2366,6 +2573,95 @@ class AppConfig:
             raise ConfigError(
                 "context_engine.calendar_lookahead_hours must be positive, got "
                 f"{c.calendar_lookahead_hours}"
+            )
+
+    def _validate_reasoning(self) -> None:
+        r = self.reasoning
+        if r.max_alternatives <= 0:
+            raise ConfigError(
+                f"reasoning.max_alternatives must be positive, got {r.max_alternatives}"
+            )
+        if r.reasoning_timeout_seconds <= 0:
+            raise ConfigError(
+                "reasoning.reasoning_timeout_seconds must be positive, got "
+                f"{r.reasoning_timeout_seconds}"
+            )
+
+    def _validate_decision_engine_v2(self) -> None:
+        weights = {
+            "risk_weight": self.decision_engine_v2.risk_weight,
+            "confidence_weight": self.decision_engine_v2.confidence_weight,
+            "priority_weight": self.decision_engine_v2.priority_weight,
+        }
+        for name, value in weights.items():
+            if not (0 <= value <= 1):
+                raise ConfigError(f"decision_engine_v2.{name} must be in [0, 1], got {value}")
+        weight_sum = sum(weights.values())
+        if abs(weight_sum - 1.0) > 1e-6:
+            raise ConfigError(
+                "decision_engine_v2's three composite-score weights (risk_weight, "
+                f"confidence_weight, priority_weight) must sum to 1.0, got {weight_sum}"
+            )
+
+    def _validate_knowledge_graph(self) -> None:
+        k = self.knowledge_graph
+        if k.max_traversal_depth <= 0:
+            raise ConfigError(
+                f"knowledge_graph.max_traversal_depth must be positive, got "
+                f"{k.max_traversal_depth}"
+            )
+        if k.max_relationships_per_entity <= 0:
+            raise ConfigError(
+                "knowledge_graph.max_relationships_per_entity must be positive, got "
+                f"{k.max_relationships_per_entity}"
+            )
+
+    def _validate_proactive(self) -> None:
+        p = self.proactive
+        if p.evaluation_interval_seconds <= 0:
+            raise ConfigError(
+                "proactive.evaluation_interval_seconds must be positive, got "
+                f"{p.evaluation_interval_seconds}"
+            )
+        if p.deadline_warning_hours <= 0:
+            raise ConfigError(
+                f"proactive.deadline_warning_hours must be positive, got "
+                f"{p.deadline_warning_hours}"
+            )
+        if not (0 < p.battery_critical_percent <= 100):
+            raise ConfigError(
+                "proactive.battery_critical_percent must be in (0, 100], got "
+                f"{p.battery_critical_percent}"
+            )
+        if p.long_session_hours <= 0:
+            raise ConfigError(
+                f"proactive.long_session_hours must be positive, got {p.long_session_hours}"
+            )
+        if not (0 <= p.missed_meal_window_start_hour <= 23):
+            raise ConfigError(
+                "proactive.missed_meal_window_start_hour must be in [0, 23], got "
+                f"{p.missed_meal_window_start_hour}"
+            )
+        if not (0 <= p.missed_meal_window_end_hour <= 23):
+            raise ConfigError(
+                "proactive.missed_meal_window_end_hour must be in [0, 23], got "
+                f"{p.missed_meal_window_end_hour}"
+            )
+        if p.missed_meal_window_end_hour <= p.missed_meal_window_start_hour:
+            raise ConfigError(
+                "proactive.missed_meal_window_end_hour must be after "
+                "missed_meal_window_start_hour, got "
+                f"{p.missed_meal_window_end_hour} <= {p.missed_meal_window_start_hour}"
+            )
+        if p.project_inactivity_days <= 0:
+            raise ConfigError(
+                "proactive.project_inactivity_days must be positive, got "
+                f"{p.project_inactivity_days}"
+            )
+        if p.trigger_cooldown_seconds <= 0:
+            raise ConfigError(
+                "proactive.trigger_cooldown_seconds must be positive, got "
+                f"{p.trigger_cooldown_seconds}"
             )
 
     def _validate_runtime(self) -> None:

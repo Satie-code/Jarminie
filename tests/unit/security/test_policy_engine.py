@@ -23,6 +23,7 @@ _EXPECTED_DEFAULTS: dict[ActionType, RiskLevel] = {
     ActionType.FOLDER_DELETE: RiskLevel.HIGH,
     ActionType.SYSTEM_COMMAND: RiskLevel.HIGH,
     ActionType.WORKFLOW_STEP: RiskLevel.HIGH,
+    ActionType.OPEN_URL: RiskLevel.LOW,  # Sprint 6.9 — Multi-Step Workflow Engine
 }
 
 

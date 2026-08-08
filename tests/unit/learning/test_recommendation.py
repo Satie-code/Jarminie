@@ -82,6 +82,42 @@ def test_generate_recommendations_formats_conversation_style():
     assert "jarvis" in recommendations[0].text
 
 
+def test_generate_recommendations_formats_preferred_workflow():
+    engine = _engine([_pattern(PatternType.PREFERRED_WORKFLOW, "wf-1")])
+
+    recommendations = engine.generate_recommendations()
+
+    assert len(recommendations) == 1
+    assert "wf-1" in recommendations[0].text
+
+
+def test_generate_recommendations_formats_preferred_tool():
+    engine = _engine([_pattern(PatternType.PREFERRED_TOOL, "code.exe")])
+
+    recommendations = engine.generate_recommendations()
+
+    assert len(recommendations) == 1
+    assert "code.exe" in recommendations[0].text
+
+
+def test_generate_recommendations_formats_daily_routine():
+    engine = _engine([_pattern(PatternType.DAILY_ROUTINE, "09-11")])
+
+    recommendations = engine.generate_recommendations()
+
+    assert len(recommendations) == 1
+    assert "09-11" in recommendations[0].text
+
+
+def test_generate_recommendations_formats_study_schedule():
+    engine = _engine([_pattern(PatternType.STUDY_SCHEDULE, "20-22")])
+
+    recommendations = engine.generate_recommendations()
+
+    assert len(recommendations) == 1
+    assert "20-22" in recommendations[0].text
+
+
 def test_generate_recommendations_sets_based_on_pattern_id():
     pattern = _pattern(PatternType.FREQUENT_APPLICATION, "code.exe")
     engine = _engine([pattern])

@@ -178,6 +178,13 @@ device_control:
   # post-launch liveness check — see config/schema.py's DeviceControlConfig
   # docstring.
   application_launch_readiness_check_seconds: 0.5
+  # Sprint 6.9 — Multi-Step Workflow Engine, Level 6 Part A.
+  # ApplicationManager.open_url()'s own explicit scheme allowlist —
+  # webbrowser.open() performs no scheme validation itself, so this is
+  # the only real safety boundary. Deliberately minimal, not permissive.
+  allowed_url_schemes:
+    - "https"
+    - "http"
 
 security:
   # Sprint 4.7 — Permission & Confirmation System. Empty: every
@@ -203,6 +210,10 @@ workflow:
   large_workflow_confirmation_prompt_template: >-
     This workflow '{name}' will run {step_count} actions, including
     {high_risk_count} higher-risk steps. Should I proceed?
+  # Sprint 6.9 — Multi-Step Workflow Engine, Level 6 Part A. A defensive
+  # bound on TaskGraphWorkflowAdapter.build_workflow()'s own translation
+  # of TaskGraph.ready_tasks() into WorkflowSteps.
+  max_steps_from_task_graph: 15
 
 scheduler:
   # Sprint 4.14 — Calendar & Deadlines Store. A defensive, unvalidated
@@ -649,6 +660,14 @@ learning:
     conversation_style: >-
       You seem to engage more with {subject}'s conversational style — want me to default to
       {subject} more often?
+    preferred_workflow: >-
+      You often run the '{subject}' workflow — want me to suggest it more proactively?
+    preferred_tool: >-
+      You often use {subject} for focused work — want me to treat it as a preferred tool?
+    daily_routine: >-
+      You seem to have a daily routine around {subject} — want me to build around it?
+    study_schedule: >-
+      You typically study or work around {subject} — want me to protect that time?
   # Sprint 5.24 — Companion Intelligence Integration. How often
   # voice/pipeline.py's CommunicationPipeline runs PatternRecognizer.
   # run_detection_pass()/RecommendationEngine.generate_recommendations()
@@ -657,6 +676,14 @@ learning:
   # run often.
   pattern_detection_interval_seconds: 86400.0
   recommendation_generation_interval_seconds: 86400.0
+  # Sprint 6.7 — Learning Engine v2, Level 6 Part A. The four new
+  # detectors' own evidence thresholds — see LearningConfig's own
+  # docstring for why daily_routine_min_days replaces (rather than adds
+  # to) pattern_min_days as detect_daily_routine()'s own day-count gate.
+  preferred_workflow_min_runs: 3
+  preferred_tool_min_sessions: 5
+  daily_routine_min_days: 5
+  study_schedule_min_sessions: 4
 
 planning:
   # Sprint 6.1 — Planning Engine, Level 6 Part A (Autonomous Intelligence
@@ -684,6 +711,52 @@ context_engine:
   # "upcoming" scheduled items — real, unvalidated first-pass windows.
   usage_lookback_hours: 4.0
   calendar_lookahead_hours: 24.0
+
+reasoning:
+  # Sprint 6.4 — Reasoning Engine, Level 6 Part A. A defensive upper bound
+  # on ReasoningEngine.alternatives()'s own LLM output, not a product
+  # requirement — an over-long list is truncated, not rejected.
+  max_alternatives: 3
+  # Deliberately longer than models.ollama_timeout_seconds' own 10s
+  # default, mirroring planning.decomposition_timeout_seconds' identical
+  # "a longer, more open-ended generation needs a longer timeout" reasoning.
+  reasoning_timeout_seconds: 30.0
+
+decision_engine_v2:
+  # Sprint 6.5 — Decision Engine v2, Level 6 Part A. The three composite-
+  # score blend weights DecisionEngineV2.rank_actions() uses — must sum
+  # to 1.0 (config/loader.py enforces this at load time). Real,
+  # unvalidated first-pass defaults.
+  risk_weight: 0.4
+  confidence_weight: 0.35
+  priority_weight: 0.25
+
+knowledge_graph:
+  # Sprint 6.6 — Knowledge Graph, Level 6 Part A. A defensive upper bound
+  # on KnowledgeGraphStore.related_entities()'s own breadth-first
+  # traversal — a caller requesting a deeper walk is silently clamped,
+  # never rejected.
+  max_traversal_depth: 3
+  # How many relationship rows may touch a single entity (as either
+  # endpoint) before add_relationship() raises TooManyRelationshipsError.
+  max_relationships_per_entity: 50
+
+proactive:
+  # Sprint 6.8 — Proactive Assistant, Level 6 Part A. Deliberately
+  # coarser than wellness.idle_check_interval_seconds — proactive
+  # triggers are, by design, lower-frequency/higher-deliberation than
+  # wellness prompts.
+  evaluation_interval_seconds: 300.0
+  deadline_warning_hours: 24.0
+  battery_critical_percent: 15.0
+  long_session_hours: 3.0
+  # A single, configurable lunch window — not a hardcoded assumption.
+  missed_meal_window_start_hour: 12
+  missed_meal_window_end_hour: 14
+  project_inactivity_days: 7
+  # A fired trigger will not re-fire for this long, regardless of
+  # whether its own condition is still true.
+  trigger_cooldown_seconds: 3600.0
 
 runtime:
   # Runtime Phase 9 — Runtime Refactor Sprint. How long an idle

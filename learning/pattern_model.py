@@ -18,17 +18,23 @@ from uuid import uuid4
 
 
 class PatternType(Enum):
-    """The three detection categories Sprint 5.21 built plus
+    """The three detection categories Sprint 5.21 built, plus
     CONVERSATION_STYLE (Sprint 5.23 — Preference Learning &
-    Recommendations, learning/preference_learner.py's PreferenceLearner).
-    Part 2's own "Common workflows" remains a real, disclosed, not-yet-
-    built Future Consideration (see pattern_recognizer.py's own module
-    docstring)."""
+    Recommendations, learning/preference_learner.py's PreferenceLearner),
+    plus four more (Sprint 6.7 — Learning Engine v2, Level 6 Part A):
+    PREFERRED_WORKFLOW/PREFERRED_TOOL/DAILY_ROUTINE/STUDY_SCHEDULE, all
+    four detected by learning/pattern_recognizer.py's own PatternRecognizer
+    (unlike CONVERSATION_STYLE, which stays PreferenceLearner's alone).
+    Part 2's own "Common workflows" is now realized as PREFERRED_WORKFLOW."""
 
     PREFERRED_TIME = "preferred_time"
     FREQUENT_APPLICATION = "frequent_application"
     WORK_HABIT = "work_habit"
     CONVERSATION_STYLE = "conversation_style"
+    PREFERRED_WORKFLOW = "preferred_workflow"
+    PREFERRED_TOOL = "preferred_tool"
+    DAILY_ROUTINE = "daily_routine"
+    STUDY_SCHEDULE = "study_schedule"
 
 
 @dataclass

@@ -20,6 +20,20 @@ once Popen() itself succeeds (the process DID spawn — reporting FAILED
 would be dishonest); the distinction lives in TrackedApplication's own
 new readiness_confirmed field, which ActionAuditLog (Sprint 4.8) also
 now surfaces in its parameters_summary.
+
+open_url() (Sprint 6.9 — Multi-Step Workflow Engine, Level 6 Part A) is
+a genuine, new capability, not something launch() already silently
+covers: launch()'s own subprocess.Popen([executable_path, *args]) spawns
+an executable — Windows cannot Popen a bare URL the way it can an .exe.
+Uses Python's standard webbrowser.open(), never a shell/cmd invocation,
+avoiding any command-injection-shaped risk for what is fundamentally
+"hand a URL to the OS's default handler." webbrowser.open() itself
+performs no scheme validation — device_control_config.allowed_url_schemes
+is the only real safety boundary between a malformed/malicious URL and
+the OS's default handler, checked here before ever calling it. Unlike
+launch(), there is nothing to track (no process spawned, no PID), so
+open_url() returns a real ActionResult directly rather than a
+TrackedApplication needing a separate _handle_*() wrapper to convert.
 """
 
 from __future__ import annotations
@@ -28,6 +42,8 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlparse
+from webbrowser import open as open_browser
 
 import psutil
 import pywintypes
@@ -37,6 +53,7 @@ import win32process
 from config.schema import DeviceControlConfig
 from core.logging_setup import get_logger
 from device_control.action_engine import (
+    ActionContext,
     ActionRequest,
     ActionResult,
     ActionStatus,
@@ -45,7 +62,9 @@ from device_control.action_engine import (
 
 logger = get_logger(__name__)
 
-_HANDLED_TYPES = frozenset({ActionType.LAUNCH_APPLICATION, ActionType.CLOSE_APPLICATION})
+_HANDLED_TYPES = frozenset(
+    {ActionType.LAUNCH_APPLICATION, ActionType.CLOSE_APPLICATION, ActionType.OPEN_URL}
+)
 _PROCESS_TERMINATE_TIMEOUT_SECONDS = 5
 _READINESS_POLL_INTERVAL_SECONDS = 0.05
 
@@ -99,6 +118,8 @@ class ApplicationManager:
         return action_type in _HANDLED_TYPES
 
     def execute(self, request: ActionRequest) -> ActionResult:
+        if request.action_type is ActionType.OPEN_URL:
+            return self._handle_open_url(request)
         operation = request.parameters.get("operation")
         try:
             if operation == "launch":
@@ -171,6 +192,52 @@ class ApplicationManager:
                 return False
             time.sleep(_READINESS_POLL_INTERVAL_SECONDS)
         return process.poll() is None
+
+    def open_url(self, url: str, requested_by: str) -> ActionResult:
+        """Validates url's scheme against device_control_config.
+        allowed_url_schemes (rejecting, as ActionStatus.FAILED, anything
+        else — never raises for a bad scheme, matching every other
+        executor's own "a bad request is a FAILED result, not an
+        exception" convention), then webbrowser.open(url). A direct-call
+        convenience method (mirroring launch()'s own independently-
+        callable precedent) — constructs its own ActionRequest for the
+        returned ActionResult.request, since there is no original
+        ActionRequest to preserve when called this way, unlike
+        execute()'s own _handle_open_url() below."""
+        request = ActionRequest(
+            action_type=ActionType.OPEN_URL,
+            parameters={"url": url},
+            context=ActionContext(requested_by=requested_by),
+            requested_at=datetime.now(UTC),
+        )
+        return self._open_url_result(url, request)
+
+    def _open_url_result(self, url: str, request: ActionRequest) -> ActionResult:
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in self._config.allowed_url_schemes:
+            logger.warning("Refused to open URL with disallowed scheme %r: %s", scheme, url)
+            return ActionResult(
+                request=request,
+                status=ActionStatus.FAILED,
+                completed_at=datetime.now(UTC),
+                error_message=f"URL scheme {scheme!r} is not in allowed_url_schemes.",
+            )
+        open_browser(url)
+        logger.info("Opened URL: %s", url)
+        return ActionResult(
+            request=request, status=ActionStatus.SUCCEEDED, completed_at=datetime.now(UTC)
+        )
+
+    def _handle_open_url(self, request: ActionRequest) -> ActionResult:
+        url = request.parameters.get("url")
+        if not url:
+            return ActionResult(
+                request=request,
+                status=ActionStatus.FAILED,
+                completed_at=datetime.now(UTC),
+                error_message="Missing required parameter: url",
+            )
+        return self._open_url_result(url, request)
 
     def close(self, process_id: int) -> bool:
         """False if process_id isn't tracked by this manager — refuses

@@ -57,3 +57,21 @@ class WorkflowDefinition:
     created_by: str
     created_at: datetime
     is_enabled: bool = True
+
+
+@dataclass
+class WorkflowRun:
+    """One recorded execution start of a saved WorkflowDefinition — added
+    at Sprint 6.7 (Learning Engine v2, Level 6 Part A) as the real data
+    source learning/pattern_recognizer.py's detect_preferred_workflows()
+    needs (that sprint's own text assumed a WorkflowStore.list_run_history()
+    already existed; it did not — no run-history mechanism existed
+    anywhere in this codebase before this addition). Recorded by
+    WorkflowExecutor.run() once a run gets past existence/enabled/whole-
+    workflow-confirmation gating — not on every call, since a rejected-
+    at-the-door attempt was never genuinely "run" by the user's own
+    intent, and would otherwise inflate a workflow's own apparent
+    popularity with attempts that never actually executed."""
+
+    workflow_id: str
+    run_at: datetime

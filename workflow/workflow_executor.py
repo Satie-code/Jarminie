@@ -188,6 +188,23 @@ class WorkflowExecutor:
             )
             return self._aborted_result(workflow_id, run_id, started_at, confirmation_outcome)
 
+        # Sprint 6.7 (Learning Engine v2) — records this run for
+        # learning/pattern_recognizer.py's detect_preferred_workflows(),
+        # only once the workflow has genuinely started (past existence/
+        # enabled/whole-workflow-confirmation gating), never for a
+        # rejected-at-the-door attempt. Narrowly guarded, matching this
+        # method's own Sprint 4.12 "individually guarded internal call
+        # sites" discipline — a run-history recording failure must never
+        # abort or appear to fail the real workflow execution itself.
+        try:
+            self._workflow_store.record_run(workflow_id, started_at)
+        except Exception:
+            logger.exception(
+                "WorkflowExecutor.run(): workflow_store.record_run(%s) raised an "
+                "unexpected internal fault; continuing the run without recording it.",
+                workflow_id,
+            )
+
         step_results: list[WorkflowStepResult] = []
         aborted_early = False
         for step in definition.steps:

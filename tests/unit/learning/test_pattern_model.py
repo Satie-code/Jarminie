@@ -5,12 +5,18 @@ from datetime import UTC, datetime
 from learning.pattern_model import LearnedPattern, PatternType
 
 
-def test_pattern_type_has_four_named_categories():
+def test_pattern_type_has_eight_named_categories():
+    """Widened at Sprint 6.7 (Learning Engine v2, Level 6 Part A) from
+    the original four."""
     assert {t.value for t in PatternType} == {
         "preferred_time",
         "frequent_application",
         "work_habit",
         "conversation_style",
+        "preferred_workflow",
+        "preferred_tool",
+        "daily_routine",
+        "study_schedule",
     }
 
 

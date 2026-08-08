@@ -12,8 +12,9 @@ import numpy as np
 import pytest
 
 from config.schema import ModelConfig
+from core.module_registry import ServiceState
 from voice.errors import TextToSpeechError
-from voice.text_to_speech import CoquiTextToSpeech
+from voice.text_to_speech import CoquiTextToSpeech, LazyTextToSpeech
 
 
 @pytest.fixture
@@ -227,3 +228,119 @@ def test_restart_after_a_failed_load_retries_cleanly(model_config, fake_audio_ou
 
     tts_cls.assert_called_once()
     assert tts_engine.health_check() is True
+
+
+# --- Runtime Phase 5 (Runtime Refactor Sprint) — LazyModule Protocol ---
+
+
+def test_state_is_not_loaded_before_start(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+
+    assert tts_engine.state() is ServiceState.NOT_LOADED
+
+
+def test_state_is_ready_after_start(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS") as tts_cls:
+        tts_cls.return_value = _fake_tts()
+        tts_engine.start()
+
+    assert tts_engine.state() is ServiceState.READY
+
+
+def test_state_is_not_loaded_after_stop(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS") as tts_cls:
+        tts_cls.return_value = _fake_tts()
+        tts_engine.start()
+    tts_engine.stop()
+
+    assert tts_engine.state() is ServiceState.NOT_LOADED
+
+
+def test_state_is_active_during_a_real_speak_call(model_config, fake_audio_output):
+    """Never a valid eviction target for Runtime Phase 9's idle-unload
+    sweep — proven by checking state() from inside the mocked model's own
+    tts() call, the one moment real synthesis is in flight."""
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    fake_tts = _fake_tts()
+    observed_state = []
+
+    def _record_state_and_return(*args, **kwargs):
+        observed_state.append(tts_engine.state())
+        return [0.1, -0.2, 0.3]
+
+    fake_tts.tts.side_effect = _record_state_and_return
+    with patch("TTS.api.TTS", return_value=fake_tts):
+        tts_engine.start()
+
+    tts_engine.speak("hello", "p225")
+
+    assert observed_state == [ServiceState.ACTIVE]
+    assert tts_engine.state() is ServiceState.READY
+
+
+def test_last_used_at_is_none_before_any_speak(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+
+    assert tts_engine.last_used_at() is None
+
+
+def test_last_used_at_is_set_after_a_real_speak_call(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+    with patch("TTS.api.TTS", return_value=_fake_tts()):
+        tts_engine.start()
+
+    tts_engine.speak("hello", "p225")
+
+    assert tts_engine.last_used_at() is not None
+
+
+def test_mark_idle_timeout_stores_the_configured_value(model_config, fake_audio_output):
+    tts_engine = CoquiTextToSpeech(model_config, fake_audio_output)
+
+    tts_engine.mark_idle_timeout(600.0)
+
+    assert tts_engine._idle_timeout_seconds == 600.0
+
+
+class _FakeRuntimeManager:
+    def __init__(self) -> None:
+        self.ensure_started_calls: list[str] = []
+
+    def ensure_started(self, name: str) -> None:
+        self.ensure_started_calls.append(name)
+
+
+def test_lazy_text_to_speech_calls_ensure_started_before_delegating():
+    real_tts = MagicMock()
+    runtime_manager = _FakeRuntimeManager()
+    lazy_tts = LazyTextToSpeech(real_tts, "text_to_speech", runtime_manager)
+
+    lazy_tts.speak("hello", "p225", on_audio_ready=None)
+
+    assert runtime_manager.ensure_started_calls == ["text_to_speech"]
+    real_tts.speak.assert_called_once_with("hello", "p225", None)
+
+
+def test_lazy_text_to_speech_does_not_load_the_real_model_until_speak_is_called(
+    model_config, fake_audio_output
+):
+    """The actual Runtime Phase 5 guarantee, exercised end-to-end through
+    the real CoquiTextToSpeech + a real RuntimeManager registration, not
+    just a fake: TTS.api.TTS() must not be called merely because the lazy
+    proxy exists — only once speak() actually runs."""
+    from core.runtime_manager import RuntimeManager, ServiceTier
+
+    real_tts = CoquiTextToSpeech(model_config, fake_audio_output)
+    runtime_manager = RuntimeManager()
+    runtime_manager.register("text_to_speech", real_tts, ServiceTier.WARM, lazy=True)
+    lazy_tts = LazyTextToSpeech(real_tts, "text_to_speech", runtime_manager)
+
+    with patch("TTS.api.TTS") as tts_cls:
+        tts_cls.return_value = _fake_tts()
+        assert tts_cls.called is False
+
+        lazy_tts.speak("hello", "p225")
+
+        tts_cls.assert_called_once()

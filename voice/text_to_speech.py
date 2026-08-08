@@ -33,10 +33,13 @@ Gracefully) — a presentation-layer failure must not silence JARMINEI.
 """
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 
 from config.schema import ModelConfig
 from core.logging_setup import get_logger
+from core.module_registry import ServiceState
+from core.runtime_manager import RuntimeManager
 from voice.errors import TextToSpeechError
 
 logger = get_logger(__name__)
@@ -90,6 +93,12 @@ class CoquiTextToSpeech:
         self._tts = None
         self._known_speakers: list[str] = []
         self._healthy = False
+        # Runtime Phase 5 (Runtime Refactor Sprint) — LazyModule Protocol
+        # additions (core/module_registry.py). See voice/speech_to_text.py's
+        # WhisperSpeechToText for the identical reasoning, mirrored here.
+        self._active = False
+        self._last_used_at: datetime | None = None
+        self._idle_timeout_seconds: float | None = None
 
     def start(self) -> None:
         """Load the configured Coqui model. Safe to call again without an
@@ -130,6 +139,29 @@ class CoquiTextToSpeech:
         (scenario b) and MicrophoneManager."""
         return self._tts is not None and self._healthy
 
+    def state(self) -> ServiceState:
+        """LazyModule Protocol (Runtime Phase 5). NOT_LOADED before
+        start()/after stop(); ACTIVE while a real speak() call is in
+        flight (never a valid eviction target for Runtime Phase 9); READY
+        once loaded and idle."""
+        if self._tts is None:
+            return ServiceState.NOT_LOADED
+        if self._active:
+            return ServiceState.ACTIVE
+        return ServiceState.READY
+
+    def last_used_at(self) -> datetime | None:
+        """LazyModule Protocol (Runtime Phase 5) — Runtime Phase 9's own
+        idle-timeout sweep is the real reader; None until the first real
+        speak() call."""
+        return self._last_used_at
+
+    def mark_idle_timeout(self, seconds: float) -> None:
+        """LazyModule Protocol (Runtime Phase 5) — stored for Runtime
+        Phase 9's idle-timeout sweep to read; nothing in this class acts
+        on it yet."""
+        self._idle_timeout_seconds = seconds
+
     def speak(
         self,
         text: str,
@@ -148,6 +180,8 @@ class CoquiTextToSpeech:
         if self._known_speakers and voice_id not in self._known_speakers:
             raise TextToSpeechError(f"Unrecognized voice_id: {voice_id!r}")
 
+        self._active = True
+        self._last_used_at = datetime.now(UTC)
         logger.debug(
             "Synthesizing speech for voice_id=%s: %s", voice_id, text, extra={"sensitive": True}
         )
@@ -155,6 +189,7 @@ class CoquiTextToSpeech:
             samples = self._tts.tts(text=text, speaker=voice_id)
         except Exception as exc:
             self._healthy = False
+            self._active = False
             logger.exception("Coqui TTS synthesis failed.")
             raise TextToSpeechError("Failed to synthesize speech.") from exc
 
@@ -173,6 +208,40 @@ class CoquiTextToSpeech:
             self._output.play(audio_bytes, sample_rate_hz)
         except Exception as exc:
             self._healthy = False
+            self._active = False
             logger.exception("Audio playback failed.")
             raise TextToSpeechError("Failed to play synthesized speech.") from exc
         self._healthy = True
+        self._active = False
+
+
+class LazyTextToSpeech:
+    """TextToSpeech implementation that defers to a real, already-
+    registered LazyModule (CoquiTextToSpeech in production), calling
+    RuntimeManager.ensure_started() before every speak() so the real
+    model load happens on first genuine use — or whenever a background
+    warm-up thread gets to it first (Runtime Phase 4) — rather than at
+    CoreManager startup time.
+
+    See voice/speech_to_text.py's LazySpeechToText for the identical
+    reasoning, mirrored here for TTS. Owns no resource of its own — not a
+    ManagedModule; real_tts is main.py's own CoquiTextToSpeech instance,
+    the one actually registered with CoreManager/RuntimeManager under
+    service_name.
+    """
+
+    def __init__(
+        self, real_tts: TextToSpeech, service_name: str, runtime_manager: RuntimeManager
+    ) -> None:
+        self._real_tts = real_tts
+        self._service_name = service_name
+        self._runtime_manager = runtime_manager
+
+    def speak(
+        self,
+        text: str,
+        voice_id: str,
+        on_audio_ready: Callable[[bytes, int], None] | None = None,
+    ) -> None:
+        self._runtime_manager.ensure_started(self._service_name)
+        self._real_tts.speak(text, voice_id, on_audio_ready)

@@ -103,3 +103,45 @@ def test_closing_main_window_also_closes_an_open_debug_console(
     window.close()
 
     assert handler not in logging.getLogger().handlers
+
+
+def test_runtime_diagnostics_menu_action_exists(
+    qtbot, mock_core_manager, mock_presentation_handles
+):
+    window = MainWindow(mock_core_manager, **mock_presentation_handles)
+    qtbot.addWidget(window)
+
+    debug_menu = window.menuBar().actions()[1].menu()
+    action_texts = [action.text() for action in debug_menu.actions()]
+    assert "Open Runtime Diagnostics" in action_texts
+
+
+def test_open_runtime_diagnostics_shows_a_real_panel(
+    qtbot, mock_core_manager, mock_presentation_handles
+):
+    window = MainWindow(mock_core_manager, **mock_presentation_handles)
+    qtbot.addWidget(window)
+
+    window._open_runtime_diagnostics()
+
+    assert window._runtime_diagnostics_panel is not None
+    mock_core_manager.runtime_manager.assert_called()
+    window._runtime_diagnostics_panel.close()
+
+
+def test_closing_main_window_also_closes_an_open_runtime_diagnostics_panel(
+    qtbot, mock_core_manager, mock_presentation_handles
+):
+    """Regression test: same shape as the Debug Console one above — a
+    Runtime Diagnostics Panel left open is also a separate top-level
+    window that would otherwise keep Qt's event loop alive after the
+    main window closes."""
+    window = MainWindow(mock_core_manager, **mock_presentation_handles)
+    qtbot.addWidget(window)
+    window._open_runtime_diagnostics()
+    panel = window._runtime_diagnostics_panel
+    assert panel.isVisible()
+
+    window.close()
+
+    assert not panel.isVisible()

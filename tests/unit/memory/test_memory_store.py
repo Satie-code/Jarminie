@@ -9,14 +9,16 @@ easily simulate, matching that same sprint's established pattern.
 """
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from config.schema import DatabaseConfig, MemoryConfig
+from core.module_registry import ServiceState
 from database.sqlite_client import SqliteClient
 from memory.chroma_client import ChromaMemoryClient
 from memory.errors import MemoryStoreError
-from memory.memory_store import MemoryStore
+from memory.memory_store import LazyMemoryStore, MemoryStore
 from memory.models import MemoryRecord, MemoryType
 
 
@@ -524,3 +526,110 @@ def test_delete_swallows_a_sqlite_failure(database_config, memory_config):
     finally:
         sqlite_client.raise_on_query = False
         store.stop()
+
+
+# --- Runtime Phase 6 (Runtime Refactor Sprint) — LazyModule Protocol ---
+
+
+def test_state_is_not_loaded_before_start(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+
+    assert store.state() is ServiceState.NOT_LOADED
+
+
+def test_state_is_ready_after_start(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+    store.start()
+    try:
+        assert store.state() is ServiceState.READY
+    finally:
+        store.stop()
+
+
+def test_state_is_not_loaded_after_stop(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+    store.start()
+    store.stop()
+
+    assert store.state() is ServiceState.NOT_LOADED
+
+
+def test_last_used_at_is_none_before_any_operation(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+
+    assert store.last_used_at() is None
+
+
+def test_last_used_at_is_set_after_a_real_store_call(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+    store.start()
+    try:
+        store.store(make_record())
+        assert store.last_used_at() is not None
+    finally:
+        store.stop()
+
+
+def test_mark_idle_timeout_stores_the_configured_value(database_config, memory_config):
+    store = make_store(database_config, memory_config)
+
+    store.mark_idle_timeout(900.0)
+
+    assert store._idle_timeout_seconds == 900.0
+
+
+class _FakeRuntimeManager:
+    def __init__(self) -> None:
+        self.ensure_started_calls: list[str] = []
+
+    def ensure_started(self, name: str) -> None:
+        self.ensure_started_calls.append(name)
+
+
+def test_lazy_memory_store_calls_ensure_started_before_every_method():
+    real_store = MagicMock()
+    real_store.recent.return_value = []
+    real_store.semantic_search.return_value = []
+    runtime_manager = _FakeRuntimeManager()
+    lazy_store = LazyMemoryStore(real_store, "memory_store", runtime_manager)
+
+    lazy_store.store(make_record())
+    lazy_store.get_by_id("abc")
+    lazy_store.recent(MemoryType.SHARED, 10)
+    lazy_store.semantic_search(MemoryType.SHARED, "query", 5)
+    lazy_store.update_confidence("abc", 50.0)
+    lazy_store.delete("abc")
+
+    assert runtime_manager.ensure_started_calls == ["memory_store"] * 6
+    real_store.store.assert_called_once()
+    real_store.get_by_id.assert_called_once_with("abc")
+    real_store.recent.assert_called_once_with(MemoryType.SHARED, 10)
+    real_store.semantic_search.assert_called_once_with(MemoryType.SHARED, "query", 5)
+    real_store.update_confidence.assert_called_once_with("abc", 50.0, None, None)
+    real_store.delete.assert_called_once_with("abc")
+
+
+def test_lazy_memory_store_does_not_connect_chromadb_until_first_real_access(
+    database_config, memory_config
+):
+    """The actual Runtime Phase 6 guarantee, exercised end-to-end through
+    a real MemoryStore + a real RuntimeManager registration, not just a
+    fake: chromadb.PersistentClient() must not be constructed merely
+    because the lazy proxy exists — only once a real memory operation
+    actually runs."""
+    from core.runtime_manager import RuntimeManager, ServiceTier
+
+    real_store = make_store(database_config, memory_config)
+    runtime_manager = RuntimeManager()
+    runtime_manager.register("memory_store", real_store, ServiceTier.WARM, lazy=True)
+    lazy_store = LazyMemoryStore(real_store, "memory_store", runtime_manager)
+
+    try:
+        with patch("chromadb.PersistentClient") as persistent_client_cls:
+            assert persistent_client_cls.called is False
+
+            lazy_store.store(make_record())
+
+            persistent_client_cls.assert_called_once()
+    finally:
+        real_store.stop()

@@ -40,7 +40,7 @@ from config.schema import LearningConfig
 from core.logging_setup import get_logger
 from learning.pattern_model import LearnedPattern, PatternType
 from learning.pattern_store import PatternStore
-from memory.memory_store import MemoryStore
+from memory.memory_store import MemoryStoreProtocol
 from memory.models import MemoryType
 
 logger = get_logger(__name__)
@@ -53,11 +53,15 @@ _SAMPLE_LIMIT = 1000
 
 
 class PreferenceLearner:
-    """Constructor DI: (memory_store, pattern_store, learning_config)."""
+    """Constructor DI: (memory_store, pattern_store, learning_config).
+
+    memory_store is typed against MemoryStoreProtocol, not the concrete
+    MemoryStore, since Runtime Phase 6 (Runtime Refactor Sprint) threads
+    a LazyMemoryStore proxy through here in real operation."""
 
     def __init__(
         self,
-        memory_store: MemoryStore,
+        memory_store: MemoryStoreProtocol,
         pattern_store: PatternStore,
         learning_config: LearningConfig,
     ) -> None:

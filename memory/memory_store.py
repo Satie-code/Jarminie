@@ -30,14 +30,48 @@ sprint_3_14.md's own completion report for the full reasoning.
 """
 
 from datetime import UTC, datetime
+from typing import Protocol
 
 from core.logging_setup import get_logger
+from core.module_registry import ServiceState
+from core.runtime_manager import RuntimeManager
 from database.sqlite_client import SqliteClient
 from memory.chroma_client import ChromaMemoryClient
 from memory.errors import MemoryStoreError
 from memory.models import MemoryRecord, MemoryType
 
 logger = get_logger(__name__)
+
+
+class MemoryStoreProtocol(Protocol):
+    """Interface-first per 03_Engineering_Standards.md — every consumer
+    that only ever reads/writes records (PersonaScopedMemory, EventMemory,
+    ShortTermMemory, EmotionalMemory, PreferenceLearner) depends on this,
+    never the concrete MemoryStore type, so Runtime Phase 6's
+    LazyMemoryStore (below) is a drop-in substitute wherever MemoryStore
+    used to be threaded through directly. MemoryLifecycleManager is the
+    one deliberate exception — see LazyMemoryStore's own docstring for
+    why it keeps a direct MemoryStore dependency instead."""
+
+    def store(self, record: MemoryRecord) -> str: ...
+
+    def get_by_id(self, record_id: str) -> MemoryRecord | None: ...
+
+    def recent(self, memory_type: MemoryType, limit: int) -> list[MemoryRecord]: ...
+
+    def semantic_search(
+        self, memory_type: MemoryType, query_text: str, n_results: int
+    ) -> list[tuple[MemoryRecord, float]]: ...
+
+    def update_confidence(
+        self,
+        record_id: str,
+        new_score: float,
+        user_override: bool | None = None,
+        band_entered_at: datetime | None = None,
+    ) -> None: ...
+
+    def delete(self, record_id: str) -> None: ...
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS memory_records (
@@ -86,6 +120,18 @@ class MemoryStore:
         self._sqlite_client = sqlite_client
         self._chroma_client = chroma_client
         self._started = False
+        # Runtime Phase 6 (Runtime Refactor Sprint) — LazyModule Protocol
+        # additions (core/module_registry.py). Unlike WhisperSpeechToText/
+        # CoquiTextToSpeech (Runtime Phase 5), state() deliberately does
+        # NOT distinguish ACTIVE from READY here: every public method
+        # below (store/get_by_id/recent/semantic_search/update_confidence/
+        # delete) is a fast SQLite/Chroma call, not a multi-second
+        # blocking inference — the mid-request eviction race Runtime
+        # Phase 9 must guard against for STT/TTS is a much smaller,
+        # narrower window here. Revisit only if a real eviction-during-a-
+        # memory-call bug is ever actually observed.
+        self._last_used_at: datetime | None = None
+        self._idle_timeout_seconds: float | None = None
 
     def start(self) -> None:
         """Open both backends and ensure the memory_records table and all
@@ -136,6 +182,27 @@ class MemoryStore:
             return False
         return self._chroma_client.health_check()
 
+    def state(self) -> ServiceState:
+        """LazyModule Protocol (Runtime Phase 6). NOT_LOADED before
+        start()/after stop() — never reported as "unhealthy" just for
+        being unloaded, a distinct, expected state, not a failure. READY
+        once started (see this class's own __init__ docstring for why no
+        separate ACTIVE state is tracked)."""
+        return ServiceState.READY if self._started else ServiceState.NOT_LOADED
+
+    def last_used_at(self) -> datetime | None:
+        """LazyModule Protocol (Runtime Phase 6) — Runtime Phase 9's own
+        idle-timeout sweep is the real reader; None until the first real
+        store()/get_by_id()/recent()/semantic_search()/update_confidence()/
+        delete() call."""
+        return self._last_used_at
+
+    def mark_idle_timeout(self, seconds: float) -> None:
+        """LazyModule Protocol (Runtime Phase 6) — stored for Runtime
+        Phase 9's idle-timeout sweep to read; nothing in this class acts
+        on it yet."""
+        self._idle_timeout_seconds = seconds
+
     def store(self, record: MemoryRecord) -> str:
         """Persist record to SQLite (source of truth), then attempt its
         Chroma embedding. A Chroma failure is logged and does not raise —
@@ -151,6 +218,7 @@ class MemoryStore:
         (never a raw sqlite3 exception, per Interface First Design) rather
         than either silently swallowing it or leaking an implementation-
         specific error type."""
+        self._last_used_at = datetime.now(UTC)
         try:
             self._sqlite_client.execute(
                 f"INSERT INTO memory_records ({_SELECT_COLUMNS}) "
@@ -196,6 +264,7 @@ class MemoryStore:
         3.13). Callers throughout memory/ already treat None as a normal,
         expected outcome (e.g. MemoryLifecycleManager.apply_user_
         override()), so no caller needed to change for this."""
+        self._last_used_at = datetime.now(UTC)
         try:
             rows = self._sqlite_client.query(
                 f"SELECT {_SELECT_COLUMNS} FROM memory_records WHERE id = ?",
@@ -223,6 +292,7 @@ class MemoryStore:
         Memory's list_milestones(), Short-Term Memory's active_context_
         memories(), MemoryLifecycleManager's own cleanup/review passes)
         already treats "no records" as a normal, valid outcome."""
+        self._last_used_at = datetime.now(UTC)
         try:
             rows = self._sqlite_client.query(
                 f"SELECT {_SELECT_COLUMNS} FROM memory_records "
@@ -264,6 +334,7 @@ class MemoryStore:
         full-turn-level confirmation. store()'s own Chroma-failure
         handling below (Sprint 3.1) was reviewed the same way and found
         already correct — no code change was needed for either method."""
+        self._last_used_at = datetime.now(UTC)
         try:
             hits = self._chroma_client.query(memory_type, query_text, n_results)
         except Exception:
@@ -299,6 +370,7 @@ class MemoryStore:
         successful rescoring pass, rather than aborting the caller
         (MemoryLifecycleManager's own per-record try/except already adds
         a second layer of isolation on top of this one)."""
+        self._last_used_at = datetime.now(UTC)
         set_clauses = ["confidence_score = ?"]
         params: list[object] = [new_score]
         if user_override is not None:
@@ -328,6 +400,7 @@ class MemoryStore:
         run_cleanup_pass(), Sprint 3.6), the same "stays around, tried
         again later" degrade already accepted for the grace-period
         design generally."""
+        self._last_used_at = datetime.now(UTC)
         try:
             rows = self._sqlite_client.query(
                 "SELECT memory_type FROM memory_records WHERE id = ?", (record_id,)
@@ -346,6 +419,71 @@ class MemoryStore:
                     "(SQLite row already removed).",
                     record_id,
                 )
+
+
+class LazyMemoryStore:
+    """MemoryStoreProtocol implementation that defers to a real, already-
+    registered LazyModule (MemoryStore in production), calling
+    RuntimeManager.ensure_started() before every method so the real
+    chromadb import + PersistentClient construction + SQLite connect
+    happens on first genuine memory access — or whenever a background
+    warm-up thread gets to it first (Runtime Phase 4) — rather than at
+    CoreManager startup time.
+
+    Every wrapper class that depends on MemoryStore today (PersonaScopedMemory,
+    EventMemory, ShortTermMemory, EmotionalMemory, PreferenceLearner)
+    receives this proxy instead of the real MemoryStore in main.py — none
+    of them need to change, since this class exposes the identical six
+    public methods MemoryStore does (MemoryStoreProtocol, above).
+
+    MemoryLifecycleManager is the one deliberate exception: it keeps a
+    direct MemoryStore dependency, not this proxy, because its own
+    start() is guaranteed by CoreManager's own tier-plus-registration-
+    order sequencing to run only after the real MemoryStore.start()
+    already has (same WARM tier, registered immediately after it, per
+    main.py's own _register_level3_modules()) — threading a second,
+    redundant lazy gate through it would be pure duplication, not a
+    correctness need.
+    """
+
+    def __init__(
+        self, real_store: MemoryStore, service_name: str, runtime_manager: RuntimeManager
+    ) -> None:
+        self._real_store = real_store
+        self._service_name = service_name
+        self._runtime_manager = runtime_manager
+
+    def store(self, record: MemoryRecord) -> str:
+        self._runtime_manager.ensure_started(self._service_name)
+        return self._real_store.store(record)
+
+    def get_by_id(self, record_id: str) -> MemoryRecord | None:
+        self._runtime_manager.ensure_started(self._service_name)
+        return self._real_store.get_by_id(record_id)
+
+    def recent(self, memory_type: MemoryType, limit: int) -> list[MemoryRecord]:
+        self._runtime_manager.ensure_started(self._service_name)
+        return self._real_store.recent(memory_type, limit)
+
+    def semantic_search(
+        self, memory_type: MemoryType, query_text: str, n_results: int
+    ) -> list[tuple[MemoryRecord, float]]:
+        self._runtime_manager.ensure_started(self._service_name)
+        return self._real_store.semantic_search(memory_type, query_text, n_results)
+
+    def update_confidence(
+        self,
+        record_id: str,
+        new_score: float,
+        user_override: bool | None = None,
+        band_entered_at: datetime | None = None,
+    ) -> None:
+        self._runtime_manager.ensure_started(self._service_name)
+        self._real_store.update_confidence(record_id, new_score, user_override, band_entered_at)
+
+    def delete(self, record_id: str) -> None:
+        self._runtime_manager.ensure_started(self._service_name)
+        self._real_store.delete(record_id)
 
 
 def _row_to_record(row: tuple) -> MemoryRecord:

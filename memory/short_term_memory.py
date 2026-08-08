@@ -20,7 +20,7 @@ yet at this point in the build order.
 """
 
 from config.schema import MemoryConfig
-from memory.memory_store import MemoryStore
+from memory.memory_store import MemoryStoreProtocol
 from memory.models import MemoryRecord, MemoryType
 from voice.conversation_store import ConversationTurn
 
@@ -35,9 +35,13 @@ class ShortTermMemory:
     """Constructor DI: receives the MemoryStore and MemoryConfig it
     depends on rather than constructing either. Not a ManagedModule — owns
     no resource of its own (same reasoning as PersonaScopedMemory/
-    EventMemory, Sprints 3.2/3.3)."""
+    EventMemory, Sprints 3.2/3.3).
 
-    def __init__(self, memory_store: MemoryStore, memory_config: MemoryConfig) -> None:
+    Typed against MemoryStoreProtocol, not the concrete MemoryStore,
+    since Runtime Phase 6 (Runtime Refactor Sprint) threads a
+    LazyMemoryStore proxy through here in real operation."""
+
+    def __init__(self, memory_store: MemoryStoreProtocol, memory_config: MemoryConfig) -> None:
         self._memory_store = memory_store
         self._memory_config = memory_config
 

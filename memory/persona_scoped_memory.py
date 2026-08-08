@@ -12,7 +12,7 @@ for the defensive proof.
 """
 
 from core.logging_setup import get_logger
-from memory.memory_store import MemoryStore
+from memory.memory_store import MemoryStoreProtocol
 from memory.models import MemoryRecord, MemoryType
 
 logger = get_logger(__name__)
@@ -24,9 +24,14 @@ _PERSONA_TYPES = {"jarvis": MemoryType.JARVIS, "minie": MemoryType.MINIE}
 class PersonaScopedMemory:
     """Constructor DI: receives the MemoryStore it depends on rather than
     constructing it. Not a ManagedModule — owns no resource of its own
-    beyond memory_store (same reasoning as ContextManager, Sprint 2.8)."""
+    beyond memory_store (same reasoning as ContextManager, Sprint 2.8).
 
-    def __init__(self, memory_store: MemoryStore) -> None:
+    Typed against MemoryStoreProtocol, not the concrete MemoryStore,
+    since Runtime Phase 6 (Runtime Refactor Sprint) threads a
+    LazyMemoryStore proxy through here in real operation — see
+    memory/memory_store.py's own docstrings for both."""
+
+    def __init__(self, memory_store: MemoryStoreProtocol) -> None:
         self._memory_store = memory_store
 
     def remember(

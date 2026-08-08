@@ -29,6 +29,7 @@ from config.schema import (
     PlanningConfig,
     PresentationConfig,
     ResourceThresholds,
+    RuntimeConfig,
     SchedulerConfig,
     SecurityConfig,
     UIConfig,
@@ -67,6 +68,7 @@ _SECTION_SCHEMAS: dict[str, type] = {
     "learning": LearningConfig,
     "planning": PlanningConfig,
     "context_engine": ContextEngineConfig,
+    "runtime": RuntimeConfig,
 }
 
 

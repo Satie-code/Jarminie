@@ -28,6 +28,7 @@ ContextAnalysis, logged, never raised — identical fail-safe contract.
 """
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -96,11 +97,17 @@ class ContextAnalyzer:
         docstring for why is_reachable() is looked up defensively
         rather than being part of the shared Protocol."""
         is_reachable = getattr(self._llm_client, "is_reachable", None)
+        probe_started_at = time.monotonic()
         self._healthy = is_reachable() if callable(is_reachable) else True
+        probe_elapsed = time.monotonic() - probe_started_at
         if self._healthy:
-            logger.info("Context Analyzer ready.")
+            logger.info("Context Analyzer ready (readiness probe took %.3fs).", probe_elapsed)
         else:
-            logger.warning("Context Analyzer starting in a degraded state (Ollama unreachable).")
+            logger.warning(
+                "Context Analyzer starting in a degraded state (Ollama unreachable; "
+                "readiness probe took %.3fs).",
+                probe_elapsed,
+            )
 
     def stop(self) -> None:
         logger.info("Context Analyzer stopped.")

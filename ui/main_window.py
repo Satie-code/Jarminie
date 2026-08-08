@@ -36,6 +36,7 @@ from presentation.presentation_host_widget import PresentationHostWidget
 from presentation.qt_transition_overlay import QtTransitionOverlay
 from presentation.transition_engine import TransitionEngine
 from ui.debug_console import DebugConsole
+from ui.runtime_diagnostics_panel import RuntimeDiagnosticsPanel
 from ui.settings_window import SettingsWindow
 from ui.status_panel import StatusPanel
 
@@ -67,6 +68,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._core_manager = core_manager
         self._debug_console: DebugConsole | None = None
+        self._runtime_diagnostics_panel: RuntimeDiagnosticsPanel | None = None
         self.setWindowTitle("JARMINEI")
         self.resize(800, 600)
 
@@ -120,6 +122,10 @@ class MainWindow(QMainWindow):
         self._open_debug_console_action.triggered.connect(self._open_debug_console)
         self._debug_menu.addAction(self._open_debug_console_action)
 
+        self._open_runtime_diagnostics_action = QAction("Open Runtime Diagnostics", self)
+        self._open_runtime_diagnostics_action.triggered.connect(self._open_runtime_diagnostics)
+        self._debug_menu.addAction(self._open_runtime_diagnostics_action)
+
     def _open_settings(self) -> None:
         """Open the Settings dialog, seeded from Core Manager's current
         config. Edits take effect on next launch — no live hot-reload."""
@@ -136,15 +142,27 @@ class MainWindow(QMainWindow):
         self._debug_console = DebugConsole()
         self._debug_console.show()
 
+    def _open_runtime_diagnostics(self) -> None:
+        """Open (or re-open) the Runtime Diagnostics Panel as a separate,
+        non-modal window — the identical "fresh instance each time" shape
+        _open_debug_console() already established (nothing here needs
+        detaching on close, unlike Debug Console's log handler, but the
+        window-lifecycle shape is otherwise the same)."""
+        self._runtime_diagnostics_panel = RuntimeDiagnosticsPanel(self._core_manager)
+        self._runtime_diagnostics_panel.show()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (Qt override, not our naming convention)
-        # Debug Console is a separate top-level window (not a child dialog
-        # closed automatically with this one) — without explicitly closing
-        # it here, Qt's app.exec() keeps running as long as it's still
-        # visible, leaving the process alive with no visible main window.
-        # Caught by actually running the app with Debug Console open, not
-        # by any mocked test.
+        # Debug Console and Runtime Diagnostics Panel are both separate
+        # top-level windows (not child dialogs closed automatically with
+        # this one) — without explicitly closing them here, Qt's
+        # app.exec() keeps running as long as either is still visible,
+        # leaving the process alive with no visible main window. Caught
+        # by actually running the app with Debug Console open, not by any
+        # mocked test (see debug_console's own precedent this follows).
         if self._debug_console is not None:
             self._debug_console.close()
+        if self._runtime_diagnostics_panel is not None:
+            self._runtime_diagnostics_panel.close()
         logger.info("Main window closing - shutting down Core.")
         self._core_manager.shutdown()
         event.accept()

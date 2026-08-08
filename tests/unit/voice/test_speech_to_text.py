@@ -13,8 +13,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from config.schema import ModelConfig
+from core.module_registry import ServiceState
 from voice.errors import SpeechToTextError
-from voice.speech_to_text import WhisperSpeechToText
+from voice.speech_to_text import LazySpeechToText, TranscriptionResult, WhisperSpeechToText
 
 
 @pytest.fixture
@@ -259,3 +260,124 @@ def test_transcribe_passes_none_when_initial_prompt_is_configured_empty(model_co
     stt.transcribe(b"\x00\x00" * 16000)
 
     assert fake_model.transcribe.call_args.kwargs["initial_prompt"] is None
+
+
+# --- Runtime Phase 5 (Runtime Refactor Sprint) — LazyModule Protocol ---
+
+
+def test_state_is_not_loaded_before_start(model_config):
+    stt = WhisperSpeechToText(model_config)
+
+    assert stt.state() is ServiceState.NOT_LOADED
+
+
+def test_state_is_ready_after_start(model_config):
+    stt = WhisperSpeechToText(model_config)
+    with patch("whisper.load_model", return_value=MagicMock()):
+        stt.start()
+
+    assert stt.state() is ServiceState.READY
+
+
+def test_state_is_not_loaded_after_stop(model_config):
+    stt = WhisperSpeechToText(model_config)
+    with patch("whisper.load_model", return_value=MagicMock()):
+        stt.start()
+    stt.stop()
+
+    assert stt.state() is ServiceState.NOT_LOADED
+
+
+def test_state_is_active_during_a_real_transcribe_call(model_config):
+    """Never a valid eviction target for Runtime Phase 9's idle-unload
+    sweep — proven by checking state() from inside the mocked model's own
+    transcribe() call, the one moment a real inference is in flight."""
+    stt = WhisperSpeechToText(model_config)
+    fake_model = MagicMock()
+    observed_state = []
+
+    def _record_state_and_return(*args, **kwargs):
+        observed_state.append(stt.state())
+        return {"text": "hello", "segments": []}
+
+    fake_model.transcribe.side_effect = _record_state_and_return
+    with patch("whisper.load_model", return_value=fake_model):
+        stt.start()
+
+    stt.transcribe(b"\x00\x00" * 16000)
+
+    assert observed_state == [ServiceState.ACTIVE]
+    assert stt.state() is ServiceState.READY
+
+
+def test_last_used_at_is_none_before_any_transcribe(model_config):
+    stt = WhisperSpeechToText(model_config)
+
+    assert stt.last_used_at() is None
+
+
+def test_last_used_at_is_set_after_a_real_transcribe_call(model_config):
+    stt = WhisperSpeechToText(model_config)
+    fake_model = MagicMock()
+    fake_model.transcribe.return_value = {"text": "hi", "segments": []}
+    with patch("whisper.load_model", return_value=fake_model):
+        stt.start()
+
+    stt.transcribe(b"\x00\x00" * 16000)
+
+    assert stt.last_used_at() is not None
+
+
+def test_mark_idle_timeout_stores_the_configured_value(model_config):
+    stt = WhisperSpeechToText(model_config)
+
+    stt.mark_idle_timeout(600.0)
+
+    assert stt._idle_timeout_seconds == 600.0
+
+
+class _FakeRuntimeManager:
+    def __init__(self) -> None:
+        self.ensure_started_calls: list[str] = []
+
+    def ensure_started(self, name: str) -> None:
+        self.ensure_started_calls.append(name)
+
+
+def test_lazy_speech_to_text_calls_ensure_started_before_delegating():
+    real_stt = MagicMock()
+    real_stt.transcribe.return_value = TranscriptionResult(
+        text="hi", average_confidence=0.9, duration_ms=1
+    )
+    runtime_manager = _FakeRuntimeManager()
+    lazy_stt = LazySpeechToText(real_stt, "speech_to_text", runtime_manager)
+
+    result = lazy_stt.transcribe(b"audio bytes")
+
+    assert runtime_manager.ensure_started_calls == ["speech_to_text"]
+    real_stt.transcribe.assert_called_once_with(b"audio bytes")
+    assert result.text == "hi"
+
+
+def test_lazy_speech_to_text_does_not_load_the_real_model_until_transcribe_is_called(
+    model_config,
+):
+    """The actual Runtime Phase 5 guarantee, exercised end-to-end through
+    the real WhisperSpeechToText + a real RuntimeManager registration,
+    not just a fake: whisper.load_model() must not be called merely
+    because the lazy proxy exists — only once transcribe() actually
+    runs."""
+    from core.runtime_manager import RuntimeManager, ServiceTier
+
+    real_stt = WhisperSpeechToText(model_config)
+    runtime_manager = RuntimeManager()
+    runtime_manager.register("speech_to_text", real_stt, ServiceTier.WARM, lazy=True)
+    lazy_stt = LazySpeechToText(real_stt, "speech_to_text", runtime_manager)
+
+    with patch("whisper.load_model", return_value=MagicMock()) as load_model:
+        load_model.return_value.transcribe.return_value = {"text": "hi", "segments": []}
+        assert load_model.called is False
+
+        lazy_stt.transcribe(b"\x00\x00" * 16000)
+
+        load_model.assert_called_once()

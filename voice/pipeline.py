@@ -261,8 +261,16 @@ from typing import Any
 
 from analytics.dashboard_data import AnalyticsDashboardService
 from analytics.usage_tracker import UsageTracker
-from config.schema import LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
+from config.schema import (
+    LearningConfig,
+    MemoryConfig,
+    RuntimeConfig,
+    SchedulerConfig,
+    WellnessConfig,
+)
 from core.logging_setup import get_logger
+from core.resource_monitor import ResourceMonitor
+from core.runtime_manager import RuntimeManager
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalysis, ContextAnalyzer
 from decision.intent_detector import IntentDetector
@@ -362,6 +370,11 @@ established."""
 _WELLNESS_ENQUEUE_JOB_ID = "wellness_prompt_enqueue"
 _PATTERN_DETECTION_JOB_ID = "pattern_detection_pass"
 _RECOMMENDATION_GENERATION_JOB_ID = "recommendation_generation"
+_RUNTIME_HOUSEKEEPING_JOB_ID = "runtime_housekeeping"
+"""Runtime Phase 9 (Runtime Refactor Sprint) — the one real periodic
+caller of RuntimeManager.sweep_idle_services()/evict_least_recently_used(),
+unconditional (unlike the Level 5 Part B jobs above, none of this job's
+own collaborators are ever None)."""
 
 
 def _parse_relative_time(transcript: str, now: datetime) -> datetime | None:
@@ -455,6 +468,9 @@ class CommunicationPipeline:
         recommendation_engine: RecommendationEngine | None,
         learning_config: LearningConfig,
         wellness_config: WellnessConfig,
+        runtime_manager: RuntimeManager,
+        resource_monitor: ResourceMonitor,
+        runtime_config: RuntimeConfig,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -519,6 +535,15 @@ class CommunicationPipeline:
         self._recommendation_engine = recommendation_engine
         self._learning_config = learning_config
         self._wellness_config = wellness_config
+        # Runtime Phase 9 (Runtime Refactor Sprint) — always real,
+        # unconditional (unlike the six Level 5 Part B collaborators
+        # above): every one of runtime_manager/resource_monitor exists
+        # regardless of any construction-fallback path in main.py, the
+        # same "no null-fallback needed" shape scheduler_config/
+        # memory_config already have.
+        self._runtime_manager = runtime_manager
+        self._resource_monitor = resource_monitor
+        self._runtime_config = runtime_config
         # In-memory dedup, mirroring ReminderEngine._enqueued_item_ids'
         # own identical precedent: evaluate_triggers() is a pure read with
         # no "already enqueued" memory of its own, so without this a
@@ -632,6 +657,11 @@ class CommunicationPipeline:
                 self._learning_config.recommendation_generation_interval_seconds,
                 job_id=_RECOMMENDATION_GENERATION_JOB_ID,
             )
+        self._task_scheduler.add_job(
+            self._run_runtime_housekeeping,
+            self._runtime_config.housekeeping_interval_seconds,
+            job_id=_RUNTIME_HOUSEKEEPING_JOB_ID,
+        )
         logger.info("Communication Pipeline wiring connected.")
 
     def stop(self) -> None:
@@ -650,6 +680,7 @@ class CommunicationPipeline:
         self._task_scheduler.remove_job(_WELLNESS_ENQUEUE_JOB_ID)
         self._task_scheduler.remove_job(_PATTERN_DETECTION_JOB_ID)
         self._task_scheduler.remove_job(_RECOMMENDATION_GENERATION_JOB_ID)
+        self._task_scheduler.remove_job(_RUNTIME_HOUSEKEEPING_JOB_ID)
         for job_id in _MAINTENANCE_JOB_IDS:
             self._task_scheduler.remove_job(job_id)
         self._reminder_engine.unregister()
@@ -1393,6 +1424,33 @@ class CommunicationPipeline:
             self._priority_queue_manager.enqueue(
                 recommendation, PriorityLevel.GENERAL_SUGGESTION, source="recommendation_engine"
             )
+
+    def _run_runtime_housekeeping(self) -> None:
+        """Runtime Phase 9 (Runtime Refactor Sprint) — the one real
+        periodic caller of RuntimeManager's own idle-timeout/resource-
+        pressure eviction mechanism (core/runtime_manager.py's own
+        sweep_idle_services()/evict_least_recently_used() docstrings).
+
+        Idle-timeout sweep runs every tick, unconditionally — cheap (a
+        handful of in-memory comparisons across today's 3 lazy=True
+        services, no I/O of its own). Resource-pressure eviction only
+        runs when ResourceMonitor.is_over_threshold() reports a real
+        warning-level breach, and evicts exactly one service per tick
+        (the least-recently-used) rather than every eligible service at
+        once — the same gradual, re-checked-every-tick approach as
+        letting the sweep run again next tick if pressure is still high,
+        rather than risking evicting several services on a single
+        transient spike."""
+        evicted_idle = self._runtime_manager.sweep_idle_services()
+        if evicted_idle:
+            logger.info("Runtime housekeeping: idle-timeout evicted %s.", evicted_idle)
+        snapshot = self._resource_monitor.sample()
+        if self._resource_monitor.is_over_threshold(snapshot):
+            evicted_pressure = self._runtime_manager.evict_least_recently_used(1)
+            if evicted_pressure:
+                logger.warning(
+                    "Runtime housekeeping: resource-pressure evicted %s.", evicted_pressure
+                )
 
 
 def _describe_action_result(result: ActionResult, target: str) -> str:

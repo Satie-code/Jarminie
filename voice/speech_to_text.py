@@ -15,10 +15,13 @@ was passed in.
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from config.schema import ModelConfig
 from core.logging_setup import get_logger
+from core.module_registry import ServiceState
+from core.runtime_manager import RuntimeManager
 from voice.errors import SpeechToTextError
 
 logger = get_logger(__name__)
@@ -69,6 +72,16 @@ class WhisperSpeechToText:
         self._initial_prompt = model_config.whisper_initial_prompt
         self._model = None
         self._healthy = False
+        # Runtime Phase 5 (Runtime Refactor Sprint) — LazyModule Protocol
+        # additions (core/module_registry.py). _active distinguishes a
+        # genuinely in-flight transcribe() call from merely-loaded-and-
+        # idle, so a future idle-unload/resource-pressure sweep (Runtime
+        # Phase 9) never evicts this service mid-request. _last_used_at/
+        # _idle_timeout_seconds are read/written by that same future
+        # phase; nothing in this one reads them yet.
+        self._active = False
+        self._last_used_at: datetime | None = None
+        self._idle_timeout_seconds: float | None = None
 
     def start(self) -> None:
         """Load the configured Whisper model. Safe to call again without
@@ -104,6 +117,30 @@ class WhisperSpeechToText:
         same flag pattern already used by MicrophoneManager."""
         return self._model is not None and self._healthy
 
+    def state(self) -> ServiceState:
+        """LazyModule Protocol (Runtime Phase 5). NOT_LOADED before
+        start()/after stop() — never reported as "unhealthy" just for
+        being unloaded; that's a distinct, expected state, not a failure.
+        ACTIVE while a real transcribe() call is in flight (never a valid
+        eviction target for Runtime Phase 9); READY once loaded and idle."""
+        if self._model is None:
+            return ServiceState.NOT_LOADED
+        if self._active:
+            return ServiceState.ACTIVE
+        return ServiceState.READY
+
+    def last_used_at(self) -> datetime | None:
+        """LazyModule Protocol (Runtime Phase 5) — Runtime Phase 9's own
+        idle-timeout sweep is the real reader; None until the first real
+        transcribe() call."""
+        return self._last_used_at
+
+    def mark_idle_timeout(self, seconds: float) -> None:
+        """LazyModule Protocol (Runtime Phase 5) — stored for Runtime
+        Phase 9's idle-timeout sweep to read; nothing in this class acts
+        on it yet."""
+        self._idle_timeout_seconds = seconds
+
     def transcribe(self, audio: bytes) -> TranscriptionResult:
         """Transcribe a complete utterance buffer (int16 PCM bytes).
 
@@ -116,15 +153,19 @@ class WhisperSpeechToText:
 
         import numpy as np
 
+        self._active = True
+        self._last_used_at = datetime.now(UTC)
         started_at = time.monotonic()
         try:
             samples = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
             result = self._model.transcribe(samples, initial_prompt=self._initial_prompt or None)
         except Exception as exc:
             self._healthy = False
+            self._active = False
             logger.exception("Whisper transcription failed.")
             raise SpeechToTextError("Failed to transcribe audio.") from exc
         self._healthy = True
+        self._active = False
         duration_ms = int((time.monotonic() - started_at) * 1000)
 
         segments = result.get("segments", [])
@@ -162,6 +203,41 @@ class WhisperSpeechToText:
             duration_ms=duration_ms,
             no_speech_probability=no_speech_probability,
         )
+
+
+class LazySpeechToText:
+    """SpeechToText implementation that defers to a real, already-
+    registered LazyModule (WhisperSpeechToText in production), calling
+    RuntimeManager.ensure_started() before every transcribe() so the real
+    model load happens on first genuine use — or whenever a background
+    warm-up thread gets to it first (Runtime Phase 4) — rather than at
+    CoreManager startup time.
+
+    voice/session_manager.py's own transcribe() call site (Sprint 2.5)
+    needs zero changes: this class satisfies the identical SpeechToText
+    Protocol WhisperSpeechToText does, so VoiceSessionManager can't tell
+    the difference — "no subsystem should directly decide when it
+    loads" (Runtime Refactor Sprint, founding requirement), kept true by
+    having that decision live entirely inside RuntimeManager, never in
+    VoiceSessionManager itself.
+
+    Owns no resource of its own — not a ManagedModule, the same "plain
+    wrapper" convention already established for e.g. memory/event_memory.py
+    (Sprint 3.3). real_stt is main.py's own WhisperSpeechToText instance,
+    the one actually registered with CoreManager/RuntimeManager under
+    service_name; this class only ever forwards to it.
+    """
+
+    def __init__(
+        self, real_stt: SpeechToText, service_name: str, runtime_manager: RuntimeManager
+    ) -> None:
+        self._real_stt = real_stt
+        self._service_name = service_name
+        self._runtime_manager = runtime_manager
+
+    def transcribe(self, audio: bytes) -> TranscriptionResult:
+        self._runtime_manager.ensure_started(self._service_name)
+        return self._real_stt.transcribe(audio)
 
 
 def _average_confidence(segments: list[dict]) -> float:

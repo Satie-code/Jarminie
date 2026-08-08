@@ -1480,6 +1480,29 @@ class ContextEngineConfig:
 
 
 @dataclass
+class RuntimeConfig:
+    """Runtime Manager settings (Runtime Phase 9 — Runtime Refactor
+    Sprint). Governs idle-timeout eviction for the currently-lazy
+    subsystems (speech_to_text/text_to_speech/memory_store — see
+    core/runtime_manager.py's own RuntimeManager.register() docstring)
+    and how often CommunicationPipeline's own new housekeeping
+    TaskScheduler job sweeps for both idle-timeout and resource-pressure
+    eviction.
+
+    default_idle_timeout_seconds is applied uniformly to every lazy=True
+    registration in main.py — a single shared value, not per-service,
+    since nothing in this first pass distinguishes "Whisper should stay
+    warm longer than MemoryStore" from a real, measured need; revisit
+    only if a real per-service tuning requirement is ever observed (the
+    same "don't design for a hypothetical" discipline this whole
+    refactor's own governing principles already establish).
+    """
+
+    default_idle_timeout_seconds: float = 300.0
+    housekeeping_interval_seconds: float = 60.0
+
+
+@dataclass
 class AppConfig:
     """Root configuration object. Subsystems receive their own slice via DI,
     never the whole AppConfig (see Architecture Notes in sprint_1_2.md)."""
@@ -1503,6 +1526,7 @@ class AppConfig:
     learning: LearningConfig = field(default_factory=LearningConfig)
     planning: PlanningConfig = field(default_factory=PlanningConfig)
     context_engine: ContextEngineConfig = field(default_factory=ContextEngineConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     def validate(self) -> None:
         """Raise ConfigError on the first invalid field found."""
@@ -1525,6 +1549,7 @@ class AppConfig:
         self._validate_learning()
         self._validate_planning()
         self._validate_context_engine()
+        self._validate_runtime()
 
     def _validate_resources(self) -> None:
         r = self.resources
@@ -2341,4 +2366,17 @@ class AppConfig:
             raise ConfigError(
                 "context_engine.calendar_lookahead_hours must be positive, got "
                 f"{c.calendar_lookahead_hours}"
+            )
+
+    def _validate_runtime(self) -> None:
+        r = self.runtime
+        if r.default_idle_timeout_seconds <= 0:
+            raise ConfigError(
+                "runtime.default_idle_timeout_seconds must be positive, got "
+                f"{r.default_idle_timeout_seconds}"
+            )
+        if r.housekeeping_interval_seconds <= 0:
+            raise ConfigError(
+                "runtime.housekeeping_interval_seconds must be positive, got "
+                f"{r.housekeeping_interval_seconds}"
             )

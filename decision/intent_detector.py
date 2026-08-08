@@ -25,6 +25,7 @@ any malformed response.
 """
 
 import re
+import time
 from datetime import UTC, datetime
 
 from config.schema import ModelConfig
@@ -72,11 +73,17 @@ class IntentDetector:
         comes back — marking this module FAILED would only prevent a
         recovery that already happens automatically."""
         is_reachable = getattr(self._llm_client, "is_reachable", None)
+        probe_started_at = time.monotonic()
         self._healthy = is_reachable() if callable(is_reachable) else True
+        probe_elapsed = time.monotonic() - probe_started_at
         if self._healthy:
-            logger.info("Intent Detector ready.")
+            logger.info("Intent Detector ready (readiness probe took %.3fs).", probe_elapsed)
         else:
-            logger.warning("Intent Detector starting in a degraded state (Ollama unreachable).")
+            logger.warning(
+                "Intent Detector starting in a degraded state (Ollama unreachable; "
+                "readiness probe took %.3fs).",
+                probe_elapsed,
+            )
 
     def stop(self) -> None:
         logger.info("Intent Detector stopped.")

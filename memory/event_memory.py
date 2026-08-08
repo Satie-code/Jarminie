@@ -13,7 +13,7 @@ module's own class docstring.
 
 from datetime import datetime
 
-from memory.memory_store import MemoryStore
+from memory.memory_store import MemoryStoreProtocol
 from memory.models import MemoryRecord, MemoryType
 
 
@@ -25,9 +25,13 @@ class EventMemory:
     Never automatically deleted: every record this class creates has
     is_permanent=True, which Sprint 3.6's MemoryLifecycleManager must
     check before any deletion/rescoring — enforced structurally here by
-    never exposing a delete method at all, not merely by convention."""
+    never exposing a delete method at all, not merely by convention.
 
-    def __init__(self, memory_store: MemoryStore) -> None:
+    Typed against MemoryStoreProtocol, not the concrete MemoryStore,
+    since Runtime Phase 6 (Runtime Refactor Sprint) threads a
+    LazyMemoryStore proxy through here in real operation."""
+
+    def __init__(self, memory_store: MemoryStoreProtocol) -> None:
         self._memory_store = memory_store
 
     def record_milestone(

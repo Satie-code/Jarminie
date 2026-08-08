@@ -16,7 +16,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config.schema import LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
+from config.schema import (
+    LearningConfig,
+    MemoryConfig,
+    RuntimeConfig,
+    SchedulerConfig,
+    WellnessConfig,
+)
+from core.resource_monitor import ResourceSnapshot
 from decision.authority import EngineSelection
 from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
@@ -158,6 +165,20 @@ def collaborators():
     recommendation_engine = MagicMock()
     recommendation_engine.generate_recommendations.return_value = []
 
+    # Runtime Phase 9 (Runtime Refactor Sprint) collaborators. Always
+    # real constructor parameters (never None), so no optional-guard
+    # pattern like the Level 5 Part B six above. resource_monitor.
+    # is_over_threshold() defaults to False so _run_runtime_housekeeping()
+    # never triggers resource-pressure eviction in a test that hasn't
+    # explicitly configured a breach — the same "sensible no-op default"
+    # discipline priority_queue_manager.peek_next()/pop_next() above
+    # already established.
+    runtime_manager = MagicMock()
+    runtime_manager.sweep_idle_services.return_value = []
+    runtime_manager.evict_least_recently_used.return_value = []
+    resource_monitor = MagicMock()
+    resource_monitor.is_over_threshold.return_value = False
+
     return {
         "mic": MagicMock(),
         "wake_word_detector": MagicMock(),
@@ -209,6 +230,9 @@ def collaborators():
         "recommendation_engine": recommendation_engine,
         "learning_config": LearningConfig(),
         "wellness_config": WellnessConfig(),
+        "runtime_manager": runtime_manager,
+        "resource_monitor": resource_monitor,
+        "runtime_config": RuntimeConfig(),
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -274,6 +298,9 @@ def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
         recommendation_engine=collaborators["recommendation_engine"],
         learning_config=collaborators["learning_config"],
         wellness_config=collaborators["wellness_config"],
+        runtime_manager=collaborators["runtime_manager"],
+        resource_monitor=collaborators["resource_monitor"],
+        runtime_config=collaborators["runtime_config"],
     )
 
 
@@ -330,6 +357,7 @@ def test_start_registers_every_maintenance_job(pipeline, collaborators):
         "wellness_prompt_enqueue",
         "pattern_detection_pass",
         "recommendation_generation",
+        "runtime_housekeeping",
     }
 
 
@@ -358,6 +386,9 @@ def test_start_registers_maintenance_jobs_with_the_configured_interval(pipeline,
     )
     assert interval_for_job_id["recommendation_generation"] == (
         learning_config.recommendation_generation_interval_seconds
+    )
+    assert interval_for_job_id["runtime_housekeeping"] == (
+        collaborators["runtime_config"].housekeeping_interval_seconds
     )
 
 
@@ -388,6 +419,7 @@ def test_start_registers_maintenance_jobs_with_the_real_bound_methods(pipeline, 
     assert func_for_job_id["recommendation_generation"] == (
         pipeline._generate_and_enqueue_recommendations
     )
+    assert func_for_job_id["runtime_housekeeping"] == pipeline._run_runtime_housekeeping
 
 
 def test_start_does_not_register_wellness_or_learning_jobs_when_dependencies_are_none(
@@ -410,6 +442,48 @@ def test_start_does_not_register_wellness_or_learning_jobs_when_dependencies_are
     assert "recommendation_generation" not in registered_job_ids
 
 
+# --- Runtime Phase 9 (Runtime Refactor Sprint) — _run_runtime_housekeeping() ------------
+
+
+def test_run_runtime_housekeeping_always_sweeps_idle_services(pipeline, collaborators):
+    pipeline._run_runtime_housekeeping()
+
+    collaborators["runtime_manager"].sweep_idle_services.assert_called_once_with()
+
+
+def test_run_runtime_housekeeping_skips_pressure_eviction_when_under_threshold(
+    pipeline, collaborators
+):
+    collaborators["resource_monitor"].is_over_threshold.return_value = False
+
+    pipeline._run_runtime_housekeeping()
+
+    collaborators["runtime_manager"].evict_least_recently_used.assert_not_called()
+
+
+def test_run_runtime_housekeeping_evicts_one_service_when_over_threshold(pipeline, collaborators):
+    collaborators["resource_monitor"].is_over_threshold.return_value = True
+
+    pipeline._run_runtime_housekeeping()
+
+    collaborators["runtime_manager"].evict_least_recently_used.assert_called_once_with(1)
+
+
+def test_run_runtime_housekeeping_checks_pressure_against_a_fresh_sample(pipeline, collaborators):
+    snapshot = ResourceSnapshot(
+        cpu_percent=10.0,
+        ram_percent=20.0,
+        disk_percent=30.0,
+        battery_percent=None,
+        timestamp=datetime.now(UTC),
+    )
+    collaborators["resource_monitor"].sample.return_value = snapshot
+
+    pipeline._run_runtime_housekeeping()
+
+    collaborators["resource_monitor"].is_over_threshold.assert_called_once_with(snapshot)
+
+
 def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collaborators):
     pipeline.start()
 
@@ -426,6 +500,7 @@ def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collab
         "wellness_prompt_enqueue",
         "pattern_detection_pass",
         "recommendation_generation",
+        "runtime_housekeeping",
     }
     collaborators["reminder_engine"].unregister.assert_called_once()
 

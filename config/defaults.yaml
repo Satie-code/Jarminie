@@ -684,3 +684,14 @@ context_engine:
   # "upcoming" scheduled items — real, unvalidated first-pass windows.
   usage_lookback_hours: 4.0
   calendar_lookahead_hours: 24.0
+
+runtime:
+  # Runtime Phase 9 — Runtime Refactor Sprint. How long an idle
+  # speech_to_text/text_to_speech/memory_store (the only lazy=True
+  # services today) stays loaded before RuntimeManager's idle-timeout
+  # sweep unloads it. Applied uniformly, not per-service.
+  default_idle_timeout_seconds: 300.0
+  # How often CommunicationPipeline's own runtime-housekeeping
+  # TaskScheduler job runs the idle-timeout sweep and checks for
+  # resource-pressure eviction.
+  housekeeping_interval_seconds: 60.0

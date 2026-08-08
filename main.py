@@ -25,11 +25,19 @@ from analytics.dashboard_data import AnalyticsDashboardService
 from analytics.usage_store import UsageStore
 from analytics.usage_tracker import UsageTracker
 from config import ConfigLoader
-from config.schema import AppConfig, LearningConfig, MemoryConfig, SchedulerConfig, WellnessConfig
+from config.schema import (
+    AppConfig,
+    LearningConfig,
+    MemoryConfig,
+    RuntimeConfig,
+    SchedulerConfig,
+    WellnessConfig,
+)
 from core import configure_logging
 from core.logging_setup import get_logger
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
+from core.runtime_manager import RuntimeManager, ServiceTier
 from database.sqlite_client import SqliteClient
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
@@ -59,10 +67,10 @@ from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory
 from memory.event_memory import EventMemory
 from memory.lifecycle_manager import MemoryLifecycleManager
-from memory.memory_store import MemoryStore
+from memory.memory_store import LazyMemoryStore, MemoryStore, MemoryStoreProtocol
 from memory.persona_scoped_memory import PersonaScopedMemory
 from memory.retrieval_engine import MemoryRetrievalEngine
-from memory.short_term_memory import ShortTermMemory
+from memory.short_term_memory import ShortTermMemory 
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
@@ -91,8 +99,8 @@ from voice.microphone import MicrophoneManager, SoundDeviceAudioBackend
 from voice.pipeline import CallbackRelay, CommunicationPipeline
 from voice.quiet_mode import QuietModeController
 from voice.session_manager import VoiceSessionManager
-from voice.speech_to_text import WhisperSpeechToText
-from voice.text_to_speech import CoquiTextToSpeech, SoundDeviceAudioOutput
+from voice.speech_to_text import LazySpeechToText, WhisperSpeechToText
+from voice.text_to_speech import CoquiTextToSpeech, LazyTextToSpeech, SoundDeviceAudioOutput
 from voice.wake_word import OpenWakeWordEngine, WakeWordDetector
 from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
 from wellness.escalation import WellnessEscalationManager
@@ -147,7 +155,8 @@ class _Level3Modules:
     short_term_memory: ShortTermMemory
     confidence_scorer: ConfidenceScorer
     memory_lifecycle_manager: MemoryLifecycleManager
-    memory_store: MemoryStore
+    memory_store: MemoryStoreProtocol
+    real_memory_store: MemoryStore
 
 
 @dataclass
@@ -375,8 +384,8 @@ def main() -> int:
     # registered FIRST, before even Level 2 — CommunicationPipeline.
     # start() (Sprint 4.18) calls task_scheduler.add_job() directly,
     # which requires task_scheduler to already be started.
-    level3_modules = _construct_level3_modules(config, resource_monitor)
-    level2_modules = _construct_level2_modules(config)
+    level3_modules = _construct_level3_modules(config, resource_monitor, core_manager)
+    level2_modules = _construct_level2_modules(config, core_manager)
     level4_modules = _construct_level4_modules(
         config, resource_monitor, level3_modules, level2_modules
     )
@@ -439,6 +448,7 @@ def main() -> int:
     pipeline = _construct_pipeline(
         level2_modules, level3_modules, level4_modules, level4b_modules, level5_modules,
         level5b_modules, config.scheduler, config.memory, config.learning, config.wellness,
+        core_manager.runtime_manager(), resource_monitor, config.runtime,
     )
 
     _register_level4_part_b_early(core_manager, level4b_modules)
@@ -464,7 +474,7 @@ def main() -> int:
     )
 
 
-def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
+def _construct_level2_modules(config: AppConfig, core_manager: CoreManager) -> _Level2Modules:
     """Construct every Level 2 (Communication) subsystem via DI except
     CommunicationPipeline itself — see _Level2Modules' own docstring for
     why. VoiceSessionManager.on_turn_complete/on_session_ended cannot yet
@@ -473,14 +483,29 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
     those targets, are built later) — CallbackRelay (voice/pipeline.py)
     stands in for both until CommunicationPipeline's own start() aims
     them at the real methods.
+
+    Runtime Phase 5 (Runtime Refactor Sprint): core_manager is now a
+    parameter (matching _construct_level5_modules()'s own established
+    precedent for needing it) purely so this function can reach
+    core_manager.runtime_manager() — VoiceSessionManager is wired with
+    LazySpeechToText/LazyTextToSpeech proxies (real_stt/real_tts's
+    start()/stop() timing is RuntimeManager's decision now, not
+    CoreManager's own registration-order-driven eager start), while the
+    REAL WhisperSpeechToText/CoquiTextToSpeech instances (real_stt/
+    real_tts) are what _Level2Modules.stt/.tts hold and what
+    _register_level2_modules() actually registers — the proxies are
+    local to this function, needed only by VoiceSessionManager.
     """
     voice_config = config.voice
     model_config = config.models
     database_config = config.database
 
     mic = MicrophoneManager(voice_config, SoundDeviceAudioBackend())
-    stt = WhisperSpeechToText(model_config)
-    tts = CoquiTextToSpeech(model_config, SoundDeviceAudioOutput())
+    real_stt = WhisperSpeechToText(model_config)
+    real_tts = CoquiTextToSpeech(model_config, SoundDeviceAudioOutput())
+    runtime_manager = core_manager.runtime_manager()
+    stt = LazySpeechToText(real_stt, "speech_to_text", runtime_manager)
+    tts = LazyTextToSpeech(real_tts, "text_to_speech", runtime_manager)
 
     sqlite_client = SqliteClient(database_config.sqlite_path)
     conversation_store = ConversationSessionStore(sqlite_client, database_config)
@@ -510,8 +535,8 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
 
     return _Level2Modules(
         mic=mic,
-        stt=stt,
-        tts=tts,
+        stt=real_stt,
+        tts=real_tts,
         conversation_store=conversation_store,
         context_manager=context_manager,
         persona_manager=persona_manager,
@@ -525,7 +550,7 @@ def _construct_level2_modules(config: AppConfig) -> _Level2Modules:
 
 
 def _construct_level3_modules(
-    config: AppConfig, resource_monitor: ResourceMonitor
+    config: AppConfig, resource_monitor: ResourceMonitor, core_manager: CoreManager
 ) -> _Level3Modules:
     """Construct every Level 3 (Memory Engine, Dynamic Memory, Decision
     Engine) subsystem via DI — construction only, no CoreManager
@@ -540,21 +565,35 @@ def _construct_level3_modules(
     (see decision/authority.py's own docstring); this sprint does not
     itself decide the whitelist's contents, per sprint_4_11.md's own
     Integration Considerations.
-    """
+
+    Runtime Phase 6 (Runtime Refactor Sprint): core_manager is now a
+    parameter (matching _construct_level2_modules()'s own Runtime Phase 5
+    precedent) purely so this function can reach core_manager.
+    runtime_manager() — every consumer that could plausibly run before
+    Memory Store's own background warm-up finishes (persona_scoped_memory/
+    event_memory/short_term_memory, and — via _Level3Modules.memory_store
+    — Level 5's EmotionalMemory and Level 5B's PreferenceLearner) is wired
+    with a LazyMemoryStore proxy instead of the real MemoryStore.
+    memory_lifecycle_manager is the one deliberate exception, wired with
+    real_memory_store directly — see LazyMemoryStore's own docstring
+    (memory/memory_store.py) for why threading the proxy through it too
+    would be pure duplication, not a correctness need."""
     database_config = config.database
     memory_config = config.memory
     model_config = config.models
 
     sqlite_client = SqliteClient(database_config.sqlite_path)
     chroma_client = ChromaMemoryClient(memory_config, database_config)
-    memory_store = MemoryStore(sqlite_client, chroma_client)
+    real_memory_store = MemoryStore(sqlite_client, chroma_client)
+    runtime_manager = core_manager.runtime_manager()
+    memory_store = LazyMemoryStore(real_memory_store, "memory_store", runtime_manager)
 
     persona_scoped_memory = PersonaScopedMemory(memory_store)
     event_memory = EventMemory(memory_store)
     short_term_memory = ShortTermMemory(memory_store, memory_config)
     confidence_scorer = ConfidenceScorer(memory_config)
     memory_lifecycle_manager = MemoryLifecycleManager(
-        memory_store, confidence_scorer, memory_config
+        real_memory_store, confidence_scorer, memory_config
     )
     memory_retrieval_engine = MemoryRetrievalEngine(
         persona_scoped_memory, event_memory, short_term_memory, confidence_scorer, memory_config
@@ -584,6 +623,7 @@ def _construct_level3_modules(
         confidence_scorer=confidence_scorer,
         memory_lifecycle_manager=memory_lifecycle_manager,
         memory_store=memory_store,
+        real_memory_store=real_memory_store,
     )
 
 
@@ -916,7 +956,7 @@ def _construct_level5_part_b_modules(
     config: AppConfig,
     task_scheduler: TaskScheduler,
     emotional_state_manager: EmotionalStateManager | None,
-    memory_store: MemoryStore,
+    memory_store: MemoryStoreProtocol,
 ) -> _Level5PartBModules:
     """Construct every Level 5 Part B (Companion Intelligence) subsystem
     via DI — construction only, no CoreManager registration (see
@@ -1022,6 +1062,9 @@ def _construct_pipeline(
     memory_config: MemoryConfig,
     learning_config: LearningConfig,
     wellness_config: WellnessConfig,
+    runtime_manager: RuntimeManager,
+    resource_monitor: ResourceMonitor,
+    runtime_config: RuntimeConfig,
 ) -> CommunicationPipeline:
     """Built last, once every level's prerequisite objects exist —
     CommunicationPipeline is the one object that needs Level 2, 3, 4, 4B,
@@ -1030,7 +1073,15 @@ def _construct_pipeline(
     threaded through a *Modules bundle) since they're plain config
     slices, not constructed objects, matching how every other *_config
     value already reaches this function's own callers directly from
-    AppConfig."""
+    AppConfig.
+
+    Runtime Phase 9 (Runtime Refactor Sprint): runtime_manager is the
+    SAME instance core_manager.runtime_manager() already exposes (the
+    identical single-shared-instance precedent Runtime Phase 5's own
+    _construct_level2_modules() established for LazySpeechToText/
+    LazyTextToSpeech) — CommunicationPipeline's own new housekeeping job
+    must act on the exact registry CoreManager populates, not a second,
+    empty RuntimeManager of its own."""
     return CommunicationPipeline(
         mic=level2_modules.mic,
         wake_word_detector=level2_modules.wake_word_detector,
@@ -1082,6 +1133,9 @@ def _construct_pipeline(
         recommendation_engine=level5b_modules.recommendation_engine,
         learning_config=learning_config,
         wellness_config=wellness_config,
+        runtime_manager=runtime_manager,
+        resource_monitor=resource_monitor,
+        runtime_config=runtime_config,
     )
 
 
@@ -1128,10 +1182,38 @@ def _register_level2_modules(
     before wake_word_detector — the only real start()-time ordering
     constraint across all of Level 2; see
     docs/sprint_book/sprint_2_12.md's Sprint Completion Report for why
-    the rest of the graph has none)."""
+    the rest of the graph has none).
+
+    Runtime Phase 5 (Runtime Refactor Sprint): speech_to_text/
+    text_to_speech register tier=ServiceTier.WARM, lazy=True — the real
+    WhisperSpeechToText/CoquiTextToSpeech instances no longer load their
+    model synchronously here; RuntimeManager decides when (background
+    warm-up per Runtime Phase 4, or the first real transcribe()/speak()
+    call via voice/speech_to_text.py's LazySpeechToText/voice/
+    text_to_speech.py's LazyTextToSpeech, whichever comes first).
+
+    Runtime Phase 9: both also register idle_timeout_seconds=core_manager.
+    config().runtime.default_idle_timeout_seconds — reading it back off
+    core_manager rather than threading a new `config` parameter through
+    this function, the same "CoreManager already holds it, ask CoreManager"
+    precedent config()/ui_config() already established for every other
+    caller that needs a config slice post-construction."""
     core_manager.register_module("microphone", level2_modules.mic)
-    core_manager.register_module("speech_to_text", level2_modules.stt)
-    core_manager.register_module("text_to_speech", level2_modules.tts)
+    default_idle_timeout = core_manager.config().runtime.default_idle_timeout_seconds
+    core_manager.register_module(
+        "speech_to_text",
+        level2_modules.stt,
+        tier=ServiceTier.WARM,
+        lazy=True,
+        idle_timeout_seconds=default_idle_timeout,
+    )
+    core_manager.register_module(
+        "text_to_speech",
+        level2_modules.tts,
+        tier=ServiceTier.WARM,
+        lazy=True,
+        idle_timeout_seconds=default_idle_timeout,
+    )
     core_manager.register_module("conversation_store", level2_modules.conversation_store)
     core_manager.register_module("persona_manager", level2_modules.persona_manager)
     core_manager.register_module("voice_session_manager", level2_modules.session_manager)
@@ -1169,13 +1251,58 @@ def _register_level3_modules(core_manager: CoreManager, level3_modules: _Level3M
     memory/lifecycle_manager.py's own docstring for why start() itself,
     not some other file, is where that one-time call lives). No other
     Level 3 module has a real start()-order dependency on another.
-    """
-    core_manager.register_module("memory_store", level3_modules.memory_store)
+
+    Runtime Phase 6 (Runtime Refactor Sprint): memory_store/
+    memory_lifecycle_manager now register tier=ServiceTier.WARM — moved
+    off the synchronous startup path entirely, onto ui/app.py's own
+    background warm-up thread (Runtime Phase 4). This docstring's own
+    opening paragraph's original worry (memory_store.start() widening the
+    wake_word_detector-to-communication_pipeline gap) is now structurally
+    resolved rather than merely mitigated by registration order: Tier A
+    (which includes wake_word_detector and communication_pipeline, both
+    still untagged/ALWAYS_LOADED) finishes completely, synchronously,
+    before the background thread even starts Tier B — the two can no
+    longer race at all. memory_store additionally registers lazy=True
+    (real_memory_store, not the LazyMemoryStore proxy threaded through
+    every other Level 3/5/5B consumer — see that class's own docstring in
+    memory/memory_store.py); memory_lifecycle_manager stays a plain
+    ManagedModule, relying on same-tier same-relative-order sequencing
+    (still preserved below) to guarantee real_memory_store.start() has
+    already run by the time its own start() calls into it.
+
+    Runtime Phase 9: also registers idle_timeout_seconds=core_manager.
+    config().runtime.default_idle_timeout_seconds — the same "ask
+    CoreManager for its own config" precedent _register_level2_modules()
+    established for speech_to_text/text_to_speech."""
     core_manager.register_module(
-        "memory_lifecycle_manager", level3_modules.memory_lifecycle_manager
+        "memory_store",
+        level3_modules.real_memory_store,
+        tier=ServiceTier.WARM,
+        lazy=True,
+        idle_timeout_seconds=core_manager.config().runtime.default_idle_timeout_seconds,
     )
-    core_manager.register_module("intent_detector", level3_modules.intent_detector)
-    core_manager.register_module("context_analyzer", level3_modules.context_analyzer)
+    core_manager.register_module(
+        "memory_lifecycle_manager",
+        level3_modules.memory_lifecycle_manager,
+        tier=ServiceTier.WARM,
+    )
+    # Runtime Phase 7 (Runtime Refactor Sprint): intent_detector/
+    # context_analyzer register tier=ServiceTier.WARM — their start()
+    # (decision/intent_detector.py:63-79, decision/context_analyzer.py's
+    # own mirror) only runs a bounded ~5s Ollama reachability probe purely
+    # for health_check() reporting; detect()/analyze() never check that
+    # flag before calling generate() themselves, already degrading
+    # gracefully on any LlmError independent of whether start() ever
+    # succeeded. No lazy=True and no code change to either file: moving
+    # the probe onto the background warm-up thread (Runtime Phase 4) is
+    # the whole win — there is no expensive "load" to gate behind
+    # ensure_started(), unlike Whisper/Coqui/MemoryStore.
+    core_manager.register_module(
+        "intent_detector", level3_modules.intent_detector, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "context_analyzer", level3_modules.context_analyzer, tier=ServiceTier.WARM
+    )
     core_manager.register_module(
         "priority_queue_manager", level3_modules.priority_queue_manager
     )
@@ -1199,8 +1326,21 @@ def _register_level4_modules(core_manager: CoreManager, level4_modules: _Level4M
     they are never registered, the same "only register what has a real
     lifecycle" discipline _register_level3_modules() already
     established."""
-    core_manager.register_module("action_audit_log", level4_modules.action_audit_log)
-    core_manager.register_module("workflow_store", level4_modules.workflow_store)
+    # Runtime Phase 8 (Runtime Refactor Sprint): both register
+    # tier=ServiceTier.WARM — each one's own start() is just a cheap
+    # SQLite connect+CREATE TABLE (see workflow/workflow_store.py's and
+    # device_control/action_log.py's own start()), the identical "no
+    # expensive load to gate behind lazy=True" reasoning Runtime Phase 7
+    # already established for usage_store/pattern_store. Moving both off
+    # the synchronous Tier A path onto the background warm-up thread
+    # (Runtime Phase 4) is the whole win; no code change to either file
+    # itself.
+    core_manager.register_module(
+        "action_audit_log", level4_modules.action_audit_log, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "workflow_store", level4_modules.workflow_store, tier=ServiceTier.WARM
+    )
 
 
 def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5Modules) -> None:
@@ -1212,6 +1352,21 @@ def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5M
     three: its own start() calls persona_manager.active_persona(),
     which requires persona_manager (Level 2, already started by this
     point in registration order) to already be running.
+
+    Runtime Phase 8 (Runtime Refactor Sprint): all three register
+    tier=ServiceTier.WARM — each one's own start() is a cheap in-memory
+    flag flip or a single mount_renderer() call (see emotion/
+    detection_engine.py's, emotion/state_manager.py's, and presentation/
+    presentation_controller.py's own start()), no expensive load to gate
+    behind lazy=True, the same reasoning Runtime Phase 7 already
+    established. The persona_manager-must-already-be-running ordering
+    requirement above still holds unconditionally under this tier move:
+    persona_manager is Tier A (ALWAYS_LOADED), which always finishes
+    starting synchronously before window.show() — and therefore before
+    the background thread that starts any Tier B module even begins
+    (Runtime Phase 4) — regardless of where presentation_controller
+    itself falls within Tier B's own stable registration-order
+    partition.
 
     Only PresentationController/EmotionDetectionEngine/EmotionalStateManager
     are real ManagedModules among everything Level 5 Part A constructs —
@@ -1242,13 +1397,17 @@ def _register_level5_modules(core_manager: CoreManager, level5_modules: _Level5M
         )
         return
     core_manager.register_module(
-        "emotion_detection_engine", level5_modules.emotion_detection_engine
+        "emotion_detection_engine",
+        level5_modules.emotion_detection_engine,
+        tier=ServiceTier.WARM,
     )
     core_manager.register_module(
-        "emotional_state_manager", level5_modules.emotional_state_manager
+        "emotional_state_manager",
+        level5_modules.emotional_state_manager,
+        tier=ServiceTier.WARM,
     )
     core_manager.register_module(
-        "presentation_controller", level5_modules.presentation_controller
+        "presentation_controller", level5_modules.presentation_controller, tier=ServiceTier.WARM
     )
 
 
@@ -1294,11 +1453,32 @@ def _register_level5_part_b_modules(
     assert level5b_modules.pattern_store is not None
     assert level5b_modules.pattern_recognizer is not None
     assert level5b_modules.wellness_tracker is not None
-    core_manager.register_module("usage_store", level5b_modules.usage_store)
-    core_manager.register_module("usage_tracker", level5b_modules.usage_tracker)
-    core_manager.register_module("pattern_store", level5b_modules.pattern_store)
-    core_manager.register_module("pattern_recognizer", level5b_modules.pattern_recognizer)
-    core_manager.register_module("wellness_tracker", level5b_modules.wellness_tracker)
+    # Runtime Phase 7 (Runtime Refactor Sprint): all five register
+    # tier=ServiceTier.WARM — each one's own start() is either a cheap
+    # SQLite connect+CREATE TABLE (usage_store, pattern_store) or just a
+    # TaskScheduler.add_job() registration (usage_tracker, pattern_
+    # recognizer, wellness_tracker; see each file's own start()) — no
+    # expensive load to gate behind lazy=True/ensure_started(), and (per
+    # this function's own docstring above) no real start()-order
+    # dependency among them to protect either way. Moving all five off
+    # the synchronous Tier A path onto the background warm-up thread
+    # (Runtime Phase 4) is the whole win; no code change to any of the
+    # five files themselves.
+    core_manager.register_module(
+        "usage_store", level5b_modules.usage_store, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "usage_tracker", level5b_modules.usage_tracker, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "pattern_store", level5b_modules.pattern_store, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "pattern_recognizer", level5b_modules.pattern_recognizer, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "wellness_tracker", level5b_modules.wellness_tracker, tier=ServiceTier.WARM
+    )
 
 
 if __name__ == "__main__":

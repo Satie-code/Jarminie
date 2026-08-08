@@ -633,6 +633,9 @@ def _app_harness_impl(
         recommendation_engine=recommendation_engine,
         learning_config=config.learning,
         wellness_config=config.wellness,
+        runtime_manager=core_manager.runtime_manager(),
+        resource_monitor=resource_monitor,
+        runtime_config=config.runtime,
     )
 
     # task_scheduler/calendar_store registered FIRST, before even

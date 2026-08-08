@@ -53,6 +53,7 @@ from config.schema import (
     ModelConfig,
     PresentationConfig,
     ResourceThresholds,
+    RuntimeConfig,
     SchedulerConfig,
     SecurityConfig,
     UIConfig,
@@ -61,6 +62,7 @@ from config.schema import (
     WorkflowConfig,
 )
 from core.resource_monitor import ResourceMonitor, ResourceSnapshot
+from core.runtime_manager import RuntimeManager
 from database.sqlite_client import SqliteClient
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
@@ -501,6 +503,12 @@ def _pipeline_harness_impl(
     response_generator = ResponseGenerator(llm_client, model_config)
     resource_monitor = ResourceMonitor(ResourceThresholds())
     priority_queue_manager = PriorityQueueManager(resource_monitor)
+    # Runtime Phase 9 (Runtime Refactor Sprint): this harness has no real
+    # CoreManager (see this function's own docstring) to own a shared
+    # RuntimeManager, so a fresh, otherwise-unused instance is enough —
+    # CommunicationPipeline's own housekeeping job just finds nothing
+    # registered to sweep, a harmless no-op for every test in this file.
+    runtime_manager = RuntimeManager()
     authority_evaluator = AuthorityEvaluator()
 
     device_control_config = DeviceControlConfig(
@@ -722,6 +730,9 @@ def _pipeline_harness_impl(
         recommendation_engine=recommendation_engine if level5_part_b_available else None,
         learning_config=learning_config,
         wellness_config=wellness_config,
+        runtime_manager=runtime_manager,
+        resource_monitor=resource_monitor,
+        runtime_config=RuntimeConfig(),
     )
 
     # task_scheduler/calendar_store start FIRST, before pipeline.start()

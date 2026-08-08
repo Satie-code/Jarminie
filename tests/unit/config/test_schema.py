@@ -15,6 +15,7 @@ from config.schema import (
     PlanningConfig,
     PresentationConfig,
     ResourceThresholds,
+    RuntimeConfig,
     UIConfig,
     VoiceConfig,
     WorkflowConfig,
@@ -634,4 +635,23 @@ def test_non_positive_usage_lookback_hours_raises():
 def test_non_positive_calendar_lookahead_hours_raises():
     config = AppConfig(context_engine=ContextEngineConfig(calendar_lookahead_hours=0.0))
     with pytest.raises(ConfigError, match="calendar_lookahead_hours"):
+        config.validate()
+
+
+# --- runtime (Runtime Phase 9 — Runtime Refactor Sprint) --------------------------------
+
+
+def test_default_runtime_config_is_valid():
+    AppConfig(runtime=RuntimeConfig()).validate()
+
+
+def test_non_positive_default_idle_timeout_seconds_raises():
+    config = AppConfig(runtime=RuntimeConfig(default_idle_timeout_seconds=0.0))
+    with pytest.raises(ConfigError, match="default_idle_timeout_seconds"):
+        config.validate()
+
+
+def test_non_positive_housekeeping_interval_seconds_raises():
+    config = AppConfig(runtime=RuntimeConfig(housekeeping_interval_seconds=0.0))
+    with pytest.raises(ConfigError, match="housekeeping_interval_seconds"):
         config.validate()

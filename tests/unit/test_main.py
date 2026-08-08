@@ -256,3 +256,44 @@ def test_prewarm_tts_before_pyside6_still_exists_and_is_still_callable():
     site) would break the test above too, but this makes the failure
     mode explicit rather than an AttributeError buried in the AST test."""
     assert callable(main._prewarm_tts_before_pyside6)
+
+
+def test_module_level_prewarm_runs_before_pyside6_touching_imports():
+    """Regression test for the real gap the two tests above didn't catch
+    (found while debugging a live crash): _prewarm_tts_before_pyside6()
+    being main()'s own first statement is not early enough by itself,
+    because this file's own top-level `from presentation.jarvis_renderer
+    import JarvisRenderer` / `from presentation.minie_renderer import
+    MinieRenderer` (both import PySide6 at their own module level) run
+    when main.py itself is imported — before main() is ever called.
+    Confirms the module-level TTS.api prewarm block (mirroring
+    tests/conftest.py's own identical fix) appears earlier in source
+    order than either import."""
+    source = inspect.getsource(main)
+    module_body = ast.parse(source).body
+
+    def _index_of(predicate):
+        for i, stmt in enumerate(module_body):
+            if predicate(stmt):
+                return i
+        raise AssertionError("expected statement not found in main.py's module body")
+
+    def _is_prewarm_try(stmt):
+        return isinstance(stmt, ast.Try) and any(
+            isinstance(inner, ast.Expr)
+            and isinstance(inner.value, ast.Call)
+            and isinstance(inner.value.func, ast.Attribute)
+            and inner.value.func.attr == "import_module"
+            for inner in stmt.body
+        )
+
+    def _imports_pyside6_touching_renderer(stmt):
+        return isinstance(stmt, ast.ImportFrom) and stmt.module in (
+            "presentation.jarvis_renderer",
+            "presentation.minie_renderer",
+        )
+
+    prewarm_index = _index_of(_is_prewarm_try)
+    renderer_import_index = _index_of(_imports_pyside6_touching_renderer)
+
+    assert prewarm_index < renderer_import_index

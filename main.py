@@ -16,7 +16,32 @@ docs/backlog/technical_debt.md item 29's own resolution)**: `ui.app` is
 therefore deliberately NOT imported at module level here like everything
 else — see `main()`'s own docstring/body for the full root cause and the
 `_prewarm_tts_before_pyside6()` call that must run immediately before it.
+
+**Correction to the above, found while debugging a live crash the fix
+above did not actually prevent**: calling `_prewarm_tts_before_pyside6()`
+as `main()`'s own first statement is not early enough on its own. This
+file's own top-level imports below — `from presentation.jarvis_renderer
+import JarvisRenderer` and `from presentation.minie_renderer import
+MinieRenderer` — both pull in `PySide6.QtCore`/`QtWidgets` (each renderer
+module imports PySide6 at its own module level) the moment THIS file
+itself is imported, which happens before `main()` is ever called, let
+alone its first statement. So PySide6 (and shiboken6's global import
+hook) was already loaded by the time `_prewarm_tts_before_pyside6()` ran,
+every time, in the real running app — the exact conflict this whole fix
+exists to avoid. The block immediately below, before any other import in
+this file, is what actually keeps the promise this fix makes; it mirrors
+tests/conftest.py's own identical, correctly-ordered prewarm (added for
+the identical reason, suite-wide). The later call inside `main()` is kept
+too — a cheap sys.modules cache hit once this has already run — so the
+existing regression tests guarding that call site stay meaningful.
 """
+
+import importlib
+
+try:
+    importlib.import_module("TTS.api")
+except Exception:
+    pass
 
 import sys
 from dataclasses import dataclass, replace

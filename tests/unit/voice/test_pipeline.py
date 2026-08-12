@@ -24,6 +24,7 @@ from config.schema import (
     WellnessConfig,
 )
 from core.resource_monitor import ResourceSnapshot
+from decision.adaptive_prioritizer import PrioritizationDecision
 from decision.authority import EngineSelection
 from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
@@ -34,7 +35,10 @@ from internet.source_validator import Citation
 from internet.summarizer import ResearchSummary
 from learning.recommendation import Recommendation
 from personas.persona_manager import SwitchReason
+from planning.planning_model import Goal, Milestone, PlanningStatus, Task
+from planning.task_graph import TaskGraph
 from presentation.adaptive_workspace import WorkspaceProfile
+from reasoning.explainability import Explanation
 from scheduler.scheduler_model import ItemType, ScheduledItem
 from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
@@ -179,6 +183,32 @@ def collaborators():
     resource_monitor = MagicMock()
     resource_monitor.is_over_threshold.return_value = False
 
+    # Sprint 6.13 (Level 6 Part A) collaborators. context_engine/
+    # adaptive_prioritizer default to None (not a MagicMock) —
+    # deliberately, unlike every other collaborator in this fixture:
+    # _peek_next_priority_item() branches on "is either one None" to
+    # decide whether to consult AdaptivePrioritizer at all or fall back
+    # to a plain peek_next() (see that method's own docstring). Leaving
+    # either as a real MagicMock here would silently reroute EVERY
+    # existing (pre-6.13) _check_and_announce_priority_item() test through
+    # the new AdaptivePrioritizer-informed path instead of the plain
+    # peek_next()-driven one those tests actually configure and assert
+    # against — a real trap a first draft of this fixture fell into
+    # (confirmed by running the suite: every _make_due_reminder_peek_pop()-
+    # based test failed until this was corrected). A dedicated test
+    # building its own pipeline via _build_pipeline() with these two
+    # forced to real MagicMocks (the same "deliberately-modified
+    # collaborators dict" pattern _build_pipeline()'s own docstring
+    # already names) is what actually exercises the new path.
+    task_graph_store = MagicMock()
+    planning_engine = MagicMock()
+    context_engine = None
+    explainability_layer = MagicMock()
+    adaptive_prioritizer = None
+    task_graph_workflow_adapter = MagicMock()
+    session_resumption = MagicMock()
+    self_evaluator = MagicMock()
+
     return {
         "mic": MagicMock(),
         "wake_word_detector": MagicMock(),
@@ -233,6 +263,14 @@ def collaborators():
         "runtime_manager": runtime_manager,
         "resource_monitor": resource_monitor,
         "runtime_config": RuntimeConfig(),
+        "task_graph_store": task_graph_store,
+        "planning_engine": planning_engine,
+        "context_engine": context_engine,
+        "explainability_layer": explainability_layer,
+        "adaptive_prioritizer": adaptive_prioritizer,
+        "task_graph_workflow_adapter": task_graph_workflow_adapter,
+        "session_resumption": session_resumption,
+        "self_evaluator": self_evaluator,
         "persona": persona,
         "context": context,
         "intent": intent,
@@ -301,6 +339,14 @@ def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
         runtime_manager=collaborators["runtime_manager"],
         resource_monitor=collaborators["resource_monitor"],
         runtime_config=collaborators["runtime_config"],
+        task_graph_store=collaborators["task_graph_store"],
+        planning_engine=collaborators["planning_engine"],
+        context_engine=collaborators["context_engine"],
+        explainability_layer=collaborators["explainability_layer"],
+        adaptive_prioritizer=collaborators["adaptive_prioritizer"],
+        task_graph_workflow_adapter=collaborators["task_graph_workflow_adapter"],
+        session_resumption=collaborators["session_resumption"],
+        self_evaluator=collaborators["self_evaluator"],
     )
 
 
@@ -1101,9 +1147,19 @@ def test_check_and_announce_priority_item_skips_when_queue_is_empty(pipeline, co
     collaborators["quiet_mode_controller"].activate.assert_not_called()
 
 
-def test_check_and_announce_priority_item_skips_a_non_reminder_item(pipeline, collaborators):
+def test_check_and_announce_priority_item_skips_an_unrecognized_priority(pipeline, collaborators):
+    """Sprint 6.13: _priority_item_handlers is now exhaustive over every
+    real PriorityLevel member (SCHEDULED_REMINDER/WELLNESS/
+    GENERAL_SUGGESTION/IMPORTANT_ALERT; CRITICAL_EMERGENCY is never
+    queued at all) — no genuine PriorityLevel value can reach the
+    "unrecognized" branch below any more (this test used
+    PriorityLevel.IMPORTANT_ALERT for exactly that before this sprint
+    gave it a real handler). A MagicMock stands in for a priority value
+    that matches no real dict key, confirming the defensive fallback
+    itself still works, even though nothing in this codebase can trigger
+    it today."""
     peeked = MagicMock()
-    peeked.priority = PriorityLevel.IMPORTANT_ALERT
+    peeked.priority = MagicMock(name="unrecognized_priority_level")
     collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
     collaborators["priority_queue_manager"].peek_next.return_value = peeked
 
@@ -1412,6 +1468,696 @@ def test_handle_wellness_turn_degrades_when_dashboard_service_is_none(collaborat
     reply = pipeline._handle_wellness_turn(collaborators["decision_trace"])
 
     assert reply == "I don't have enough information about today yet."
+
+
+# --- Sprint 6.13: IMPORTANT_ALERT announcement + GENERAL_SUGGESTION dual payload --------
+
+
+def test_announce_important_alert_speaks_a_proactive_prompt_message(pipeline, collaborators):
+    item = MagicMock()
+    item.payload = MagicMock(message="Your deadline is coming up.")
+
+    pipeline._announce_important_alert(item)
+
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT,
+        announce_first=("Your deadline is coming up.", "p340"),
+    )
+
+
+def test_check_and_announce_priority_item_announces_an_important_alert(pipeline, collaborators):
+    """Sprint 6.13 closes backlog/technical_debt.md item 17 in full —
+    IMPORTANT_ALERT now has a real end-to-end announced path, not just a
+    producer."""
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.IMPORTANT_ALERT
+    popped = MagicMock()
+    popped.payload = MagicMock(message="Battery is critically low.")
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = peeked
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["priority_queue_manager"].pop_next.assert_called_once()
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=("Battery is critically low.", "p340")
+    )
+
+
+def test_announce_general_suggestion_reads_text_from_a_recommendation_payload(
+    pipeline, collaborators
+):
+    """The pre-6.13 producer (RecommendationEngine) — Recommendation.text."""
+    item = MagicMock()
+    item.payload = MagicMock(text="Consider batching your emails.")
+
+    pipeline._announce_general_suggestion(item)
+
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT,
+        announce_first=("Consider batching your emails.", "p340"),
+    )
+
+
+def test_announce_general_suggestion_reads_message_from_a_proactive_prompt_payload(
+    pipeline, collaborators
+):
+    """Sprint 6.13's own real, previously-latent bug fix: ProactiveAssistant's
+    three softer triggers also enqueue at GENERAL_SUGGESTION, but with a
+    ProactivePrompt payload (.message), not a Recommendation (.text) —
+    this method used to only read .text, an AttributeError waiting to
+    happen the moment ProactiveAssistant went live."""
+    item = MagicMock()
+    item.payload = MagicMock(message="You've been at this a while.")
+
+    pipeline._announce_general_suggestion(item)
+
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT,
+        announce_first=("You've been at this a while.", "p340"),
+    )
+
+
+def test_announce_important_alert_falls_back_when_payload_has_no_real_text(
+    pipeline, collaborators
+):
+    """Tested only through the public _announce_important_alert() contract
+    — this codebase's own established convention never imports an
+    underscore-prefixed helper (_extract_announcement_text) directly."""
+    item = MagicMock()
+    item.payload = object()
+
+    pipeline._announce_important_alert(item)
+
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT,
+        announce_first=("You have a new item to review.", "p340"),
+    )
+
+
+# --- Sprint 6.13: AdaptivePrioritizer-informed dispatch ---------------------------------
+
+
+def test_check_and_announce_priority_item_surfaces_now_via_adaptive_prioritizer(
+    pipeline, collaborators
+):
+    scheduled_item = ScheduledItem(
+        item_id="item-1",
+        item_type=ItemType.EVENT,
+        title="Team standup",
+        scheduled_at=datetime.now(UTC),
+        created_at=datetime.now(UTC),
+    )
+    popped = MagicMock()
+    popped.priority = PriorityLevel.SCHEDULED_REMINDER
+    popped.payload = scheduled_item
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["context_engine"] = MagicMock()
+    collaborators["adaptive_prioritizer"] = MagicMock()
+    collaborators["adaptive_prioritizer"].next_item.return_value = (
+        popped,
+        PrioritizationDecision.SURFACE_NOW,
+    )
+    collaborators["priority_queue_manager"].pop_next.return_value = popped
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["priority_queue_manager"].peek_next.assert_not_called()
+    collaborators["priority_queue_manager"].pop_next.assert_called_once()
+    collaborators["quiet_mode_controller"].activate.assert_called_once_with(
+        ActivationReason.SCHEDULED_ALERT, announce_first=("Team standup", "p340")
+    )
+
+
+def test_check_and_announce_priority_item_defers_via_adaptive_prioritizer(
+    pipeline, collaborators
+):
+    peeked = MagicMock()
+    peeked.priority = PriorityLevel.GENERAL_SUGGESTION
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["context_engine"] = MagicMock()
+    collaborators["adaptive_prioritizer"] = MagicMock()
+    collaborators["adaptive_prioritizer"].next_item.return_value = (
+        peeked,
+        PrioritizationDecision.DEFER_BRIEFLY,
+    )
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["priority_queue_manager"].pop_next.assert_not_called()
+    collaborators["quiet_mode_controller"].activate.assert_not_called()
+
+
+def test_check_and_announce_priority_item_falls_back_to_peek_next_when_context_engine_build_fails(
+    pipeline, collaborators
+):
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["context_engine"] = MagicMock()
+    collaborators["context_engine"].build.side_effect = RuntimeError("boom")
+    collaborators["adaptive_prioritizer"] = MagicMock()
+    collaborators["priority_queue_manager"].peek_next.return_value = None
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["adaptive_prioritizer"].next_item.assert_not_called()
+    collaborators["priority_queue_manager"].pop_next.assert_not_called()
+
+
+def test_check_and_announce_priority_item_uses_plain_peek_next_when_adaptive_prioritizer_absent(
+    pipeline, collaborators
+):
+    """The default fixture shape (context_engine/adaptive_prioritizer both
+    None) — every pre-6.12 test in this file already relies on this
+    exact fallback; this test makes the contract explicit."""
+    collaborators["quiet_mode_controller"].current_mode.return_value = OperatingMode.DORMANT
+    collaborators["priority_queue_manager"].peek_next.return_value = None
+
+    pipeline._check_and_announce_priority_item()
+
+    collaborators["priority_queue_manager"].peek_next.assert_called_once()
+
+
+# --- Sprint 6.13: EngineSelection.PLANNING live-turn routing ----------------------------
+
+
+def _with_transcript(collaborators: dict, transcript: str) -> None:
+    collaborators["decision_trace"].intent = MagicMock(raw_transcript=transcript)
+
+
+def _make_goal(status: PlanningStatus = PlanningStatus.PROPOSED) -> Goal:
+    return Goal(
+        goal_id="g1",
+        statement="learn guitar",
+        milestones=[
+            Milestone(
+                milestone_id="m1",
+                title="Get a guitar",
+                tasks=[
+                    Task(task_id="t1", title="Buy a guitar", description="", status=status),
+                ],
+            ),
+        ],
+        created_at=datetime.now(UTC),
+        status=status,
+    )
+
+
+def test_handle_turn_complete_routes_planning_engine_selection(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.PLANNING
+    _with_transcript(collaborators, "help me plan learning guitar")
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+
+    pipeline._handle_turn_complete("help me plan learning guitar", "session-1")
+
+    reply = collaborators["session_manager"].speak_reply.call_args[0][0]
+    assert "learn guitar" in reply
+
+
+def test_handle_planning_turn_proposes_a_fresh_goal(pipeline, collaborators):
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+    _with_transcript(collaborators, "help me plan learning guitar")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert pipeline._pending_proposed_goal is goal
+    assert "learn guitar" in reply
+    assert "1 milestone" in reply
+    assert "1 task" in reply
+
+
+def test_handle_planning_turn_degrades_on_llm_error(pipeline, collaborators):
+    collaborators["planning_engine"].decompose_goal.side_effect = LlmError("unreachable")
+    _with_transcript(collaborators, "help me plan learning guitar")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert pipeline._pending_proposed_goal is None
+    assert reply == "I'm sorry, I couldn't work out a plan for that right now."
+
+
+def test_handle_planning_turn_degrades_when_planning_engine_is_none(collaborators):
+    collaborators["planning_engine"] = None
+    pipeline = _build_pipeline(collaborators)
+    _with_transcript(collaborators, "help me plan learning guitar")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert reply == "Planning isn't currently available."
+
+
+def test_handle_planning_turn_accepts_a_pending_goal_on_yes(pipeline, collaborators):
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+    _with_transcript(collaborators, "help me plan learning guitar")
+    pipeline._handle_planning_turn(collaborators["decision_trace"], "session-1", "jarvis")
+
+    _with_transcript(collaborators, "yes")
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert pipeline._pending_proposed_goal is None
+    assert goal.status is PlanningStatus.ACCEPTED
+    collaborators["task_graph_store"].save_goal.assert_called_once_with(goal)
+    assert "learn guitar" in reply
+
+
+def test_handle_planning_turn_accept_degrades_honestly_on_a_save_failure(
+    pipeline, collaborators
+):
+    """Sprint 6.14 hardening (scenario b): a TaskGraphStore.save_goal()
+    failure must never be silently swallowed into a false "I've saved
+    your plan" claim — caught here and degraded to the exact same honest
+    reply already used for the store-absent case, matching
+    memory/memory_store.py's own "never claim success on a failed
+    write" discipline."""
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+    _with_transcript(collaborators, "help me plan learning guitar")
+    pipeline._handle_planning_turn(collaborators["decision_trace"], "session-1", "jarvis")
+    collaborators["task_graph_store"].save_goal.side_effect = RuntimeError("disk full")
+
+    _with_transcript(collaborators, "yes")
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert pipeline._pending_proposed_goal is None
+    assert reply == "I can't save that plan right now, but I'll remember it for this conversation."
+
+
+def test_handle_planning_turn_rejects_a_pending_goal_on_no(pipeline, collaborators):
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+    _with_transcript(collaborators, "help me plan learning guitar")
+    pipeline._handle_planning_turn(collaborators["decision_trace"], "session-1", "jarvis")
+
+    _with_transcript(collaborators, "no")
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert pipeline._pending_proposed_goal is None
+    collaborators["task_graph_store"].save_goal.assert_not_called()
+    assert reply == "Okay, I've discarded that plan."
+
+
+def test_handle_turn_complete_routes_a_pending_goal_response_regardless_of_selected_engine(
+    pipeline, collaborators
+):
+    """A bare "yes"/"no" is far too generic for decision/authority.py's
+    own stateless keyword routing to ever classify as PLANNING — this
+    class's own conversational state is what recognizes it instead (see
+    _handle_turn_complete()'s own docstring)."""
+    goal = _make_goal()
+    collaborators["planning_engine"].decompose_goal.return_value = goal
+    _with_transcript(collaborators, "help me plan learning guitar")
+    pipeline._handle_planning_turn(collaborators["decision_trace"], "session-1", "jarvis")
+
+    collaborators["decision_trace"].selected_engine = EngineSelection.CONVERSATIONAL_RESPONSE
+    _with_transcript(collaborators, "yes")
+
+    pipeline._handle_turn_complete("yes", "session-1")
+
+    assert pipeline._pending_proposed_goal is None
+    collaborators["task_graph_store"].save_goal.assert_called_once_with(goal)
+
+
+def test_handle_planning_turn_runs_the_most_recently_accepted_plan(pipeline, collaborators):
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    collaborators["task_graph_store"].list_goals.return_value = [goal]
+    collaborators["task_graph_store"].get_edges.return_value = []
+    definition = MagicMock(workflow_id="wf-1")
+    collaborators["task_graph_workflow_adapter"].build_workflow.return_value = (
+        definition,
+        [goal.milestones[0].tasks[0]],
+    )
+    run_result = WorkflowRunResult(
+        workflow_id="wf-1",
+        run_id="run-1",
+        step_results=[MagicMock()],
+        aborted_early=False,
+        whole_workflow_confirmation=None,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    collaborators["workflow_executor"].run.return_value = run_result
+    _with_transcript(collaborators, "run my plan")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    collaborators["workflow_store"].save.assert_called_once_with(definition)
+    collaborators["workflow_executor"].run.assert_called_once()
+    assert "learn guitar" in reply
+    collaborators["self_evaluator"].evaluate_workflow_run.assert_called_once_with(run_result)
+
+
+def test_handle_planning_turn_run_degrades_honestly_on_a_workflow_save_failure(
+    pipeline, collaborators
+):
+    """Sprint 6.14 hardening (scenario b, adversarial-re-read finding):
+    WorkflowStore.save() failing must never propagate to
+    _handle_turn_complete()'s own outer catch and end the session."""
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    collaborators["task_graph_store"].list_goals.return_value = [goal]
+    collaborators["task_graph_store"].get_edges.return_value = []
+    definition = MagicMock(workflow_id="wf-1")
+    collaborators["task_graph_workflow_adapter"].build_workflow.return_value = (
+        definition,
+        [goal.milestones[0].tasks[0]],
+    )
+    collaborators["workflow_store"].save.side_effect = RuntimeError("disk full")
+    _with_transcript(collaborators, "run my plan")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert reply == "I couldn't set up your plan to run right now."
+    collaborators["workflow_executor"].run.assert_not_called()
+
+
+def test_handle_planning_turn_run_with_no_accepted_plan(pipeline, collaborators):
+    collaborators["task_graph_store"].list_goals.return_value = []
+    _with_transcript(collaborators, "run my plan")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert reply == "You don't have an accepted plan to run yet."
+
+
+def test_handle_planning_turn_run_with_nothing_ready(pipeline, collaborators):
+    goal = _make_goal(status=PlanningStatus.COMPLETED)
+    collaborators["task_graph_store"].list_goals.return_value = [goal]
+    collaborators["task_graph_store"].get_edges.return_value = []
+    _with_transcript(collaborators, "run my plan")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert "nothing left to run" in reply
+    collaborators["task_graph_workflow_adapter"].build_workflow.assert_not_called()
+
+
+def test_handle_planning_turn_resumes_a_previous_session(pipeline, collaborators):
+    definition = MagicMock(workflow_id="wf-2", name="Resume session: Project X")
+    collaborators["session_resumption"].build_workflow.return_value = definition
+    run_result = WorkflowRunResult(
+        workflow_id="wf-2",
+        run_id="run-2",
+        step_results=[MagicMock()],
+        aborted_early=False,
+        whole_workflow_confirmation=None,
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+    )
+    collaborators["workflow_executor"].run.return_value = run_result
+    _with_transcript(collaborators, "resume my session")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    collaborators["workflow_store"].save.assert_called_once_with(definition)
+    assert "Resume session: Project X" in reply
+
+
+def test_handle_planning_turn_resume_degrades_honestly_on_a_workflow_save_failure(
+    pipeline, collaborators
+):
+    """Sprint 6.14 hardening (scenario b, adversarial-re-read finding):
+    the identical WorkflowStore.save() gap as _run_accepted_plan()'s
+    own, for the resume-session sub-flow."""
+    definition = MagicMock(workflow_id="wf-2", name="Resume session: Project X")
+    collaborators["session_resumption"].build_workflow.return_value = definition
+    collaborators["workflow_store"].save.side_effect = RuntimeError("disk full")
+    _with_transcript(collaborators, "resume my session")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert reply == "I couldn't set up your session to resume right now."
+    collaborators["workflow_executor"].run.assert_not_called()
+
+
+def test_handle_planning_turn_resume_with_nothing_to_resume(pipeline, collaborators):
+    collaborators["session_resumption"].build_workflow.return_value = None
+    _with_transcript(collaborators, "resume my session")
+
+    reply = pipeline._handle_planning_turn(
+        collaborators["decision_trace"], "session-1", "jarvis"
+    )
+
+    assert reply == "I don't have a previous session to resume."
+
+
+def test_finalize_workflow_run_marks_completed_tasks_and_calls_self_evaluator(
+    pipeline, collaborators
+):
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    task = goal.milestones[0].tasks[0]
+
+    task_graph = TaskGraph(goal)
+    step_result = MagicMock()
+    step_result.skipped = False
+    step_result.action_result.status = ActionStatus.SUCCEEDED
+    run_result = MagicMock()
+    run_result.step_results = [step_result]
+
+    pipeline._finalize_workflow_run(run_result, task_graph, [task], goal)
+
+    assert task.status is PlanningStatus.COMPLETED
+    collaborators["task_graph_store"].save_goal.assert_called_once_with(goal)
+    collaborators["self_evaluator"].evaluate_workflow_run.assert_called_once_with(run_result)
+
+
+def test_finalize_workflow_run_marks_failed_tasks(pipeline, collaborators):
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    task = goal.milestones[0].tasks[0]
+
+    task_graph = TaskGraph(goal)
+    step_result = MagicMock()
+    step_result.skipped = False
+    step_result.action_result.status = ActionStatus.FAILED
+    run_result = MagicMock()
+    run_result.step_results = [step_result]
+
+    pipeline._finalize_workflow_run(run_result, task_graph, [task], goal)
+
+    assert task.status is PlanningStatus.ABANDONED
+
+
+def test_finalize_workflow_run_leaves_skipped_tasks_untouched(pipeline, collaborators):
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    task = goal.milestones[0].tasks[0]
+
+    task_graph = TaskGraph(goal)
+    step_result = MagicMock()
+    step_result.skipped = True
+    run_result = MagicMock()
+    run_result.step_results = [step_result]
+
+    pipeline._finalize_workflow_run(run_result, task_graph, [task], goal)
+
+    assert task.status is PlanningStatus.ACCEPTED
+
+
+def test_finalize_workflow_run_swallows_self_evaluator_failure(pipeline, collaborators):
+    """Sprint 6.14 hardening (scenario f): a real Task's own
+    mark_completed()/save_goal() already happened, in an earlier,
+    separate try/except block, before SelfEvaluator.evaluate_workflow_run()
+    is ever called — a failure there can never block or reverse work
+    that already committed, only the evaluation itself is lost."""
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    task = goal.milestones[0].tasks[0]
+
+    task_graph = TaskGraph(goal)
+    step_result = MagicMock()
+    step_result.skipped = False
+    step_result.action_result.status = ActionStatus.SUCCEEDED
+    run_result = MagicMock()
+    run_result.step_results = [step_result]
+    collaborators["self_evaluator"].evaluate_workflow_run.side_effect = RuntimeError("boom")
+
+    pipeline._finalize_workflow_run(run_result, task_graph, [task], goal)  # must not raise
+
+    assert task.status is PlanningStatus.COMPLETED
+    collaborators["task_graph_store"].save_goal.assert_called_once_with(goal)
+
+
+def test_finalize_workflow_run_still_calls_self_evaluator_after_a_save_goal_failure(
+    pipeline, collaborators
+):
+    """Sprint 6.14 hardening (scenario f), the reverse direction: the
+    two try/except blocks are genuinely independent — a failure in the
+    first (task bookkeeping) does not skip the second (evaluation)
+    either. In-memory task_graph.mark_completed() already ran (it's
+    save_goal() that fails here, not the mutation itself), and the
+    evaluation is still attempted for whatever real WorkflowRunResult
+    exists, regardless of whether persistence of the bookkeeping
+    succeeded."""
+    goal = _make_goal(status=PlanningStatus.ACCEPTED)
+    task = goal.milestones[0].tasks[0]
+
+    task_graph = TaskGraph(goal)
+    step_result = MagicMock()
+    step_result.skipped = False
+    step_result.action_result.status = ActionStatus.SUCCEEDED
+    run_result = MagicMock()
+    run_result.step_results = [step_result]
+    collaborators["task_graph_store"].save_goal.side_effect = RuntimeError("disk full")
+
+    pipeline._finalize_workflow_run(run_result, task_graph, [task], goal)  # must not raise
+
+    assert task.status is PlanningStatus.COMPLETED  # in-memory mutation still happened
+    collaborators["self_evaluator"].evaluate_workflow_run.assert_called_once_with(run_result)
+
+
+# --- Sprint 6.13: EngineSelection.EXPLANATION live-turn routing --------------------------
+
+
+def test_handle_turn_complete_routes_explanation_engine_selection(pipeline, collaborators):
+    collaborators["decision_trace"].selected_engine = EngineSelection.EXPLANATION
+    explanation = Explanation(
+        subject_id="most_recent_turn",
+        narrative="Because you asked to open notepad.",
+        sources=["DecisionTrace"],
+        confidence=None,
+    )
+    collaborators["explainability_layer"].explain.return_value = explanation
+
+    pipeline._handle_turn_complete("why did you do that", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "Because you asked to open notepad.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
+    )
+
+
+def test_handle_explanation_turn_returns_the_narrative(pipeline, collaborators):
+    explanation = Explanation(
+        subject_id="most_recent_turn", narrative="Because X.", sources=["DecisionTrace"],
+        confidence=None,
+    )
+    collaborators["explainability_layer"].explain.return_value = explanation
+
+    reply = pipeline._handle_explanation_turn(collaborators["decision_trace"])
+
+    assert reply == "Because X."
+
+
+def test_handle_explanation_turn_degrades_when_explainability_layer_is_none(collaborators):
+    collaborators["explainability_layer"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    reply = pipeline._handle_explanation_turn(collaborators["decision_trace"])
+
+    assert reply == "I can't explain my reasoning right now."
+
+
+def test_handle_explanation_turn_uses_context_engine_when_available(pipeline, collaborators):
+    collaborators["context_engine"] = MagicMock()
+    pipeline = _build_pipeline(collaborators)
+    explanation = Explanation(
+        subject_id="most_recent_turn", narrative="Because X.", sources=["ReasoningTrace"],
+        confidence=1.0,
+    )
+    collaborators["explainability_layer"].explain.return_value = explanation
+
+    pipeline._handle_explanation_turn(collaborators["decision_trace"])
+
+    collaborators["context_engine"].build.assert_called_once()
+
+
+def test_handle_explanation_turn_degrades_context_build_failure_gracefully(
+    pipeline, collaborators
+):
+    collaborators["context_engine"] = MagicMock()
+    collaborators["context_engine"].build.side_effect = RuntimeError("boom")
+    pipeline = _build_pipeline(collaborators)
+    explanation = Explanation(
+        subject_id="most_recent_turn", narrative="Because X.", sources=["DecisionTrace"],
+        confidence=None,
+    )
+    collaborators["explainability_layer"].explain.return_value = explanation
+
+    reply = pipeline._handle_explanation_turn(collaborators["decision_trace"])
+
+    assert reply == "Because X."
+
+
+def test_handle_explanation_turn_degrades_honestly_on_an_llm_error(pipeline, collaborators):
+    """Sprint 6.14 hardening (scenario a): explain() falls through to
+    ReasoningEngine.explain_why() (raises LlmError by design, 6.4) when
+    _gather() finds nothing composable — previously uncaught here, which
+    would have propagated to _handle_turn_complete()'s own outer catch
+    and ended the whole session rather than just degrading this turn,
+    mirroring _propose_new_goal()'s own already-correct identical
+    shape."""
+    collaborators["explainability_layer"].explain.side_effect = LlmError("unreachable")
+
+    reply = pipeline._handle_explanation_turn(collaborators["decision_trace"])
+
+    assert reply == "I can't reach my reasoning model right now."
+
+
+def test_handle_turn_complete_survives_an_explanation_turns_llm_error(pipeline, collaborators):
+    """The full, live-turn version of the test above: a real turn
+    routed to EngineSelection.EXPLANATION whose explain() raises LlmError
+    still produces a real spoken reply and keeps the session alive,
+    rather than ending it via _handle_turn_complete()'s own outer
+    catch."""
+    collaborators["decision_trace"].selected_engine = EngineSelection.EXPLANATION
+    collaborators["explainability_layer"].explain.side_effect = LlmError("unreachable")
+
+    pipeline._handle_turn_complete("why did you do that", "session-1")
+
+    collaborators["session_manager"].speak_reply.assert_called_once()
+    spoken_text = collaborators["session_manager"].speak_reply.call_args[0][0]
+    assert "reasoning model" in spoken_text
+    collaborators["session_manager"].end_session.assert_not_called()
+
+
+# --- Sprint 6.13: lookup_last_decision_trace() / _last_decision_trace tracking -----------
+
+
+def test_lookup_last_decision_trace_returns_the_most_recent_turns_trace(pipeline, collaborators):
+    pipeline._handle_turn_complete("open notepad", "session-1")
+
+    assert pipeline.lookup_last_decision_trace("anything") is collaborators["decision_trace"]
+
+
+def test_last_decision_trace_excludes_an_explanation_turns_own_trace(pipeline, collaborators):
+    pipeline._handle_turn_complete("open notepad", "session-1")
+    first_trace = pipeline._last_decision_trace
+
+    collaborators["decision_trace"].selected_engine = EngineSelection.EXPLANATION
+    collaborators["explainability_layer"].explain.return_value = Explanation(
+        subject_id="most_recent_turn", narrative="Because X.", sources=["DecisionTrace"],
+        confidence=None,
+    )
+    pipeline._handle_turn_complete("why did you do that", "session-1")
+
+    assert pipeline._last_decision_trace is first_trace
 
 
 # --- Sprint 4.19 hardening: adversarial sweep -----------------------------------

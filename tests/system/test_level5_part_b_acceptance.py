@@ -114,6 +114,21 @@ def test_level5_part_b_full_acceptance_scenario(
 ):
     h = app_harness
 
+    # Sprint 6.13 (Level 6 Part A Integration) correction: this scenario's
+    # own step 2 makes a real live turn, then immediately (in the same
+    # tick) drives a direct _check_and_announce_priority_item() call —
+    # AdaptivePrioritizer (wired in for real as of this sprint) would
+    # otherwise correctly see that turn's own still-recent
+    # last_activity_at and DEFER_BRIEFLY every WELLNESS/GENERAL_SUGGESTION
+    # announcement below for up to conversation_active_threshold_seconds
+    # (5 minutes by default) — genuinely intended behavior (see
+    # decision/adaptive_prioritizer.py's own docstring), just not what
+    # this specific scenario is testing. Zeroed here, once, for the whole
+    # test — the same direct-private-state-poke precedent this file's own
+    # wellness_tracker._continuous_active_seconds line below already
+    # established.
+    h.adaptive_prioritizer._config.conversation_active_threshold_seconds = 0.0
+
     # --- Step 1: a sequence of simulated AppFocusSamples produces a
     # real, non-empty AnalyticsDashboardService.daily_summary() — every
     # field verified against the known fixture, not merely "did not
@@ -313,6 +328,10 @@ def test_level5_part_b_full_acceptance_scenario(
         "pattern_store",
         "pattern_recognizer",
         "wellness_tracker",
+        # Sprint 6.13 (Level 6 Part A — Autonomous Intelligence).
+        "task_graph_store",
+        "knowledge_graph_store",
+        "proactive_assistant",
     }
     assert all(state == "running" for state in states.values())
 

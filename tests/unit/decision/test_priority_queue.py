@@ -178,3 +178,66 @@ def test_health_check_false_when_queue_exceeds_the_sane_depth_bound(queue):
 def test_start_and_stop_do_not_raise(queue):
     queue.start()
     queue.stop()
+
+
+# --- Sprint 6.14 hardening (scenario d): concurrent enqueue() vs. peek_next()/pop_next() ------
+
+
+def test_peek_next_survives_concurrent_enqueue_from_many_threads(queue):
+    """A real, concrete reproduction, not just reasoning about the GIL
+    in the abstract — matching this project's own established "verify a
+    race with a real minimal reproduction" discipline (e.g. Sprint
+    5.25/5.26's own scheduler-vs-direct-call races). AdaptivePrioritizer.
+    next_item() (6.12) calls peek_next() exactly once per call, so this
+    exercises the actual shape of the real race: many threads (standing
+    in for ProactiveAssistant._on_tick(), WellnessTracker, ReminderEngine,
+    etc., all enqueuing onto the same shared queue) hammering enqueue()
+    concurrently with another thread repeatedly calling peek_next()/
+    pop_next() — heapq.heappush()/heappop() on tuples that already sort
+    uniquely by their own monotonic counter (never falling through to
+    comparing the non-orderable PriorityItem payload itself) never
+    releases the GIL mid-operation in CPython, so no torn read is
+    possible; this test proves that empirically rather than asserting it
+    from documentation."""
+    import threading
+
+    thread_count = 8
+    items_per_thread = 200
+    errors: list[BaseException] = []
+    stop_peeking = threading.Event()
+    peek_results: list[PriorityLevel] = []
+
+    def _enqueue_many(thread_index: int) -> None:
+        try:
+            for i in range(items_per_thread):
+                queue.enqueue(f"t{thread_index}-{i}", PriorityLevel.GENERAL_SUGGESTION, "test")
+        except BaseException as exc:  # noqa: BLE001 - captured for the main thread to re-raise
+            errors.append(exc)
+
+    def _peek_repeatedly() -> None:
+        try:
+            while not stop_peeking.is_set():
+                item = queue.peek_next()
+                if item is not None:
+                    peek_results.append(item.priority)
+        except BaseException as exc:  # noqa: BLE001 - captured for the main thread to re-raise
+            errors.append(exc)
+
+    peeker = threading.Thread(target=_peek_repeatedly)
+    enqueuers = [
+        threading.Thread(target=_enqueue_many, args=(i,)) for i in range(thread_count)
+    ]
+
+    peeker.start()
+    for t in enqueuers:
+        t.start()
+    for t in enqueuers:
+        t.join()
+    stop_peeking.set()
+    peeker.join()
+
+    assert errors == []
+    assert len(queue._heap) == thread_count * items_per_thread  # nothing lost, nothing duplicated
+    # every real peek during the race saw a genuine, valid PriorityItem, never a
+    # corrupted/partial one — the only PriorityLevel ever enqueued in this test.
+    assert all(priority is PriorityLevel.GENERAL_SUGGESTION for priority in peek_results)

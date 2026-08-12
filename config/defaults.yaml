@@ -701,6 +701,10 @@ planning:
   # TaskEdges per task (how many prerequisites a single task may have),
   # enforced by TaskGraph.add_dependency() — not a product requirement.
   max_task_dependencies: 20
+  # Sprint 6.10 — Self Evaluation. Mirrors decomposition_timeout_seconds's
+  # own dedicated-timeout precedent; not yet consumed by SelfEvaluator —
+  # see config/schema.py's own PlanningConfig docstring for why.
+  evaluation_timeout_seconds: 30.0
 
 context_engine:
   # Sprint 6.3 — Context Engine, Level 6 Part A. How many recent
@@ -721,6 +725,10 @@ reasoning:
   # default, mirroring planning.decomposition_timeout_seconds' identical
   # "a longer, more open-ended generation needs a longer timeout" reasoning.
   reasoning_timeout_seconds: 30.0
+  # Sprint 6.11 — Explainability Layer. A defensive upper bound on a
+  # composed explanation's own length, enforced by
+  # ExplainabilityLayer._compose() — not a product requirement.
+  max_explanation_sentences: 4
 
 decision_engine_v2:
   # Sprint 6.5 — Decision Engine v2, Level 6 Part A. The three composite-
@@ -730,6 +738,23 @@ decision_engine_v2:
   risk_weight: 0.4
   confidence_weight: 0.35
   priority_weight: 0.25
+  # Sprint 6.12 — Adaptive Prioritization. How long a soft (WELLNESS/
+  # GENERAL_SUGGESTION) queued item may be deferred while the user is
+  # actively mid-conversation before AdaptivePrioritizer.next_item()
+  # surfaces it anyway.
+  active_conversation_defer_seconds: 120.0
+  # Below this battery percentage, a power-relevant queued item (a
+  # battery ResourceAlert, a BATTERY_CRITICAL ProactivePrompt) is
+  # boosted to SURFACE_NOW regardless of its own priority level.
+  low_battery_boost_threshold_percent: 10.0
+  # How recent ConversationContext.last_activity_at must be to count as
+  # "an active, in-progress session" at all — deliberately distinct from
+  # voice.session_timeout_seconds' own much shorter inter-turn-silence
+  # window, which answers a different question.
+  conversation_active_threshold_seconds: 300.0
+  # Below this ReasoningEngine.estimate_confidence() value, a
+  # GENERAL_SUGGESTION item resolves HOLD instead of SURFACE_NOW.
+  low_confidence_hold_threshold: 0.4
 
 knowledge_graph:
   # Sprint 6.6 — Knowledge Graph, Level 6 Part A. A defensive upper bound

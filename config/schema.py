@@ -1512,12 +1512,29 @@ class PlanningConfig:
     TaskGraph.add_dependency(), the same "defensive bound enforced at
     the write boundary" discipline max_milestones_per_goal/
     max_tasks_per_milestone above already establish.
+
+    evaluation_timeout_seconds (Sprint 6.10 — Self Evaluation) mirrors
+    decomposition_timeout_seconds's own "dedicated timeout per LLM-
+    call-owning field" precedent. A real, disclosed gap: nothing in
+    reasoning/reasoning_engine.py's own ReasoningEngine.explain_why()
+    signature accepts a caller-supplied timeout override at all — every
+    ReasoningEngine method always uses its own internal
+    ReasoningConfig.reasoning_timeout_seconds — so this field is
+    genuinely accepted and validated per this sprint's own literal
+    instruction but not yet consumed by planning/self_evaluator.py's
+    SelfEvaluator, which would need reasoning_engine.py's own signature
+    widened to actually apply it (that file is outside this sprint's own
+    Files to Modify). The third instance of this Book's own "accepted
+    but not yet consumed constructor collaborator" pattern (Sprint 6.5's
+    authority_evaluator, Sprint 6.8's decision_engine_v2/
+    pattern_recognizer).
     """
 
     max_milestones_per_goal: int = 5
     max_tasks_per_milestone: int = 8
     decomposition_timeout_seconds: float = 45.0
     max_task_dependencies: int = 20
+    evaluation_timeout_seconds: float = 30.0
 
 
 @dataclass
@@ -1558,10 +1575,19 @@ class ReasoningConfig:
     own 10.0s default, mirroring PlanningConfig.decomposition_timeout_
     seconds' identical "a longer, more open-ended generation needs a
     longer timeout" reasoning.
+
+    max_explanation_sentences (Sprint 6.11 — Explainability Layer) is a
+    defensive bound on how long a composed explanation is allowed to
+    run — an explanation stitched from several trace objects
+    (reasoning/explainability.py's ExplainabilityLayer._compose())
+    could otherwise grow unboundedly verbose. Mirrors max_alternatives'
+    own established "defensive bound enforced at the parse/compose
+    boundary" discipline.
     """
 
     max_alternatives: int = 3
     reasoning_timeout_seconds: float = 30.0
+    max_explanation_sentences: int = 4
 
 
 @dataclass
@@ -1582,11 +1608,35 @@ class DecisionEngineConfig:
     Real, disclosed, unvalidated first-pass defaults — a candidate for
     adjustment once Sprint 6.15's real-usage verification pass observes
     actual ranking behavior, per this sprint's own Potential Risks.
+
+    active_conversation_defer_seconds/low_battery_boost_threshold_percent
+    (Sprint 6.12 — Adaptive Prioritization) are this sprint's own two
+    named fields. Two further, disclosed additions beyond this sprint
+    file's own literal Files to Modify text, both genuinely necessary
+    for `decision/adaptive_prioritizer.py`'s own logic and added to this
+    same already-authorized config section rather than a new one, the
+    same "a config field the sprint's own logic needed but its own Files
+    to Modify list never named" gap `WellnessConfig.high_stress_threshold`/
+    `AnalyticsConfig.top_applications_limit` already established:
+    conversation_active_threshold_seconds (how recent
+    `ConversationContext.last_activity_at` must be to count as "an
+    active, in-progress session" at all — deliberately its own field,
+    not a reuse of `VoiceConfig.session_timeout_seconds`, since that
+    field's own 30-second inter-turn-silence window answers a different
+    question — "should this voice session end" — at a much shorter
+    timescale than "is the user still meaningfully engaged" needs) and
+    low_confidence_hold_threshold (the numeric cutoff behind "when
+    decision_engine_v2's own confidence signal is low," which this
+    sprint file's own text never assigns a concrete value).
     """
 
     risk_weight: float = 0.4
     confidence_weight: float = 0.35
     priority_weight: float = 0.25
+    active_conversation_defer_seconds: float = 120.0
+    low_battery_boost_threshold_percent: float = 10.0
+    conversation_active_threshold_seconds: float = 300.0
+    low_confidence_hold_threshold: float = 0.4
 
 
 @dataclass
@@ -2556,6 +2606,11 @@ class AppConfig:
             raise ConfigError(
                 f"planning.max_task_dependencies must be positive, got {p.max_task_dependencies}"
             )
+        if p.evaluation_timeout_seconds <= 0:
+            raise ConfigError(
+                "planning.evaluation_timeout_seconds must be positive, got "
+                f"{p.evaluation_timeout_seconds}"
+            )
 
     def _validate_context_engine(self) -> None:
         c = self.context_engine
@@ -2586,6 +2641,11 @@ class AppConfig:
                 "reasoning.reasoning_timeout_seconds must be positive, got "
                 f"{r.reasoning_timeout_seconds}"
             )
+        if r.max_explanation_sentences <= 0:
+            raise ConfigError(
+                "reasoning.max_explanation_sentences must be positive, got "
+                f"{r.max_explanation_sentences}"
+            )
 
     def _validate_decision_engine_v2(self) -> None:
         weights = {
@@ -2596,6 +2656,27 @@ class AppConfig:
         for name, value in weights.items():
             if not (0 <= value <= 1):
                 raise ConfigError(f"decision_engine_v2.{name} must be in [0, 1], got {value}")
+        d = self.decision_engine_v2
+        if d.active_conversation_defer_seconds <= 0:
+            raise ConfigError(
+                "decision_engine_v2.active_conversation_defer_seconds must be positive, got "
+                f"{d.active_conversation_defer_seconds}"
+            )
+        if not (0 < d.low_battery_boost_threshold_percent <= 100):
+            raise ConfigError(
+                "decision_engine_v2.low_battery_boost_threshold_percent must be in (0, 100], "
+                f"got {d.low_battery_boost_threshold_percent}"
+            )
+        if d.conversation_active_threshold_seconds <= 0:
+            raise ConfigError(
+                "decision_engine_v2.conversation_active_threshold_seconds must be positive, got "
+                f"{d.conversation_active_threshold_seconds}"
+            )
+        if not (0 <= d.low_confidence_hold_threshold <= 1):
+            raise ConfigError(
+                "decision_engine_v2.low_confidence_hold_threshold must be in [0, 1], got "
+                f"{d.low_confidence_hold_threshold}"
+            )
         weight_sum = sum(weights.values())
         if abs(weight_sum - 1.0) > 1e-6:
             raise ConfigError(

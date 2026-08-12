@@ -264,12 +264,12 @@ See the "Level 6 breakdown changes (2026-08-06)" note above for why this table i
 | 6.7    | Learning Engine v2                                   | 5.17/5.20, 5.21, 5.23, 4.9, 6.6 (soft) | Medium | [sprint_6_7.md](sprint_6/sprint_6_7.md) — **Complete** |
 | 6.8    | Proactive Assistant                                  | 6.3, 6.5, 6.6, 6.7, 4.15, 3.10 | High       | [sprint_6_8.md](sprint_6/sprint_6_8.md) — **Complete** |
 | 6.9    | Multi-Step Workflow Engine                           | 4.9, 4.10, 4.2, 6.2, 6.5, 6.6, 6.3 | Medium–High | [sprint_6_9.md](sprint_6/sprint_6_9.md) — **Complete** |
-| 6.10   | Self Evaluation                                      | 6.2, 6.9, 6.4                | Medium      | [sprint_6_10.md](sprint_6/sprint_6_10.md) |
-| 6.11   | Explainability Layer                                 | 3.11, 6.4, 6.1, 6.2, 6.5, 6.10 | Medium     | [sprint_6_11.md](sprint_6/sprint_6_11.md) |
-| 6.12   | Adaptive Prioritization                              | 3.10, 6.5, 6.3, 6.8           | Medium–High | [sprint_6_12.md](sprint_6/sprint_6_12.md) |
-| 6.13   | Autonomous Intelligence Integration                  | 6.1–6.12, 2.12, 3.11, 5.24    | High        | [sprint_6_13.md](sprint_6/sprint_6_13.md) |
-| 6.14   | Error Handling & Recovery Hardening (Part A)         | 6.13                          | Medium      | [sprint_6_14.md](sprint_6/sprint_6_14.md) |
-| 6.15   | Integration Testing & Level Freeze (Part A)          | 6.14                          | Medium–High | [sprint_6_15.md](sprint_6/sprint_6_15.md) |
+| 6.10   | Self Evaluation                                      | 6.2, 6.9, 6.4                | Medium      | [sprint_6_10.md](sprint_6/sprint_6_10.md) — **Complete** |
+| 6.11   | Explainability Layer                                 | 3.11, 6.4, 6.1, 6.2, 6.5, 6.10 | Medium     | [sprint_6_11.md](sprint_6/sprint_6_11.md) — **Complete** |
+| 6.12   | Adaptive Prioritization                              | 3.10, 6.5, 6.3, 6.8           | Medium–High | [sprint_6_12.md](sprint_6/sprint_6_12.md) — **Complete** |
+| 6.13   | Autonomous Intelligence Integration                  | 6.1–6.12, 2.12, 3.11, 5.24    | High        | [sprint_6_13.md](sprint_6/sprint_6_13.md) — **Complete** |
+| 6.14   | Error Handling & Recovery Hardening (Part A)         | 6.13                          | Medium      | [sprint_6_14.md](sprint_6/sprint_6_14.md) — **Complete** |
+| 6.15   | Integration Testing & Level Freeze (Part A)          | 6.14                          | Medium–High | [sprint_6_15.md](sprint_6/sprint_6_15.md) — **Complete** |
 
 ### Part B — Stabilization (roadmap granularity only; renumbered — see "Level 6 breakdown changes" note above)
 

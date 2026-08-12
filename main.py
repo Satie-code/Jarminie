@@ -58,14 +58,17 @@ from config.schema import (
     SchedulerConfig,
     WellnessConfig,
 )
+from context.context_engine import ContextEngine
 from core import configure_logging
 from core.logging_setup import get_logger
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
 from core.runtime_manager import RuntimeManager, ServiceTier
 from database.sqlite_client import SqliteClient
+from decision.adaptive_prioritizer import AdaptivePrioritizer
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
+from decision.decision_engine_v2 import DecisionEngineV2
 from decision.intent_detector import IntentDetector
 from decision.llm_client import OllamaClient
 from decision.priority_queue import PriorityQueueManager
@@ -83,6 +86,7 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider_registry import create_search_provider_with_fallback
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from knowledge.knowledge_graph_store import KnowledgeGraphStore
 from learning.pattern_recognizer import PatternRecognizer
 from learning.pattern_store import PatternStore
 from learning.preference_learner import PreferenceLearner
@@ -99,6 +103,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from planning.planning_engine import PlanningEngine
+from planning.self_evaluator import SelfEvaluator
+from planning.task_graph_store import TaskGraphStore
 from presentation.adaptive_workspace import AdaptiveWorkspaceController
 from presentation.avatar_renderer import AvatarRenderer
 from presentation.avatar_renderer_registry import NullAvatarRenderer, create_avatar_renderer
@@ -112,6 +119,9 @@ from presentation.minie_state_computer import MiniePresentationStateComputer
 from presentation.presentation_controller import PresentationController
 from presentation.transition_engine import TransitionEngine
 from presentation.voice_personality import VoicePersonalityModulator
+from proactive.proactive_assistant import ProactiveAssistant
+from reasoning.explainability import ExplainabilityLayer
+from reasoning.reasoning_engine import ReasoningEngine
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -121,7 +131,7 @@ from security.policy_engine import PermissionPolicyEngine
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, SoundDeviceAudioBackend
-from voice.pipeline import CallbackRelay, CommunicationPipeline
+from voice.pipeline import CallbackRelay, CommunicationPipeline, DecisionTraceLookupRelay
 from voice.quiet_mode import QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import LazySpeechToText, WhisperSpeechToText
@@ -130,6 +140,8 @@ from voice.wake_word import OpenWakeWordEngine, WakeWordDetector
 from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
 from wellness.escalation import WellnessEscalationManager
 from wellness.wellness_tracker import WellnessTracker
+from workflow.session_resumption import SessionResumption
+from workflow.task_graph_adapter import TaskGraphWorkflowAdapter
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
 
@@ -302,6 +314,42 @@ class _Level5PartBModules:
     available: bool = True
 
 
+@dataclass
+class _Level6PartAModules:
+    """Bundles every Level 6 Part A (Autonomous Intelligence & Cognitive
+    Architecture) object CommunicationPipeline or CoreManager
+    registration needs (Sprint 6.13). Mirrors _Level5PartBModules' own
+    shape exactly — every field X | None typed, a genuine construction
+    failure degrading the whole Part to inert rather than any half-wired
+    partial graph, the same simpler-than-Part-A-presentation fallback
+    already established there.
+
+    Only task_graph_store/knowledge_graph_store/proactive_assistant are
+    real ManagedModules — planning_engine/context_engine/reasoning_engine/
+    decision_engine_v2/explainability_layer/adaptive_prioritizer/
+    task_graph_workflow_adapter/session_resumption/self_evaluator are all
+    plain, lifecycle-free collaborators, per each one's own originating
+    sprint (6.1/6.3/6.4/6.5/6.11/6.12/6.9/6.9/6.10 respectively).
+    decision_trace_lookup_relay is not itself a Level 6 Part A object —
+    see _construct_level6_part_a_modules()'s own docstring for why it is
+    threaded through this bundle anyway."""
+
+    task_graph_store: TaskGraphStore | None
+    knowledge_graph_store: KnowledgeGraphStore | None
+    planning_engine: PlanningEngine | None
+    context_engine: ContextEngine | None
+    reasoning_engine: ReasoningEngine | None
+    decision_engine_v2: DecisionEngineV2 | None
+    explainability_layer: ExplainabilityLayer | None
+    adaptive_prioritizer: AdaptivePrioritizer | None
+    task_graph_workflow_adapter: TaskGraphWorkflowAdapter | None
+    session_resumption: SessionResumption | None
+    self_evaluator: SelfEvaluator | None
+    proactive_assistant: ProactiveAssistant | None
+    decision_trace_lookup_relay: DecisionTraceLookupRelay
+    available: bool = True
+
+
 def _prewarm_tts_before_pyside6() -> None:
     """Must run before ANY import that could pull in PySide6, including
     the local `from ui.app import run_app` immediately below this call
@@ -457,6 +505,35 @@ def main() -> int:
         )
         level5b_modules = _null_level5_part_b_modules()
 
+    # Sprint 6.13, mirroring Sprint 5.24's own identical discipline
+    # immediately above: a genuine Level 6 Part A construction failure
+    # must not take Levels 1-5 down with it. Constructed last of every
+    # level — needs Level 2's context_manager, Level 3's memory_store/
+    # priority_queue_manager/authority_evaluator, Level 4 Part B's
+    # task_scheduler/calendar_store, and Level 5 Part B's usage_store/
+    # pattern_recognizer (both possibly None on that Part's own
+    # construction fallback — ContextEngine/ProactiveAssistant both
+    # tolerate it) all already resolved.
+    try:
+        level6a_modules = _construct_level6_part_a_modules(
+            config,
+            resource_monitor,
+            level2_modules.context_manager,
+            level3_modules.memory_store,
+            level4b_modules.task_scheduler,
+            level4b_modules.calendar_store,
+            level5b_modules.usage_store,
+            level3_modules.priority_queue_manager,
+            level3_modules.authority_evaluator,
+            level5b_modules.pattern_recognizer,
+        )
+    except Exception:
+        logger.exception(
+            "Level 6 Part A construction failed; continuing startup with Levels 1-5 intact "
+            "and Level 6 Part A unavailable."
+        )
+        level6a_modules = _null_level6_part_a_modules()
+
     # Resolves the real circular-construction problem Sprint 5.10's own
     # docstring named explicitly: PersonaManager (Level 2) must be
     # constructed with on_switch already set, but its real target,
@@ -472,9 +549,17 @@ def main() -> int:
 
     pipeline = _construct_pipeline(
         level2_modules, level3_modules, level4_modules, level4b_modules, level5_modules,
-        level5b_modules, config.scheduler, config.memory, config.learning, config.wellness,
-        core_manager.runtime_manager(), resource_monitor, config.runtime,
+        level5b_modules, level6a_modules, config.scheduler, config.memory, config.learning,
+        config.wellness, core_manager.runtime_manager(), resource_monitor, config.runtime,
     )
+    # Sprint 6.13's own identical circular-construction resolution,
+    # immediately above's persona_switch_relay precedent: ExplainabilityLayer
+    # needed a decision_trace_lookup callable before this pipeline existed
+    # (_construct_level6_part_a_modules()'s own DecisionTraceLookupRelay);
+    # now that it does, point the relay at the real method. Unconditional —
+    # lookup_last_decision_trace() is always a real, safe method on
+    # CommunicationPipeline regardless of Level 6 Part A's own availability.
+    level6a_modules.decision_trace_lookup_relay.target = pipeline.lookup_last_decision_trace
 
     _register_level4_part_b_early(core_manager, level4b_modules)
     _register_level2_modules(core_manager, level2_modules, pipeline)
@@ -482,6 +567,7 @@ def main() -> int:
     _register_level4_modules(core_manager, level4_modules)
     _register_level5_modules(core_manager, level5_modules)
     _register_level5_part_b_modules(core_manager, level5b_modules)
+    _register_level6_part_a_modules(core_manager, level6a_modules)
 
     # ui.app is deliberately imported here, locally, rather than at this
     # module's own top level, so that _prewarm_tts_before_pyside6() above
@@ -1076,6 +1162,160 @@ def _null_level5_part_b_modules() -> _Level5PartBModules:
     )
 
 
+def _construct_level6_part_a_modules(
+    config: AppConfig,
+    resource_monitor: ResourceMonitor,
+    context_manager: ContextManager,
+    memory_store: MemoryStoreProtocol,
+    task_scheduler: TaskScheduler,
+    calendar_store: CalendarStore,
+    usage_store: UsageStore | None,
+    priority_queue_manager: PriorityQueueManager,
+    authority_evaluator: AuthorityEvaluator,
+    pattern_recognizer: PatternRecognizer | None,
+) -> _Level6PartAModules:
+    """Construct every Level 6 Part A (Autonomous Intelligence & Cognitive
+    Architecture) subsystem via DI — construction only, no CoreManager
+    registration (see _register_level6_part_a_modules() below). Needs
+    context_manager (Level 2), memory_store (Level 3), task_scheduler/
+    calendar_store (Level 4 Part B), usage_store (Level 5 Part B, itself
+    possibly None on that Part's own construction fallback — ContextEngine
+    tolerates it), priority_queue_manager/authority_evaluator (Level 3),
+    and pattern_recognizer (Level 5 Part B, likewise possibly None)
+    already constructed — the last of every level to construct, per
+    main()'s own ordering comment.
+
+    Builds a fresh SqliteClient per store and a fresh OllamaClient/
+    PermissionPolicyEngine of its own, rather than reaching into
+    _construct_level3_modules()'s/_construct_level4_modules()'s own
+    private locals — the same "every _construct_level*_modules()
+    function builds its own fresh instance, never shares one across
+    functions" precedent _construct_level5_part_b_modules()'s own
+    docstring already established for SqliteClient specifically, applied
+    here to OllamaClient/PermissionPolicyEngine too (both are cheap,
+    stateless, config-driven objects with no shared mutable state to
+    diverge). authority_evaluator is the one deliberate exception — reused
+    directly from Level 3 rather than constructing a second, pointless
+    instance, since DecisionEngineV2 accepts one per its own literal
+    constructor signature but never actually calls it (a real, disclosed
+    "accepted but not yet consumed" gap Sprint 6.5's own docstring already
+    named).
+
+    decision_trace_lookup_relay resolves a real circular-construction
+    problem, the identical shape this file's own docstring already
+    describes for persona_switch_relay: ExplainabilityLayer needs a
+    decision_trace_lookup callable at construction time, but its real
+    target, CommunicationPipeline.lookup_last_decision_trace, belongs to
+    an object not built until _construct_pipeline() runs, after this
+    function returns. A DecisionTraceLookupRelay stands in here; main()'s
+    own body points its .target at the real method once the pipeline
+    exists, mirroring persona_switch_relay.target's own identical
+    post-hoc patch."""
+    database_config = config.database
+    model_config = config.models
+    planning_config = config.planning
+    context_engine_config = config.context_engine
+    reasoning_config = config.reasoning
+    decision_engine_config = config.decision_engine_v2
+    knowledge_graph_config = config.knowledge_graph
+    workflow_config = config.workflow
+    proactive_config = config.proactive
+    security_config = config.security
+
+    task_graph_sqlite_client = SqliteClient(database_config.sqlite_path)
+    task_graph_store = TaskGraphStore(task_graph_sqlite_client, planning_config)
+
+    knowledge_graph_sqlite_client = SqliteClient(database_config.sqlite_path)
+    knowledge_graph_store = KnowledgeGraphStore(
+        knowledge_graph_sqlite_client, knowledge_graph_config
+    )
+
+    context_engine = ContextEngine(
+        context_manager=context_manager,
+        memory_store=memory_store,
+        usage_store=usage_store,
+        calendar_store=calendar_store,
+        resource_monitor=resource_monitor,
+        context_engine_config=context_engine_config,
+    )
+
+    llm_client = OllamaClient(model_config)
+    planning_engine = PlanningEngine(llm_client, model_config, planning_config)
+    reasoning_engine = ReasoningEngine(llm_client, model_config, reasoning_config)
+
+    permission_policy_engine = PermissionPolicyEngine(security_config)
+    decision_engine_v2 = DecisionEngineV2(
+        authority_evaluator, permission_policy_engine, reasoning_engine, decision_engine_config
+    )
+
+    decision_trace_lookup_relay = DecisionTraceLookupRelay()
+    explainability_layer = ExplainabilityLayer(
+        reasoning_engine, task_graph_store, decision_trace_lookup_relay, reasoning_config
+    )
+    adaptive_prioritizer = AdaptivePrioritizer(
+        priority_queue_manager, decision_engine_v2, decision_engine_config, reasoning_engine
+    )
+    task_graph_workflow_adapter = TaskGraphWorkflowAdapter(decision_engine_v2, workflow_config)
+    session_resumption = SessionResumption(knowledge_graph_store, context_engine, workflow_config)
+    self_evaluator = SelfEvaluator(reasoning_engine, task_graph_store, planning_config)
+    proactive_assistant = ProactiveAssistant(
+        task_scheduler,
+        priority_queue_manager,
+        context_engine,
+        decision_engine_v2,
+        knowledge_graph_store,
+        pattern_recognizer,
+        proactive_config,
+    )
+
+    return _Level6PartAModules(
+        task_graph_store=task_graph_store,
+        knowledge_graph_store=knowledge_graph_store,
+        planning_engine=planning_engine,
+        context_engine=context_engine,
+        reasoning_engine=reasoning_engine,
+        decision_engine_v2=decision_engine_v2,
+        explainability_layer=explainability_layer,
+        adaptive_prioritizer=adaptive_prioritizer,
+        task_graph_workflow_adapter=task_graph_workflow_adapter,
+        session_resumption=session_resumption,
+        self_evaluator=self_evaluator,
+        proactive_assistant=proactive_assistant,
+        decision_trace_lookup_relay=decision_trace_lookup_relay,
+    )
+
+
+def _null_level6_part_a_modules() -> _Level6PartAModules:
+    """Sprint 6.13's own fallback, used only when
+    _construct_level6_part_a_modules() itself raised — mirrors Sprint
+    5.24's identical "a broken subsystem must not take the rest of
+    startup down with it" discipline. decision_trace_lookup_relay is
+    still constructed for real even here: CommunicationPipeline.
+    lookup_last_decision_trace() is unconditional (main()'s own body
+    wires the relay's .target regardless of this Part's own
+    availability, matching persona_switch_relay's own identical
+    always-wired shape), so a real relay instance must exist to receive
+    that wiring even though nothing will ever actually call it (with
+    explainability_layer itself None here, ExplainabilityLayer.explain()
+    is never reached)."""
+    return _Level6PartAModules(
+        task_graph_store=None,
+        knowledge_graph_store=None,
+        planning_engine=None,
+        context_engine=None,
+        reasoning_engine=None,
+        decision_engine_v2=None,
+        explainability_layer=None,
+        adaptive_prioritizer=None,
+        task_graph_workflow_adapter=None,
+        session_resumption=None,
+        self_evaluator=None,
+        proactive_assistant=None,
+        decision_trace_lookup_relay=DecisionTraceLookupRelay(),
+        available=False,
+    )
+
+
 def _construct_pipeline(
     level2_modules: _Level2Modules,
     level3_modules: _Level3Modules,
@@ -1083,6 +1323,7 @@ def _construct_pipeline(
     level4b_modules: _Level4PartBModules,
     level5_modules: _Level5Modules,
     level5b_modules: _Level5PartBModules,
+    level6a_modules: _Level6PartAModules,
     scheduler_config: SchedulerConfig,
     memory_config: MemoryConfig,
     learning_config: LearningConfig,
@@ -1093,12 +1334,12 @@ def _construct_pipeline(
 ) -> CommunicationPipeline:
     """Built last, once every level's prerequisite objects exist —
     CommunicationPipeline is the one object that needs Level 2, 3, 4, 4B,
-    5, AND 5B collaborators at once. scheduler_config/memory_config/
-    learning_config/wellness_config are passed separately (rather than
-    threaded through a *Modules bundle) since they're plain config
-    slices, not constructed objects, matching how every other *_config
-    value already reaches this function's own callers directly from
-    AppConfig.
+    5, 5B, AND 6 Part A collaborators at once. scheduler_config/
+    memory_config/learning_config/wellness_config are passed separately
+    (rather than threaded through a *Modules bundle) since they're plain
+    config slices, not constructed objects, matching how every other
+    *_config value already reaches this function's own callers directly
+    from AppConfig.
 
     Runtime Phase 9 (Runtime Refactor Sprint): runtime_manager is the
     SAME instance core_manager.runtime_manager() already exposes (the
@@ -1161,6 +1402,14 @@ def _construct_pipeline(
         runtime_manager=runtime_manager,
         resource_monitor=resource_monitor,
         runtime_config=runtime_config,
+        task_graph_store=level6a_modules.task_graph_store,
+        planning_engine=level6a_modules.planning_engine,
+        context_engine=level6a_modules.context_engine,
+        explainability_layer=level6a_modules.explainability_layer,
+        adaptive_prioritizer=level6a_modules.adaptive_prioritizer,
+        task_graph_workflow_adapter=level6a_modules.task_graph_workflow_adapter,
+        session_resumption=level6a_modules.session_resumption,
+        self_evaluator=level6a_modules.self_evaluator,
     )
 
 
@@ -1503,6 +1752,65 @@ def _register_level5_part_b_modules(
     )
     core_manager.register_module(
         "wellness_tracker", level5b_modules.wellness_tracker, tier=ServiceTier.WARM
+    )
+
+
+def _register_level6_part_a_modules(
+    core_manager: CoreManager, level6a_modules: _Level6PartAModules
+) -> None:
+    """Registered after every Level 2/3/4/5/5B module (see main()'s own
+    ordering comment) — same "keep the wake_word_detector-to-
+    communication_pipeline relay-wiring gap tight" discipline every prior
+    level's own registration function already established.
+    proactive_assistant's own start() calls task_scheduler.add_job(),
+    requiring task_scheduler to already be started — satisfied here the
+    same way it already is for every other TaskScheduler-job-registering
+    module (usage_tracker/pattern_recognizer/wellness_tracker above):
+    task_scheduler itself is registered first of all, by
+    _register_level4_part_b_early(), long before this function ever runs.
+
+    Only task_graph_store/knowledge_graph_store/proactive_assistant are
+    real ManagedModules among everything Level 6 Part A constructs —
+    planning_engine/context_engine/reasoning_engine/decision_engine_v2/
+    explainability_layer/adaptive_prioritizer/task_graph_workflow_adapter/
+    session_resumption/self_evaluator are all plain, lifecycle-free
+    collaborators (each one's own originating sprint documented this
+    explicitly), so they are never registered — the identical "only
+    register what has a real lifecycle" discipline every prior level's
+    own registration function already established.
+
+    Sprint 6.13's own fallback: if level6a_modules.available is False
+    (the main()-level construction fallback fired), none of the three are
+    registered at all — CoreManager simply never learns these objects
+    exist, matching every prior level's own scenario-(e)-style fallback."""
+    if not level6a_modules.available:
+        logger.info(
+            "Level 6 Part A construction fallback is active; skipping CoreManager "
+            "registration for task_graph_store/knowledge_graph_store/proactive_assistant."
+        )
+        return
+    # available=True is only ever set by _construct_level6_part_a_modules()'s
+    # own real return, which never leaves a field None — asserted here
+    # purely to narrow the type checker's view of _Level6PartAModules'
+    # own Type | None fields, not because this is a runtime possibility.
+    assert level6a_modules.task_graph_store is not None
+    assert level6a_modules.knowledge_graph_store is not None
+    assert level6a_modules.proactive_assistant is not None
+    # Runtime Phase 7 (Runtime Refactor Sprint)-style tier=ServiceTier.WARM
+    # for all three — each one's own start() is either a cheap SQLite
+    # connect+CREATE TABLE (task_graph_store, knowledge_graph_store) or
+    # just a TaskScheduler.add_job() registration (proactive_assistant),
+    # no expensive load to gate behind lazy=True/ensure_started(), the
+    # identical reasoning _register_level5_part_b_modules()'s own
+    # docstring already established for its own five modules.
+    core_manager.register_module(
+        "task_graph_store", level6a_modules.task_graph_store, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "knowledge_graph_store", level6a_modules.knowledge_graph_store, tier=ServiceTier.WARM
+    )
+    core_manager.register_module(
+        "proactive_assistant", level6a_modules.proactive_assistant, tier=ServiceTier.WARM
     )
 
 

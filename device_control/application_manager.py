@@ -118,10 +118,10 @@ class ApplicationManager:
         return action_type in _HANDLED_TYPES
 
     def execute(self, request: ActionRequest) -> ActionResult:
-        if request.action_type is ActionType.OPEN_URL:
-            return self._handle_open_url(request)
         operation = request.parameters.get("operation")
         try:
+            if request.action_type is ActionType.OPEN_URL:
+                return self._handle_open_url(request)
             if operation == "launch":
                 return self._handle_launch(request)
             if operation == "close":

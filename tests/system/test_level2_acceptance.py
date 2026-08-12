@@ -127,5 +127,9 @@ def test_full_level2_acceptance_scripted_conversation(
         "pattern_store",
         "pattern_recognizer",
         "wellness_tracker",
+        # Sprint 6.13 (Level 6 Part A — Autonomous Intelligence).
+        "task_graph_store",
+        "knowledge_graph_store",
+        "proactive_assistant",
     }
     assert all(state == "running" for state in states.values())

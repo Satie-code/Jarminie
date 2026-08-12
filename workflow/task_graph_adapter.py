@@ -38,7 +38,23 @@ description into a real, dispatchable parameter is out of this sprint's
 own scope (no textual basis names it); a generated LAUNCH_APPLICATION
 step may well fail with FileNotFoundError at real dispatch time, an
 honest, disclosed gap rather than a fabricated success.
-"""
+
+**Sprint 6.13 (Autonomous Intelligence Integration) correction to
+build_workflow()'s own return shape, disclosed here rather than in that
+sprint's own file since this is the module whose contract actually
+changes**: `build_workflow()` now returns `(WorkflowDefinition,
+list[Task])`, the second element the originating Task for each step, in
+the exact same order as `WorkflowDefinition.steps` — genuinely necessary
+for Sprint 6.13's own `CommunicationPipeline._finalize_workflow_run()`,
+which wires a finished `WorkflowRunResult` back onto the `Task`s that
+produced it (`TaskGraph.mark_completed()`/`mark_failed()`, deferred by
+this sprint to 6.13's own integration). `decision_engine_v2.
+rank_actions()` reorders candidates by composite_score, so the original
+`task_graph.ready_tasks()` order cannot be zipped against the returned
+steps after the fact — the mapping has to be produced here, at the one
+point in this method that still has both the ranked ActionRequest and
+its own originating Task in hand simultaneously (task_by_request_id
+below)."""
 
 from __future__ import annotations
 
@@ -90,7 +106,9 @@ class TaskGraphWorkflowAdapter:
         self._decision_engine_v2 = decision_engine_v2
         self._config = workflow_config
 
-    def build_workflow(self, task_graph: TaskGraph, created_by: str) -> WorkflowDefinition:
+    def build_workflow(
+        self, task_graph: TaskGraph, created_by: str
+    ) -> tuple[WorkflowDefinition, list[Task]]:
         """Classifies each of task_graph.ready_tasks() (bounded to
         workflow_config.max_steps_from_task_graph) into a candidate
         ActionRequest, ranks them via decision_engine_v2.rank_actions(),
@@ -98,7 +116,9 @@ class TaskGraphWorkflowAdapter:
         step's own description copied from the originating Task.title,
         preserving the Explainability Rule's existing "step description
         is human-readable" property workflow/workflow_model.py already
-        established."""
+        established. The second return value is the originating Task per
+        step, same order — see this module's own docstring (Sprint
+        6.13's own necessary correction)."""
         tasks = task_graph.ready_tasks()[: self._config.max_steps_from_task_graph]
         now = datetime.now(UTC)
 
@@ -126,10 +146,14 @@ class TaskGraphWorkflowAdapter:
             )
             for index, ranked_action in enumerate(ranked)
         ]
-        return WorkflowDefinition(
+        originating_tasks = [
+            task_by_request_id[id(ranked_action.action_request)] for ranked_action in ranked
+        ]
+        definition = WorkflowDefinition(
             workflow_id=str(uuid.uuid4()),
             name=f"Plan: {task_graph.goal.statement}",
             steps=steps,
             created_by=created_by,
             created_at=now,
         )
+        return definition, originating_tasks

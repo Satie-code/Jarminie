@@ -24,6 +24,8 @@ never modify this enum):
                                 CONVERSATIONAL_RESPONSE path (5.4) — a *style* choice, not
                                 a distinct subsystem dispatch; CommunicationPipeline still
                                 has no dedicated EMOTION_SUPPORT branch of its own (5.14)
+    PLANNING                 - wired: CommunicationPipeline._handle_planning_turn() (6.13)
+    EXPLANATION               - wired: CommunicationPipeline._handle_explanation_turn() (6.13)
 
 SCHEDULER/INTERNET_AGENT routing (Sprint 4.18, _determine_engine()),
 the same additive-branch pattern Sprint 4.11 already established for
@@ -187,8 +189,20 @@ class AuthorityLevel(Enum):
 
 
 class EngineSelection(Enum):
-    """Every engine Part 2's full architecture names. Only the first two
-    are wired at Level 3 — see this module's own docstring."""
+    """Every engine Part 2's full architecture names, plus WELLNESS
+    (Sprint 5.24) and PLANNING/EXPLANATION (Sprint 6.13). Only the first
+    two are wired at Level 3 — see this module's own docstring. Not a
+    complete accounting of every engine JARMINEI now has: Level 6 Part A
+    adds real reasoning/decision surfaces beyond Part 2's original
+    architecture (Reasoning Engine, Decision Engine v2, Adaptive
+    Prioritization, among others) that are consumed BY a live turn
+    handler rather than being selectable AS one — PLANNING/EXPLANATION
+    earn their own members here because a live turn can genuinely be
+    routed to either one directly ("help me plan X", "why did you..."),
+    the same live-turn-entry-point test every existing member here
+    already passes; a collaborator another engine merely calls internally
+    (ReasoningEngine, DecisionEngineV2) does not, and this enum's own
+    scope was never meant to, and does not, grow to cover those."""
 
     CONVERSATIONAL_RESPONSE = "conversational_response"
     INFORM_ONLY = "inform_only"
@@ -198,6 +212,8 @@ class EngineSelection(Enum):
     INTERNET_AGENT = "internet_agent"
     WELLNESS = "wellness"
     EMOTION_SUPPORT = "emotion_support"
+    PLANNING = "planning"
+    EXPLANATION = "explanation"
 
 
 @dataclass
@@ -276,6 +292,57 @@ discipline as _WORKFLOW_KEYWORDS/_SCHEDULER_KEYWORDS/_CURRENT_
 INFORMATION_KEYWORDS above."""
 
 
+_PLANNING_KEYWORDS: tuple[str, ...] = (
+    "help me plan",
+    "let's plan",
+    "lets plan",
+    "plan a goal",
+    "plan out",
+    "break this down",
+    "break down this",
+    "run my plan",
+    "start my plan",
+    "execute my plan",
+    "resume my session",
+    "resume my previous session",
+)
+"""Substrings indicating a live turn is a Planning Engine request (Sprint
+6.13) — a fresh goal statement ("help me plan..."/"let's plan...") or an
+explicit run/resume request against an already-accepted plan. Same
+small, literal, non-NLU discipline as _WORKFLOW_KEYWORDS/_SCHEDULER_
+KEYWORDS/_WELLNESS_KEYWORDS above. Deliberately does NOT include bare
+accept/reject phrasing ("yes"/"go ahead"/"cancel") — those are far too
+generic to gate a whole engine selection on; CommunicationPipeline
+itself tracks its own pending-proposal conversational state and routes
+an acceptance/rejection reply to _handle_planning_turn() directly,
+regardless of what this method classifies it as (see that class's own
+docstring)."""
+
+_EXPLANATION_KEYWORDS: tuple[str, ...] = (
+    "why did you",
+    "why is that",
+    "why was that",
+    "why would you",
+    "explain that",
+    "explain why",
+    "what's your reasoning",
+    "whats your reasoning",
+)
+"""Substrings indicating a live turn is a "why?" follow-up question
+(Sprint 6.13, Explainability Layer) — same small, literal, non-NLU
+discipline as every other keyword tuple in this module."""
+
+
+def _mentions_planning_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _PLANNING_KEYWORDS)
+
+
+def _mentions_explanation_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _EXPLANATION_KEYWORDS)
+
+
 def _mentions_wellness_keywords(transcript: str) -> bool:
     lowered = transcript.lower()
     return any(keyword in lowered for keyword in _WELLNESS_KEYWORDS)
@@ -307,6 +374,8 @@ _ENGINE_DISPLAY_NAMES: dict[EngineSelection, str] = {
     EngineSelection.INTERNET_AGENT: "the Internet Agent",
     EngineSelection.WELLNESS: "the Wellness Engine",
     EngineSelection.EMOTION_SUPPORT: "the Emotion Engine",
+    EngineSelection.PLANNING: "the Planning Engine",
+    EngineSelection.EXPLANATION: "the Explainability Layer",
 }
 
 _RECOMMEND_INTENT_CATEGORIES = frozenset({IntentCategory.ACTION_REQUEST, IntentCategory.EMERGENCY})
@@ -420,6 +489,17 @@ class AuthorityEvaluator:
         context_analysis: ContextAnalysis,
         authority_level: AuthorityLevel,
     ) -> EngineSelection:
+        # Sprint 6.13. Checked first, unconditionally (regardless of
+        # intent.category) — unlike every other keyword-gated branch
+        # below, a planning or explanation request's own raw phrasing
+        # ("help me plan...", "why did you...") is a more reliable signal
+        # than IntentDetector's own imperfect category classification
+        # (3.7's own disclosed limitation), the same reasoning WELLNESS's
+        # own two-category check already applies, taken one step further.
+        if _mentions_planning_keywords(intent.raw_transcript):
+            return EngineSelection.PLANNING
+        if _mentions_explanation_keywords(intent.raw_transcript):
+            return EngineSelection.EXPLANATION
         if intent.category in (
             IntentCategory.INFORMATIONAL,
             IntentCategory.EMOTIONAL_SUPPORT,
@@ -521,6 +601,16 @@ def _build_reasoning(
         )
     elif selected_engine is EngineSelection.EMOTION_SUPPORT:
         parts.append("This calls for emotional support, so I'll respond with an adapted tone.")
+    elif selected_engine is EngineSelection.PLANNING:
+        parts.append(
+            "This is a planning request, so I'll work it through "
+            f"{_ENGINE_DISPLAY_NAMES[EngineSelection.PLANNING]}."
+        )
+    elif selected_engine is EngineSelection.EXPLANATION:
+        parts.append(
+            "This is a follow-up question about a prior decision, so I'll answer via "
+            f"{_ENGINE_DISPLAY_NAMES[EngineSelection.EXPLANATION]}."
+        )
     elif intent.category is IntentCategory.ACTION_REQUEST:
         if _mentions_scheduler_keywords(intent.raw_transcript):
             parts.append(

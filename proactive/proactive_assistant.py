@@ -100,6 +100,24 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _JOB_ID = "proactive_assistant_evaluation"
+_BACKGROUND_TICK_SESSION_ID = "proactive-assistant-tick"
+"""Sprint 6.13 (Integration) correction to a real, previously-latent bug,
+found only once a real ContextEngine was ever actually wired in (this
+sprint is the first live caller): ContextEngine.build() requires
+session_id/active_persona_name (no defaults), but this class's own
+_evaluate_triggers() previously called it with zero arguments — every
+existing unit test faked context_engine as a plain mock, which accepts
+any call signature, so this was never actually exercised against the
+real method before now. ProactiveAssistant runs as a background tick with
+no live session/persona of its own to reference at all (the identical
+"no real session exists at this call site" problem
+CommunicationPipiline._check_and_announce_priority_item() independently
+also has — see that method's own _last_session_id docstring); a fixed,
+self-documenting sentinel session_id and a plain default persona name are
+the honest placeholders available, matching ConversationSessionStore.
+get_recent_turns()'s own "an unknown session_id just returns []" harmless
+behavior."""
+_BACKGROUND_TICK_PERSONA_NAME = "jarvis"
 
 _TRIGGER_PRIORITIES: dict[ProactiveTriggerType, PriorityLevel] = {
     ProactiveTriggerType.UPCOMING_DEADLINE: PriorityLevel.IMPORTANT_ALERT,
@@ -182,7 +200,9 @@ class ProactiveAssistant:
         independent of the timer" shape WellnessTracker.evaluate_triggers()
         already established, including its own "a real late-night test
         run can never make an unrelated boundary test flaky" reasoning."""
-        working_context = self._context_engine.build()
+        working_context = self._context_engine.build(
+            _BACKGROUND_TICK_SESSION_ID, _BACKGROUND_TICK_PERSONA_NAME
+        )
         now = now if now is not None else datetime.now(UTC)
         checks = (
             self._check_upcoming_deadline,

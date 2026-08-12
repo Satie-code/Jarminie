@@ -129,6 +129,35 @@ def test_execute_open_url_disallowed_scheme_fails(monkeypatch):
     assert opened_urls == []
 
 
+def test_execute_open_url_degrades_honestly_when_open_browser_raises(monkeypatch):
+    """Sprint 6.15 adversarial-re-read finding: execute()'s own
+    ActionType.OPEN_URL dispatch previously sat OUTSIDE the try/except
+    (OSError, psutil.Error, pywintypes.error) block that already wraps
+    launch()/close()/focus()/list() — the identical shape of gap item
+    28 (backlog/technical_debt.md) already fixed once in this exact
+    method for pywintypes.error specifically. Not a live safety gap
+    either way (ActionRegistry.dispatch()'s own outer except Exception
+    already catches it, per item 28's own established reasoning) but a
+    real, disclosed inconsistency, fixed by moving OPEN_URL's own
+    dispatch inside the same try block."""
+    def _raise(url: str) -> None:
+        raise OSError("no browser controller registered")
+
+    monkeypatch.setattr(application_manager_module, "open_browser", _raise)
+    manager = _manager()
+    request = ActionRequest(
+        action_type=ActionType.OPEN_URL,
+        parameters={"url": "https://example.com"},
+        context=ActionContext(requested_by="test"),
+        requested_at=datetime.now(UTC),
+    )
+
+    result = manager.execute(request)  # must not raise
+
+    assert result.status is ActionStatus.FAILED
+    assert "no browser controller registered" in result.error_message
+
+
 def test_open_url_respects_a_narrowed_allowed_schemes_config(monkeypatch):
     opened_urls = []
     monkeypatch.setattr(application_manager_module, "open_browser", opened_urls.append)

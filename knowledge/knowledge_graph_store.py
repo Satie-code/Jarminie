@@ -52,10 +52,17 @@ outgoing-only traversal, and "what's related to X" (this sprint's own
 Purpose) reads most naturally as "what's connected to X," regardless of
 which direction a given relationship happened to be stored in.
 
-Deliberately NOT given Fail Gracefully hardening this sprint — matching
-TaskGraphStore's/CalendarStore's/UsageStore's identical precedent (no
-real caller exists yet to meaningfully degrade for); Sprint 6.14's job
-once Sprint 6.9/6.13 give this store real callers.
+Deliberately NOT given Fail Gracefully hardening at this store's own
+Sprint 6.6 — matching TaskGraphStore's/CalendarStore's/UsageStore's
+identical precedent (no real caller existed yet to meaningfully degrade
+for). Sprint 6.14 (Error Handling & Recovery Hardening, scenario b) adds
+it once Sprint 6.9/6.13 gave this store a real caller
+(SessionResumption.build_workflow() -> find_entities()/
+related_entities()): find_entities(), _neighbor_ids(), and get_entity()
+now degrade to []/set()/None respectively on a SQLite failure, matching
+CalendarStore.list_due_within()'s exact idiom — save_entity()/
+add_relationship() remain deliberately unhardened, still no real write
+caller.
 """
 
 from __future__ import annotations
@@ -148,9 +155,18 @@ class KnowledgeGraphStore:
         )
 
     def get_entity(self, entity_id: str) -> Entity | None:
-        rows = self._sqlite_client.query(
-            f"SELECT {_SELECT_ENTITY_COLUMNS} FROM entities WHERE entity_id = ?", (entity_id,)
-        )
+        """Sprint 6.14 hardening (scenario b): related_entities()'s own
+        real, live caller chain (SessionResumption.build_workflow(),
+        6.9/6.13) calls this per discovered id — a SQLite failure
+        degrades to None, indistinguishable from "not found," which that
+        caller's own list comprehension already filters out."""
+        try:
+            rows = self._sqlite_client.query(
+                f"SELECT {_SELECT_ENTITY_COLUMNS} FROM entities WHERE entity_id = ?", (entity_id,)
+            )
+        except Exception:
+            logger.exception("Failed to query entity %r; treating as not found.", entity_id)
+            return None
         if not rows:
             return None
         return self._build_entity(rows[0])
@@ -158,6 +174,14 @@ class KnowledgeGraphStore:
     def find_entities(
         self, entity_type: EntityType | None = None, name_contains: str | None = None
     ) -> list[Entity]:
+        """Sprint 6.14 hardening (scenario b): SessionResumption.
+        build_workflow() (6.9) is a real, live caller now (via
+        CommunicationPipeline._resume_previous_session(), 6.13) — a
+        SQLite failure degrades to [], matching TaskGraphStore.
+        list_goals()'s identical treatment, and composes correctly with
+        that caller's own existing "if not projects: return None" ->
+        "I don't have a previous session to resume." reply, no
+        pipeline.py change needed at that call site."""
         conditions: list[str] = []
         params: list[object] = []
         if entity_type is not None:
@@ -170,7 +194,11 @@ class KnowledgeGraphStore:
         query = f"SELECT {_SELECT_ENTITY_COLUMNS} FROM entities"
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        rows = self._sqlite_client.query(query, tuple(params))
+        try:
+            rows = self._sqlite_client.query(query, tuple(params))
+        except Exception:
+            logger.exception("Failed to query entities; treating as none found.")
+            return []
         return [self._build_entity(row) for row in rows]
 
     def add_relationship(self, relationship: Relationship) -> None:
@@ -232,22 +260,36 @@ class KnowledgeGraphStore:
     def _neighbor_ids(
         self, entity_id: str, relationship_type: RelationshipType | None
     ) -> set[str]:
-        if relationship_type is None:
-            rows = self._sqlite_client.query(
-                "SELECT to_entity_id FROM relationships WHERE from_entity_id = ? "
-                "UNION "
-                "SELECT from_entity_id FROM relationships WHERE to_entity_id = ?",
-                (entity_id, entity_id),
+        """Sprint 6.14 hardening (scenario b): a SQLite failure here
+        degrades to an empty neighbor set, which related_entities()'s
+        own BFS loop already treats identically to "this node has no
+        more neighbors" — the traversal simply stops expanding from this
+        node rather than raising, a real but honestly partial result
+        (logged) instead of ending the whole session."""
+        try:
+            if relationship_type is None:
+                rows = self._sqlite_client.query(
+                    "SELECT to_entity_id FROM relationships WHERE from_entity_id = ? "
+                    "UNION "
+                    "SELECT from_entity_id FROM relationships WHERE to_entity_id = ?",
+                    (entity_id, entity_id),
+                )
+            else:
+                rows = self._sqlite_client.query(
+                    "SELECT to_entity_id FROM relationships "
+                    "WHERE from_entity_id = ? AND relationship_type = ? "
+                    "UNION "
+                    "SELECT from_entity_id FROM relationships "
+                    "WHERE to_entity_id = ? AND relationship_type = ?",
+                    (entity_id, relationship_type.value, entity_id, relationship_type.value),
+                )
+        except Exception:
+            logger.exception(
+                "Failed to query relationships for entity %r; treating as no "
+                "further neighbors.",
+                entity_id,
             )
-        else:
-            rows = self._sqlite_client.query(
-                "SELECT to_entity_id FROM relationships "
-                "WHERE from_entity_id = ? AND relationship_type = ? "
-                "UNION "
-                "SELECT from_entity_id FROM relationships "
-                "WHERE to_entity_id = ? AND relationship_type = ?",
-                (entity_id, relationship_type.value, entity_id, relationship_type.value),
-            )
+            return set()
         return {row[0] for row in rows}
 
     def _relationship_count(self, entity_id: str) -> int:

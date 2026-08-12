@@ -38,8 +38,17 @@ docstring), so a real DecisionEngineV2 instance is unnecessary here."""
 class FakeContextEngine:
     def __init__(self, working_context: WorkingContext) -> None:
         self._working_context = working_context
+        self.build_calls: list[tuple[str, str]] = []
 
-    def build(self) -> WorkingContext:
+    def build(self, session_id: str, active_persona_name: str) -> WorkingContext:
+        """Sprint 6.13 correction: the real ContextEngine.build() requires
+        session_id/active_persona_name (no defaults) — this fake used to
+        accept zero arguments, silently matching a real bug in
+        _evaluate_triggers()'s own call site rather than the real
+        method's actual contract. Both are recorded, not just accepted,
+        so a test can confirm ProactiveAssistant's own real background-
+        tick placeholders are what's actually passed."""
+        self.build_calls.append((session_id, active_persona_name))
         return self._working_context
 
 
@@ -531,6 +540,52 @@ def test_start_registers_exactly_one_job_that_ticks(monkeypatch):
     try:
         assert assistant.health_check() is True
         assert _wait_until(lambda: tick_count > 0)
+    finally:
+        assistant.stop()
+        task_scheduler.stop()
+
+
+class _AlwaysRaisingContextEngine:
+    """Sprint 6.14 hardening (scenario c): a real ContextEngine.build()
+    failure would propagate straight out of _evaluate_triggers() with no
+    try/except of its own (by design — see this module's own docstring,
+    "no try/except of its own, absorbed by TaskScheduler"). This double
+    forces every single tick to raise, to confirm that absorption is
+    real for THIS specific job, not merely assumed to transfer from
+    scheduler/task_scheduler.py's own docstring claim (verified there
+    for a different job, Sprint 4.15/4.18)."""
+
+    def build(self, session_id: str, active_persona_name: str) -> WorkingContext:
+        raise RuntimeError("ContextEngine.build() exploded")
+
+
+def test_a_raising_tick_does_not_stop_future_recurrence(monkeypatch):
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    priority_queue_manager = FakePriorityQueueManager()
+    assistant = ProactiveAssistant(
+        task_scheduler,
+        priority_queue_manager,
+        _AlwaysRaisingContextEngine(),
+        _UNUSED_DECISION_ENGINE_V2,
+        None,
+        None,
+        ProactiveConfig(evaluation_interval_seconds=0.05),
+    )
+    tick_count = 0
+    real_on_tick = assistant._on_tick
+
+    def _counting_tick():
+        nonlocal tick_count
+        tick_count += 1
+        real_on_tick()  # genuinely raises inside here; APScheduler must absorb it
+
+    monkeypatch.setattr(assistant, "_on_tick", _counting_tick)
+
+    assistant.start()
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert assistant.health_check() is True  # the job itself is still alive
     finally:
         assistant.stop()
         task_scheduler.stop()

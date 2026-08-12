@@ -268,9 +268,11 @@ from config.schema import (
     SchedulerConfig,
     WellnessConfig,
 )
+from context.context_engine import ContextEngine
 from core.logging_setup import get_logger
 from core.resource_monitor import ResourceMonitor
 from core.runtime_manager import RuntimeManager
+from decision.adaptive_prioritizer import AdaptivePrioritizer, PrioritizationDecision
 from decision.authority import AuthorityEvaluator, DecisionTrace, EngineSelection
 from decision.context_analyzer import ContextAnalysis, ContextAnalyzer
 from decision.intent_detector import IntentDetector
@@ -292,7 +294,7 @@ from internet.research_engine import ResearchEngine
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
 from learning.pattern_recognizer import PatternRecognizer
-from learning.recommendation import Recommendation, RecommendationEngine
+from learning.recommendation import RecommendationEngine
 from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory, _score_significance
 from memory.lifecycle_manager import MemoryLifecycleManager
@@ -300,6 +302,11 @@ from memory.models import MemoryType
 from memory.retrieval_engine import MemoryRetrievalEngine
 from memory.short_term_memory import ShortTermMemory
 from personas.persona_manager import PersonaManager, SwitchReason
+from planning.planning_engine import PlanningEngine
+from planning.planning_model import Goal, PlanningStatus, Task
+from planning.self_evaluator import SelfEvaluator
+from planning.task_graph import TaskGraph
+from planning.task_graph_store import TaskGraphStore
 from presentation.adaptive_workspace import AdaptiveWorkspaceController, WorkspaceProfile
 from presentation.avatar_renderer import AvatarRenderer
 from presentation.companion_experience import (
@@ -313,6 +320,7 @@ from presentation.lip_sync import LipSyncDriver
 from presentation.presentation_controller import PresentationController
 from presentation.voice_personality import VoicePersonalityModulator
 from presentation.widgets.segmented_ring_widget import RingState
+from reasoning.explainability import ExplainabilityLayer, ExplanationRequest
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.scheduler_model import ItemType, ScheduledItem
@@ -328,12 +336,42 @@ from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
 from wellness.escalation import WellnessEscalationManager
 from wellness.wellness_model import WellnessPrompt, WellnessTriggerType
 from wellness.wellness_tracker import WellnessTracker
+from workflow.session_resumption import SessionResumption
+from workflow.task_graph_adapter import TaskGraphWorkflowAdapter
 from workflow.workflow_executor import WorkflowExecutor, WorkflowRunResult
 from workflow.workflow_store import WorkflowStore
 
 logger = get_logger(__name__)
 
 _DEVICE_CONTROL_REQUESTED_BY = "voice_turn"
+_PLANNING_REQUESTED_BY = "planning_turn"
+_MOST_RECENT_TRACE_SUBJECT_ID = "most_recent_turn"
+"""ExplainabilityLayer's own decision_trace_lookup callable (Sprint
+6.11) ignores subject_id entirely once wired to
+lookup_last_decision_trace() (this class tracks only the single most
+recent DecisionTrace, never a keyed history) — this constant exists so
+every call site passes the identical, self-documenting placeholder
+rather than an arbitrary string."""
+
+_ACCEPTANCE_WORDS = frozenset({"yes", "yeah", "yep", "accept", "confirm", "approved"})
+_ACCEPTANCE_PHRASES: tuple[str, ...] = ("go ahead", "do it", "sounds good")
+_REJECTION_WORDS = frozenset({"no", "nope", "cancel", "reject", "discard"})
+_REJECTION_PHRASES: tuple[str, ...] = ("never mind", "nevermind", "forget it")
+"""Sprint 6.13's own accept/reject vocabulary for a pending plan
+proposal. Deliberately checks the transcript's own FIRST WORD against
+the short, ambiguous single-word sets (never a bare substring match —
+"yesterday" must never match "yes") while still allowing the longer,
+low-collision multi-word phrases to match anywhere in the transcript.
+See CommunicationPipeline._handle_planning_turn()'s own docstring for
+why this lives here, as conversational state, rather than as a
+decision/authority.py keyword-routing gate."""
+
+_RUN_PLAN_KEYWORDS: tuple[str, ...] = ("run my plan", "start my plan", "execute my plan")
+_RESUME_SESSION_KEYWORDS: tuple[str, ...] = (
+    "resume my session",
+    "resume my previous session",
+    "resume session",
+)
 _DEFAULT_EXECUTABLE_EXTENSION = ".exe"
 """Windows-only normalization: a bare application name spoken by the
 user ("open notepad") is treated as an executable name with the
@@ -377,6 +415,63 @@ unconditional (unlike the Level 5 Part B jobs above, none of this job's
 own collaborators are ever None)."""
 
 
+def _is_acceptance_phrase(transcript: str) -> bool:
+    lowered = transcript.strip().lower()
+    if not lowered:
+        return False
+    first_word = lowered.split(" ", 1)[0].rstrip(".!,")
+    if first_word in _ACCEPTANCE_WORDS:
+        return True
+    return any(phrase in lowered for phrase in _ACCEPTANCE_PHRASES)
+
+
+def _is_rejection_phrase(transcript: str) -> bool:
+    lowered = transcript.strip().lower()
+    if not lowered:
+        return False
+    first_word = lowered.split(" ", 1)[0].rstrip(".!,")
+    if first_word in _REJECTION_WORDS:
+        return True
+    return any(phrase in lowered for phrase in _REJECTION_PHRASES)
+
+
+def _mentions_run_plan_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _RUN_PLAN_KEYWORDS)
+
+
+def _mentions_resume_session_keywords(transcript: str) -> bool:
+    lowered = transcript.lower()
+    return any(keyword in lowered for keyword in _RESUME_SESSION_KEYWORDS)
+
+
+def _describe_proposed_goal(goal: Goal) -> str:
+    milestone_count = len(goal.milestones)
+    task_count = sum(len(milestone.tasks) for milestone in goal.milestones)
+    milestone_titles = "; ".join(milestone.title for milestone in goal.milestones)
+    return (
+        f'Here\'s my plan for "{goal.statement}": {milestone_count} milestone(s), '
+        f"{task_count} task(s) — {milestone_titles}. "
+        'Say "yes" to accept it, or "no" to discard it.'
+    )
+
+
+def _extract_announcement_text(payload: object) -> str:
+    """Sprint 6.13. A GENERAL_SUGGESTION/IMPORTANT_ALERT PriorityItem's
+    own payload can genuinely be a Recommendation (.text,
+    learning/recommendation.py) or a ProactivePrompt (.message,
+    proactive/proactive_model.py) — two real producers, two different
+    attribute names, neither one wrong. Checked mechanically rather than
+    isinstance-branched, the same "message-or-text" precedent decision/
+    adaptive_prioritizer.py's own _describe_payload() already established
+    for the identical real ambiguity (Sprint 6.12)."""
+    for attribute_name in ("message", "text"):
+        value = getattr(payload, attribute_name, None)
+        if isinstance(value, str) and value:
+            return value
+    return "You have a new item to review."
+
+
 def _parse_relative_time(transcript: str, now: datetime) -> datetime | None:
     """Deliberately narrow, matching this sprint's own Architecture
     Notes: only "in N minutes"/"in N hours" phrasing resolves — no
@@ -407,6 +502,31 @@ class CallbackRelay:
             logger.warning("CallbackRelay invoked before wiring was established; ignoring.")
             return
         self.target(*args, **kwargs)
+
+
+class DecisionTraceLookupRelay:
+    """Sprint 6.13's own widened sibling of CallbackRelay, for the one
+    real circular-construction case CallbackRelay's own fire-and-forget
+    shape cannot serve: ExplainabilityLayer's own decision_trace_lookup
+    constructor parameter (Sprint 6.11) needs a real DecisionTrace | None
+    value BACK from its target, which CallbackRelay's own __call__
+    always discards (it returns None unconditionally, by design, since
+    turn_complete_relay/session_ended_relay's own real targets never
+    return anything their caller reads). main.py constructs this before
+    ExplainabilityLayer exists, then points target at
+    CommunicationPipeline.lookup_last_decision_trace once the pipeline
+    itself exists — the identical indirection main.py's own
+    persona_switch_relay already established for the same "constructed
+    before its real target can exist" problem (see this module's own
+    docstring)."""
+
+    def __init__(self) -> None:
+        self.target: Callable[[str], DecisionTrace | None] | None = None
+
+    def __call__(self, subject_id: str) -> DecisionTrace | None:
+        if self.target is None:
+            return None
+        return self.target(subject_id)
 
 
 class CommunicationPipeline:
@@ -471,6 +591,14 @@ class CommunicationPipeline:
         runtime_manager: RuntimeManager,
         resource_monitor: ResourceMonitor,
         runtime_config: RuntimeConfig,
+        task_graph_store: TaskGraphStore | None,
+        planning_engine: PlanningEngine | None,
+        context_engine: ContextEngine | None,
+        explainability_layer: ExplainabilityLayer | None,
+        adaptive_prioritizer: AdaptivePrioritizer | None,
+        task_graph_workflow_adapter: TaskGraphWorkflowAdapter | None,
+        session_resumption: SessionResumption | None,
+        self_evaluator: SelfEvaluator | None,
     ) -> None:
         self._mic = mic
         self._wake_word_detector = wake_word_detector
@@ -544,6 +672,47 @@ class CommunicationPipeline:
         self._runtime_manager = runtime_manager
         self._resource_monitor = resource_monitor
         self._runtime_config = runtime_config
+        # Sprint 6.13 — Level 6 Part A (Autonomous Intelligence)
+        # Integration. All eight are optional, matching main.py's own
+        # _null_level6_part_a_modules() fallback — a genuine Level 6
+        # Part A construction failure passes literal None for each, the
+        # same simpler-than-Part-A-presentation fallback shape Level 5
+        # Part B's own six collaborators already established (Sprint
+        # 5.24), since none of these eight are called unconditionally on
+        # every single turn either.
+        self._task_graph_store = task_graph_store
+        self._planning_engine = planning_engine
+        self._context_engine = context_engine
+        self._explainability_layer = explainability_layer
+        self._adaptive_prioritizer = adaptive_prioritizer
+        self._task_graph_workflow_adapter = task_graph_workflow_adapter
+        self._session_resumption = session_resumption
+        self._self_evaluator = self_evaluator
+        # A Goal PlanningEngine.decompose_goal() has proposed but the user
+        # has not yet accepted or rejected — the real conversational state
+        # _handle_planning_turn()'s own propose/accept two-step flow needs
+        # across turns (this sprint's own Potential Risks flagged this
+        # exact need). Cleared on acceptance, rejection, or overwritten by
+        # a fresh proposal; otherwise persists across intervening turns
+        # until explicitly responded to — a real, disclosed limitation
+        # (no expiry timeout), not a bug.
+        self._pending_proposed_goal: Goal | None = None
+        # The most recent NON-EXPLANATION turn's own DecisionTrace —
+        # ExplainabilityLayer's own decision_trace_lookup real target
+        # (via DecisionTraceLookupRelay, wired in main.py once this
+        # pipeline exists). Deliberately excludes an explanation turn's
+        # own trace so asking "why?" twice in a row still explains the
+        # original subject, not the previous explanation turn's own
+        # routing decision — see _handle_turn_complete()'s own docstring.
+        self._last_decision_trace: DecisionTrace | None = None
+        # ContextEngine.build() needs a real session_id; _check_and_
+        # announce_priority_item() runs with no live session of its own
+        # (only ever while QuietModeController is DORMANT), so it reuses
+        # whatever the most recent real turn's own session_id was. The
+        # sentinel default is harmless if ever queried before any turn
+        # has happened this process — ConversationSessionStore.
+        # get_recent_turns() for an unknown session_id just returns [].
+        self._last_session_id: str = "no-session-yet"
         # In-memory dedup, mirroring ReminderEngine._enqueued_item_ids'
         # own identical precedent: evaluate_triggers() is a pure read with
         # no "already enqueued" memory of its own, so without this a
@@ -562,11 +731,19 @@ class CommunicationPipeline:
         # table, exhaustive over every PriorityLevel this Sprint Book gives
         # a real producer to. Built here (bound methods, not a class-level
         # dict of unbound references) since the methods themselves are
-        # defined later in this same class body.
+        # defined later in this same class body. Sprint 6.13 adds
+        # IMPORTANT_ALERT — ProactiveAssistant's own three hard triggers
+        # (UPCOMING_DEADLINE/BATTERY_CRITICAL/FORGOTTEN_REMINDER, Sprint
+        # 6.8) finally get an announcement path, closing backlog/
+        # technical_debt.md item 17 in full; this dict is now exhaustive
+        # over all five PriorityLevel members, CRITICAL_EMERGENCY's own
+        # real handling living entirely in decision/authority.py's own
+        # Authority Evaluation stage instead (never queued at all).
         self._priority_item_handlers: dict[PriorityLevel, Callable[[PriorityItem], None]] = {
             PriorityLevel.SCHEDULED_REMINDER: self._announce_scheduled_reminder,
             PriorityLevel.WELLNESS: self._announce_wellness,
             PriorityLevel.GENERAL_SUGGESTION: self._announce_general_suggestion,
+            PriorityLevel.IMPORTANT_ALERT: self._announce_important_alert,
         }
         self._wired = False
 
@@ -775,7 +952,20 @@ class CommunicationPipeline:
         calls thread real turn-phase signals into JarvisRenderer at the
         three real transition points this method already has: THINKING
         at turn start, SPEAKING immediately before speak_reply(), LISTENING
-        immediately after (see this module's own docstring)."""
+        immediately after (see this module's own docstring).
+
+        Sprint 6.13: a real, pending Goal proposal (_pending_proposed_goal)
+        is checked BEFORE the ordinary selected_engine dispatch below —
+        an acceptance/rejection reply ("yes"/"no") is far too generic a
+        phrase for decision/authority.py's own stateless keyword routing
+        to ever reliably classify as PLANNING, so this class's own
+        conversational state is what actually recognizes it, regardless
+        of what the Decision Engine pipeline routed this turn to. Also
+        tracks _last_session_id (every turn, unconditionally — needed by
+        _check_and_announce_priority_item()'s own later ContextEngine.
+        build() call) and _last_decision_trace (every turn EXCEPT an
+        EXPLANATION one — see this class's own docstring for why)."""
+        self._last_session_id = session_id
         try:
             persona_before = self._persona_manager.active_persona()
             context = self._context_manager.current_context(session_id, persona_before.name)
@@ -816,7 +1006,16 @@ class CommunicationPipeline:
             )
             emotional_state = self._emotional_state_manager.current_state()
 
-            if selected_engine is EngineSelection.DEVICE_CONTROL:
+            if selected_engine is not EngineSelection.EXPLANATION:
+                self._last_decision_trace = decision_trace
+
+            if (
+                self._pending_proposed_goal is not None
+                and decision_trace is not None
+                and (_is_acceptance_phrase(transcript) or _is_rejection_phrase(transcript))
+            ):
+                reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
+            elif selected_engine is EngineSelection.DEVICE_CONTROL:
                 reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
             elif selected_engine is EngineSelection.WORKFLOW:
                 reply = self._handle_workflow_turn(decision_trace, session_id, persona.name)
@@ -826,6 +1025,10 @@ class CommunicationPipeline:
                 reply = self._handle_internet_agent_turn(decision_trace)
             elif selected_engine is EngineSelection.WELLNESS:
                 reply = self._handle_wellness_turn(decision_trace)
+            elif selected_engine is EngineSelection.PLANNING:
+                reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
+            elif selected_engine is EngineSelection.EXPLANATION:
+                reply = self._handle_explanation_turn(decision_trace)
             elif selected_engine is EngineSelection.EMOTION_SUPPORT:
                 # EMOTION_SUPPORT selects a tone within compose_reply_safely()'s
                 # own template path, not a distinct subsystem — see
@@ -1258,15 +1461,282 @@ class CommunicationPipeline:
         )
         return f"You've been active for about {active_minutes} minute(s) today. {status}"
 
+    def _handle_planning_turn(
+        self, trace: DecisionTrace, session_id: str, persona_name: str
+    ) -> str:
+        """Sprint 6.13. Three real sub-flows, distinguished by the
+        transcript itself (decision/authority.py's own PLANNING routing
+        only proves "this is planning-shaped," not which flavor — the
+        same "routing is cheap, real resolution happens downstream" split
+        _resolve_action_engine() already established):
+
+        1. An acceptance/rejection reply to an already-pending proposal
+           (_pending_proposed_goal is not None) — handled first,
+           regardless of what decision/authority.py routed this turn to
+           (see _handle_turn_complete()'s own docstring for why).
+        2. An explicit "run my plan"/"resume my session" request.
+        3. Anything else — treated as a fresh goal statement.
+
+        Degrades to an honest "not currently available" whenever the
+        Level 6 Part A bundle this specific sub-flow needs is absent —
+        never a crash, matching Sprint 5.24's own identical Level 5 Part
+        B graceful-degrade precedent."""
+        transcript = trace.intent.raw_transcript
+
+        if self._pending_proposed_goal is not None:
+            if _is_acceptance_phrase(transcript):
+                return self._accept_pending_goal()
+            if _is_rejection_phrase(transcript):
+                self._pending_proposed_goal = None
+                return "Okay, I've discarded that plan."
+
+        if _mentions_run_plan_keywords(transcript):
+            return self._run_accepted_plan(session_id, persona_name, trace)
+        if _mentions_resume_session_keywords(transcript):
+            return self._resume_previous_session(session_id, persona_name, trace)
+        return self._propose_new_goal(transcript)
+
+    def _propose_new_goal(self, statement: str) -> str:
+        """decompose_goal() never persists (planning/planning_engine.py's
+        own "Plan Before Executing" boundary, Sprint 6.1) — this method
+        only holds the proposal in memory until _accept_pending_goal()
+        (a real Human-First gate, not a formality, per this sprint's own
+        Objectives)."""
+        if self._planning_engine is None:
+            return "Planning isn't currently available."
+        try:
+            goal = self._planning_engine.decompose_goal(statement)
+        except LlmError:
+            logger.exception("PlanningEngine.decompose_goal() failed for %r.", statement)
+            return "I'm sorry, I couldn't work out a plan for that right now."
+        self._pending_proposed_goal = goal
+        return _describe_proposed_goal(goal)
+
+    def _accept_pending_goal(self) -> str:
+        """The Human-First gate's own real effect: only an explicitly
+        accepted Goal is ever persisted or becomes eligible to run — see
+        _run_accepted_plan()'s own status check, the real enforcement
+        point (TaskGraph.ready_tasks() itself does not distinguish
+        PROPOSED from ACCEPTED, planning/task_graph.py's own
+        _NON_TERMINAL_STATUSES).
+
+        Sprint 6.14 hardening (scenario b): save_goal() is a write with
+        no honest "empty" degrade the way a read has — a caller that
+        silently swallowed a failed write here would go on to claim
+        "I've saved your plan," a false success no less dishonest than a
+        fabricated answer (the same reasoning memory/memory_store.py's
+        own store() docstring already established for MemoryStoreError).
+        Caught here, not inside TaskGraphStore itself, so the exact same
+        honest reply already used for the store-absent case above covers
+        the store-present-but-failing case too."""
+        goal = self._pending_proposed_goal
+        assert goal is not None  # only ever called from a not-None-guarded call site
+        self._pending_proposed_goal = None
+        if self._task_graph_store is None:
+            return "I can't save that plan right now, but I'll remember it for this conversation."
+        goal.status = PlanningStatus.ACCEPTED
+        try:
+            self._task_graph_store.save_goal(goal)
+        except Exception:
+            logger.exception("Failed to save an accepted plan %r.", goal.goal_id)
+            return "I can't save that plan right now, but I'll remember it for this conversation."
+        return f'Great — I\'ve saved your plan "{goal.statement}." Say "run my plan" when ready.'
+
+    def _run_accepted_plan(
+        self, session_id: str, persona_name: str, trace: DecisionTrace
+    ) -> str:
+        """Runs the most recently accepted Goal's own TaskGraph via
+        TaskGraphWorkflowAdapter -> the existing, completely unmodified
+        WorkflowExecutor — every step still goes through the same
+        permission/confirmation/audit pipeline any other workflow does,
+        never a privileged bypass (workflow/task_graph_adapter.py's own
+        docstring).
+
+        Sprint 6.14 hardening (scenario b's own adversarial-re-read
+        finding): WorkflowStore.save() (item 27's own deliberately-
+        unhardened write, since it had zero production callers until
+        this sprint) now has a real one here — an uncaught failure would
+        propagate to _handle_turn_complete()'s own outer catch and end
+        the whole session, the identical coarse-degrade problem
+        TaskGraphStore.save_goal() already had. Caught here rather than
+        inside WorkflowStore itself, matching that same fix's own
+        reasoning: a write has no honest "empty" degrade the way a read
+        does."""
+        if (
+            self._task_graph_store is None
+            or self._task_graph_workflow_adapter is None
+            or self._workflow_store is None
+        ):
+            return "Running a plan isn't currently available."
+        accepted_goals = self._task_graph_store.list_goals(status=PlanningStatus.ACCEPTED)
+        if not accepted_goals:
+            return "You don't have an accepted plan to run yet."
+        goal = max(accepted_goals, key=lambda candidate: candidate.created_at)
+        edges = self._task_graph_store.get_edges(goal.goal_id)
+        task_graph = TaskGraph(goal, edges)
+        if not task_graph.ready_tasks():
+            return f'Your plan "{goal.statement}" has nothing left to run.'
+
+        definition, originating_tasks = self._task_graph_workflow_adapter.build_workflow(
+            task_graph, created_by=_PLANNING_REQUESTED_BY
+        )
+        try:
+            self._workflow_store.save(definition)
+        except Exception:
+            logger.exception(
+                "Failed to save workflow %r for an accepted plan.", definition.workflow_id
+            )
+            return "I couldn't set up your plan to run right now."
+        context = ActionContext(
+            requested_by=_PLANNING_REQUESTED_BY,
+            persona_name=persona_name,
+            session_id=session_id,
+            decision_trace=trace,
+        )
+        run_result = self._workflow_executor.run(definition.workflow_id, context)
+        self._finalize_workflow_run(run_result, task_graph, originating_tasks, goal)
+        return _describe_workflow_result(run_result, goal.statement)
+
+    def _resume_previous_session(
+        self, session_id: str, persona_name: str, trace: DecisionTrace
+    ) -> str:
+        """A Knowledge-Graph-derived workflow (workflow/session_resumption.py)
+        — no TaskGraph/Task involved, so _finalize_workflow_run() does not
+        apply here (that method's own scope is explicitly TaskGraph-derived
+        runs only, per this sprint's own Objectives).
+
+        Sprint 6.14 hardening (scenario b's own adversarial-re-read
+        finding): see _run_accepted_plan()'s own identical save()
+        hardening docstring — the same real gap, the same fix."""
+        if self._session_resumption is None or self._workflow_store is None:
+            return "Resuming a session isn't currently available."
+        definition = self._session_resumption.build_workflow(created_by=_PLANNING_REQUESTED_BY)
+        if definition is None:
+            return "I don't have a previous session to resume."
+        try:
+            self._workflow_store.save(definition)
+        except Exception:
+            logger.exception(
+                "Failed to save workflow %r for a resumed session.", definition.workflow_id
+            )
+            return "I couldn't set up your session to resume right now."
+        context = ActionContext(
+            requested_by=_PLANNING_REQUESTED_BY,
+            persona_name=persona_name,
+            session_id=session_id,
+            decision_trace=trace,
+        )
+        run_result = self._workflow_executor.run(definition.workflow_id, context)
+        return _describe_workflow_result(run_result, definition.name)
+
+    def _finalize_workflow_run(
+        self,
+        run_result: WorkflowRunResult,
+        task_graph: TaskGraph,
+        originating_tasks: list[Task],
+        goal: Goal,
+    ) -> None:
+        """Wires a TaskGraph-derived WorkflowRunResult back onto the
+        Task(s) that produced it (deferred by Sprint 6.9 to this sprint)
+        and onward into SelfEvaluator.evaluate_workflow_run() (Sprint
+        6.10). A skipped step (never dispatched at all — a prior step
+        already aborted the run) leaves its own Task untouched, neither
+        completed nor abandoned — it was never attempted, so it stays
+        eligible for a future retry, rather than being marked as having
+        failed. Every individual failure here is caught and logged, never
+        allowed to turn a real, already-finished workflow run into a
+        crashed turn — the run itself already happened; this is
+        bookkeeping on top of it."""
+        try:
+            for step_result, task in zip(
+                run_result.step_results, originating_tasks, strict=False
+            ):
+                if step_result.skipped:
+                    continue
+                if step_result.action_result.status is ActionStatus.SUCCEEDED:
+                    task_graph.mark_completed(task.task_id)
+                else:
+                    task_graph.mark_failed(task.task_id)
+            if self._task_graph_store is not None:
+                self._task_graph_store.save_goal(goal)
+        except Exception:
+            logger.exception(
+                "Failed to update the originating TaskGraph after a workflow run; "
+                "the run itself already completed and is unaffected."
+            )
+        if self._self_evaluator is None:
+            return
+        try:
+            self._self_evaluator.evaluate_workflow_run(run_result)
+        except Exception:
+            logger.exception(
+                "SelfEvaluator.evaluate_workflow_run() failed; continuing without a "
+                "recorded evaluation for this run."
+            )
+
+    def _handle_explanation_turn(self, trace: DecisionTrace) -> str:
+        """Sprint 6.13. Resolves the subject of "why?" from the most
+        recent NON-explanation turn's own DecisionTrace
+        (lookup_last_decision_trace(), wired to ExplainabilityLayer via
+        DecisionTraceLookupRelay in main.py) — a real, disclosed scope
+        limit: this never resolves a specific Goal/Task/EvaluationRecord
+        subject, only the prior turn's own routing decision, per this
+        sprint's own Potential Risks ("resolving which prior subject the
+        user means is Sprint 6.13's own... job" — done here at the
+        single-most-recent-trace granularity, not a richer one).
+
+        Sprint 6.14 hardening (scenario a): explain() falls through to
+        ReasoningEngine.explain_why() (reasoning/explainability.py's own
+        docstring) whenever _gather() finds nothing composable for the
+        subject, and explain_why() raises LlmError by design (6.4) when
+        Ollama is unreachable — a real gap this method left uncaught
+        until now, unlike _propose_new_goal()'s already-correct identical
+        shape. Left uncaught, this would fall through to
+        _handle_turn_complete()'s own outer catch and end the whole
+        session (SessionEndReason.ERROR) rather than just this one turn
+        degrading — far coarser than intended."""
+        if self._explainability_layer is None:
+            return "I can't explain my reasoning right now."
+        working_context = None
+        if self._context_engine is not None:
+            try:
+                working_context = self._context_engine.build(
+                    self._last_session_id, self._persona_manager.active_persona().name
+                )
+            except Exception:
+                logger.exception(
+                    "ContextEngine.build() failed for an explanation turn; continuing "
+                    "without additional context."
+                )
+        request = ExplanationRequest(
+            subject_id=_MOST_RECENT_TRACE_SUBJECT_ID, subject_kind="decision_trace"
+        )
+        try:
+            explanation = self._explainability_layer.explain(request, working_context)
+        except LlmError:
+            logger.exception("ExplainabilityLayer.explain() failed for %r.", trace)
+            return "I can't reach my reasoning model right now."
+        return explanation.narrative
+
+    def lookup_last_decision_trace(self, subject_id: str) -> DecisionTrace | None:
+        """The real target DecisionTraceLookupRelay's own .target is
+        pointed at (main.py, once this pipeline exists) — subject_id is
+        accepted per ExplainabilityLayer's own Callable[[str], ...]
+        contract but ignored, since this class tracks only the single
+        most recent trace, never a keyed history (see
+        _last_decision_trace's own docstring)."""
+        return self._last_decision_trace
+
     def _check_and_announce_priority_item(self) -> None:
         """Sprint 4.18 (as _check_and_announce_due_reminder), renamed and
         widened Sprint 5.24 into a real, exhaustive three-source
-        dispatcher — this project's first genuinely PROACTIVE (JARMINEI-
-        initiated, not turn-triggered) behavior. TaskScheduler job body
-        (registered in start(), on scheduler_config.poll_interval_
-        seconds). See this module's own docstring for the full wiring
-        diagram and Architecture Notes for the real concurrency
-        discipline this method's own call ordering exists to satisfy.
+        dispatcher, and Sprint 6.13 to a full five-source one — this
+        project's first genuinely PROACTIVE (JARMINEI-initiated, not
+        turn-triggered) behavior. TaskScheduler job body (registered in
+        start(), on scheduler_config.poll_interval_seconds). See this
+        module's own docstring for the full wiring diagram and
+        Architecture Notes for the real concurrency discipline this
+        method's own call ordering exists to satisfy.
 
         _maybe_enqueue_wellness_prompt() runs unconditionally, even while
         a live session is ACTIVE — Part 2's own "Queued" language applies
@@ -1278,20 +1748,36 @@ class CommunicationPipeline:
         Part 2's own Priority Queue "Queued" language is explicit for
         every source: a due item found while a session is already ACTIVE
         is left untouched in the queue (peek_next(), not popped) rather
-        than interrupting; the next poll checks again. peek_next() before
-        pop_next() also means a future, still-unhandled PriorityLevel
-        (IMPORTANT_ALERT — backlog/technical_debt.md item 17's one
-        genuinely still-open source after this sprint) is never silently
-        consumed without understanding it; self._priority_item_handlers
-        is exhaustive over every PriorityLevel this Sprint Book gives a
-        real producer to (SCHEDULED_REMINDER, WELLNESS,
-        GENERAL_SUGGESTION), so an unrecognized one logs a warning and
-        stays queued instead."""
+        than interrupting; the next poll checks again. self._priority_item_
+        handlers is now exhaustive over every PriorityLevel this Sprint
+        Book gives a real producer to (SCHEDULED_REMINDER, WELLNESS,
+        GENERAL_SUGGESTION, IMPORTANT_ALERT — closing backlog/
+        technical_debt.md item 17 in full), so an unrecognized one logs a
+        warning and stays queued instead — structurally unreachable today,
+        kept as a real, disclosed defensive floor.
+
+        Sprint 6.13: consults AdaptivePrioritizer.next_item() (Sprint
+        6.12) — which itself calls peek_next() internally — INSTEAD of
+        peek_next() directly, when available, so this DORMANT-gated
+        window is also where a soft item can be judged genuinely still
+        "recently active enough" to defer a little longer even though
+        the literal voice session already ended (see decision/
+        adaptive_prioritizer.py's own docstring for why
+        conversation_active_threshold_seconds is deliberately a much
+        longer window than voice.session_timeout_seconds' own). Only a
+        SURFACE_NOW decision proceeds to pop_next()/announce; DEFER_
+        BRIEFLY/HOLD leave the item queued for the next natural poll,
+        adding no new timer of its own. Falls back to the pre-6.12 direct
+        peek_next() behavior whenever adaptive_prioritizer/context_engine
+        is absent — the Level 6 Part A degrade-to-absent discipline
+        applied at this exact integration boundary, per this sprint's own
+        Expected Functions text."""
         self._maybe_enqueue_wellness_prompt()
 
         if self._quiet_mode_controller.current_mode() is not OperatingMode.DORMANT:
             return
-        peeked = self._priority_queue_manager.peek_next()
+
+        peeked = self._peek_next_priority_item()
         if peeked is None:
             return
         handler = self._priority_item_handlers.get(peeked.priority)
@@ -1303,6 +1789,34 @@ class CommunicationPipeline:
             return
         item = self._priority_queue_manager.pop_next()
         handler(item)
+
+    def _peek_next_priority_item(self) -> PriorityItem | None:
+        """The pre-6.12 behavior (a plain peek_next()) whenever
+        adaptive_prioritizer/context_engine is absent; otherwise defers
+        to AdaptivePrioritizer.next_item()'s own situational judgment,
+        returning the peeked item only on SURFACE_NOW. A
+        ContextEngine.build() failure degrades to the plain peek_next()
+        fallback too, rather than losing the queue's own next item for
+        this whole tick."""
+        if self._adaptive_prioritizer is None or self._context_engine is None:
+            return self._priority_queue_manager.peek_next()
+        try:
+            working_context = self._context_engine.build(
+                self._last_session_id, self._persona_manager.active_persona().name
+            )
+        except Exception:
+            logger.exception(
+                "ContextEngine.build() failed during priority-item arbitration; falling "
+                "back to a plain peek_next()."
+            )
+            return self._priority_queue_manager.peek_next()
+        result = self._adaptive_prioritizer.next_item(working_context)
+        if result is None:
+            return None
+        item, decision = result
+        if decision is not PrioritizationDecision.SURFACE_NOW:
+            return None
+        return item
 
     def _announce_scheduled_reminder(self, item: PriorityItem) -> None:
         """Sprint 4.18, extracted unchanged from the old
@@ -1370,12 +1884,42 @@ class CommunicationPipeline:
         """Sprint 5.24. Announced through whichever persona is already
         active, unchanged — like SCHEDULED_REMINDER, and unlike WELLNESS,
         a suggestion never force-switches persona (Part 2 names no such
-        requirement for it)."""
-        recommendation: Recommendation = item.payload
+        requirement for it).
+
+        Sprint 6.13 correction: a real, previously-latent bug, found by
+        checking the actual code rather than trusting Sprint 6.8's own
+        claim that "the existing dispatch table needs no change" —
+        GENERAL_SUGGESTION now has TWO real producers with two DIFFERENT
+        payload shapes (RecommendationEngine's own Recommendation.text;
+        ProactiveAssistant's own three "softer trigger" ProactivePrompt.
+        message, Sprint 6.8), and this method only ever read
+        `.text` — an AttributeError against any ProactiveAssistant-sourced
+        item the moment that producer went live, which it does for real
+        for the first time in this sprint. Fixed via the shared
+        _extract_announcement_text() helper below."""
         persona = self._persona_manager.active_persona()
         self._quiet_mode_controller.activate(
             ActivationReason.SCHEDULED_ALERT,
-            announce_first=(recommendation.text, persona.voice_id),
+            announce_first=(_extract_announcement_text(item.payload), persona.voice_id),
+        )
+
+    def _announce_important_alert(self, item: PriorityItem) -> None:
+        """Sprint 6.13 — IMPORTANT_ALERT's first real announcement
+        handler, closing backlog/technical_debt.md item 17 in full (a
+        real producer alone, since Sprint 6.8, was not the same as a
+        real end-to-end announced path — this method is the missing
+        other half). Announced through whichever persona is already
+        active, unchanged — like SCHEDULED_REMINDER/GENERAL_SUGGESTION,
+        and unlike WELLNESS, an alert never force-switches persona (Part
+        2 names no such requirement for it, and ProactiveAssistant's own
+        three IMPORTANT_ALERT triggers — UPCOMING_DEADLINE/BATTERY_
+        CRITICAL/FORGOTTEN_REMINDER — are all informational in nature,
+        not a companion-relationship moment the way a wellness check-in
+        is)."""
+        persona = self._persona_manager.active_persona()
+        self._quiet_mode_controller.activate(
+            ActivationReason.SCHEDULED_ALERT,
+            announce_first=(_extract_announcement_text(item.payload), persona.voice_id),
         )
 
     def _maybe_enqueue_wellness_prompt(self) -> None:

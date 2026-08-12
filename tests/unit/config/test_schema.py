@@ -641,6 +641,12 @@ def test_non_positive_max_task_dependencies_raises():
         config.validate()
 
 
+def test_non_positive_evaluation_timeout_seconds_raises():
+    config = AppConfig(planning=PlanningConfig(evaluation_timeout_seconds=0.0))
+    with pytest.raises(ConfigError, match="evaluation_timeout_seconds"):
+        config.validate()
+
+
 # --- context_engine (Sprint 6.3 — Context Engine, Level 6 Part A) -----------------------
 
 
@@ -685,6 +691,12 @@ def test_non_positive_reasoning_timeout_seconds_raises():
         config.validate()
 
 
+def test_non_positive_max_explanation_sentences_raises():
+    config = AppConfig(reasoning=ReasoningConfig(max_explanation_sentences=0))
+    with pytest.raises(ConfigError, match="max_explanation_sentences"):
+        config.validate()
+
+
 # --- decision_engine_v2 (Sprint 6.5 — Decision Engine v2, Level 6 Part A) ----------------
 
 
@@ -720,6 +732,38 @@ def test_decision_engine_weight_below_zero_raises():
 def test_decision_engine_weight_above_one_raises():
     config = AppConfig(decision_engine_v2=DecisionEngineConfig(confidence_weight=1.5))
     with pytest.raises(ConfigError, match="confidence_weight"):
+        config.validate()
+
+
+def test_non_positive_active_conversation_defer_seconds_raises():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(active_conversation_defer_seconds=0.0)
+    )
+    with pytest.raises(ConfigError, match="active_conversation_defer_seconds"):
+        config.validate()
+
+
+def test_low_battery_boost_threshold_percent_out_of_range_raises():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(low_battery_boost_threshold_percent=150.0)
+    )
+    with pytest.raises(ConfigError, match="low_battery_boost_threshold_percent"):
+        config.validate()
+
+
+def test_non_positive_conversation_active_threshold_seconds_raises():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(conversation_active_threshold_seconds=0.0)
+    )
+    with pytest.raises(ConfigError, match="conversation_active_threshold_seconds"):
+        config.validate()
+
+
+def test_low_confidence_hold_threshold_out_of_range_raises():
+    config = AppConfig(
+        decision_engine_v2=DecisionEngineConfig(low_confidence_hold_threshold=1.5)
+    )
+    with pytest.raises(ConfigError, match="low_confidence_hold_threshold"):
         config.validate()
 
 

@@ -231,3 +231,55 @@ def test_health_check_false_before_start(tmp_path):
 
 def test_health_check_true_after_start(store):
     assert store.health_check() is True
+
+
+# --- Sprint 6.14 hardening (scenario b): SQLite read failures ---------------------------------
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern (tests/unit/scheduler/test_calendar_store.py et al.)
+    — a real SqliteClient whose query() can be switched to fail on
+    demand, after start() has already succeeded."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_list_goals_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    task_graph_store = TaskGraphStore(client, PlanningConfig())
+    task_graph_store.start()
+    try:
+        task_graph_store.save_goal(make_goal())
+        client.raise_on_query = True
+
+        assert task_graph_store.list_goals() == []
+        assert task_graph_store.list_goals(status=PlanningStatus.ACCEPTED) == []
+    finally:
+        client.raise_on_query = False
+        task_graph_store.stop()
+
+
+def test_get_edges_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    task_graph_store = TaskGraphStore(client, PlanningConfig())
+    task_graph_store.start()
+    try:
+        goal = make_goal()
+        task_graph_store.save_goal(goal)
+        task_graph_store.save_edges(
+            goal.goal_id, [TaskEdge(from_task_id="g1-t1", to_task_id="g1-t2")]
+        )
+        client.raise_on_query = True
+
+        assert task_graph_store.get_edges(goal.goal_id) == []
+    finally:
+        client.raise_on_query = False
+        task_graph_store.stop()

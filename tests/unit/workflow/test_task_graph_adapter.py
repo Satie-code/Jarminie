@@ -74,7 +74,7 @@ def test_classifies_open_keyword_as_launch_application():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert workflow.steps[0].action_type is ActionType.LAUNCH_APPLICATION
 
@@ -84,7 +84,7 @@ def test_classifies_launch_keyword_as_launch_application():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert workflow.steps[0].action_type is ActionType.LAUNCH_APPLICATION
 
@@ -94,7 +94,7 @@ def test_classifies_pull_keyword_as_system_command():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert workflow.steps[0].action_type is ActionType.SYSTEM_COMMAND
     assert workflow.steps[0].parameters == {"command": ["Pull Git repository"]}
@@ -105,7 +105,7 @@ def test_classifies_a_url_shaped_description_as_open_url():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert workflow.steps[0].action_type is ActionType.OPEN_URL
     assert workflow.steps[0].parameters == {"url": "https://example.com/docs"}
@@ -116,7 +116,7 @@ def test_unclassifiable_title_falls_back_to_system_command_never_dropped():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert len(workflow.steps) == 1
     assert workflow.steps[0].action_type is ActionType.SYSTEM_COMMAND
@@ -130,7 +130,7 @@ def test_step_description_is_copied_from_task_title():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert workflow.steps[0].description == "Open the project folder"
 
@@ -140,7 +140,7 @@ def test_workflow_definition_carries_created_by_and_a_real_id():
     task_graph = TaskGraph(_goal([task]))
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="voice_turn")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="voice_turn")
 
     assert workflow.created_by == "voice_turn"
     assert workflow.workflow_id
@@ -161,12 +161,32 @@ def test_steps_are_ordered_by_decision_engine_v2s_own_ranking():
     # uses THAT order, not task_graph.ready_tasks()'s own original order.
     adapter = _adapter(reorder=lambda candidates: list(reversed(candidates)))
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert [step.description for step in workflow.steps] == [
         "Pull Git repository",
         "Launch Ollama",
         "Open VS Code",
+    ]
+
+
+def test_originating_tasks_are_returned_in_the_same_ranked_order_as_steps():
+    """Sprint 6.13's own necessary correction — the second return value
+    must stay in lockstep with the reordering rank_actions() applies,
+    not the original task_graph.ready_tasks() order."""
+    tasks = [
+        _task("t1", "Open VS Code"),
+        _task("t2", "Launch Ollama"),
+        _task("t3", "Pull Git repository"),
+    ]
+    task_graph = TaskGraph(_goal(tasks))
+    adapter = _adapter(reorder=lambda candidates: list(reversed(candidates)))
+
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
+
+    assert [task.task_id for task in originating_tasks] == ["t3", "t2", "t1"]
+    assert [step.description for step in workflow.steps] == [
+        task.title for task in originating_tasks
     ]
 
 
@@ -190,7 +210,7 @@ def test_build_workflow_truncates_at_max_steps_from_task_graph():
     task_graph = TaskGraph(_goal(tasks))
     adapter = _adapter(max_steps_from_task_graph=2)
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert len(workflow.steps) == 2
 
@@ -205,7 +225,7 @@ def test_only_ready_tasks_become_steps():
     task_graph.add_dependency("t1", "t2")  # t2 is blocked until t1 completes
     adapter = _adapter()
 
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     assert len(workflow.steps) == 1
     assert workflow.steps[0].description == "Open VS Code"
@@ -223,7 +243,7 @@ def test_a_built_workflow_round_trips_through_the_real_unmodified_workflow_store
     ]
     task_graph = TaskGraph(_goal(tasks))
     adapter = _adapter()
-    workflow = adapter.build_workflow(task_graph, created_by="test")
+    workflow, originating_tasks = adapter.build_workflow(task_graph, created_by="test")
 
     client = SqliteClient(str(tmp_path / "workflow.db"))
     store = WorkflowStore(client, WorkflowConfig())

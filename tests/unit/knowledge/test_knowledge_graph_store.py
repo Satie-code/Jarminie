@@ -336,3 +336,71 @@ def test_health_check_false_before_start(tmp_path):
 
 def test_health_check_true_after_start(store):
     assert store.health_check() is True
+
+
+# --- Sprint 6.14 hardening (scenario b): SQLite read failures ---------------------------------
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern (tests/unit/scheduler/test_calendar_store.py et al.)
+    — a real SqliteClient whose query() can be switched to fail on
+    demand, after start() has already succeeded."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_find_entities_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        knowledge_graph_store.save_entity(make_entity("a"))
+        client.raise_on_query = True
+
+        assert knowledge_graph_store.find_entities() == []
+        assert knowledge_graph_store.find_entities(entity_type=EntityType.PROJECT) == []
+    finally:
+        client.raise_on_query = False
+        knowledge_graph_store.stop()
+
+
+def test_get_entity_degrades_to_none_on_a_sqlite_read_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        knowledge_graph_store.save_entity(make_entity("a"))
+        client.raise_on_query = True
+
+        assert knowledge_graph_store.get_entity("a") is None
+    finally:
+        client.raise_on_query = False
+        knowledge_graph_store.stop()
+
+
+def test_related_entities_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_path):
+    """_neighbor_ids() (the internal helper related_entities()'s BFS
+    loop calls) degrades to an empty neighbor set on a query failure —
+    the whole traversal returns [] rather than raising, since its very
+    first hop already fails."""
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        knowledge_graph_store.save_entity(make_entity("a"))
+        knowledge_graph_store.save_entity(make_entity("b"))
+        knowledge_graph_store.add_relationship(make_relationship("a", "b"))
+        client.raise_on_query = True
+
+        assert knowledge_graph_store.related_entities("a") == []
+    finally:
+        client.raise_on_query = False
+        knowledge_graph_store.stop()

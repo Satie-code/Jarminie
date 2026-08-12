@@ -11,10 +11,29 @@ established for its own one-to-many workflow/step relationship, scaled
 here to a three-level goal/milestone/task hierarchy plus a separate
 edges table.
 
-Deliberately NOT given Fail Gracefully hardening this sprint — matching
-CalendarStore's/UsageStore's identical precedent (no real caller exists
-yet to meaningfully degrade for); Sprint 6.14's job once Sprint 6.9/6.13
-give this store real callers.
+Deliberately NOT given Fail Gracefully hardening at this store's own
+Sprint 6.2 — matching CalendarStore's/UsageStore's identical precedent
+(no real caller existed yet to meaningfully degrade for). Sprint 6.14
+(Error Handling & Recovery Hardening, scenario b) adds it once Sprint
+6.9/6.13 gave this store real callers: list_goals()/get_edges() now
+degrade to [] on a SQLite failure, matching CalendarStore.
+list_due_within()'s exact idiom; save_goal()'s own real write caller
+(CommunicationPipeline._accept_pending_goal()) catches a save failure at
+the call site instead (voice/pipeline.py), since a write has no honest
+"empty" degrade the way a read does — get_goal()/save_evaluation()/
+list_evaluations_for_goal() remain deliberately unhardened, still no
+real caller.
+
+Sprint 6.10 (Self Evaluation) widens this store with a fifth table,
+evaluation_records, plus save_evaluation()/list_evaluations_for_goal() —
+the same "caller owns its own DDL" store simply widened, not a second
+store class for one more table. This module imports EvaluationOutcome/
+EvaluationRecord from planning/self_evaluator.py directly (a real,
+unconditional top-level import) specifically so that module can keep its
+own TaskGraphStore reference TYPE_CHECKING-only — the only ordering that
+avoids an actual circular import between the two files, since
+self_evaluator.py's SelfEvaluator takes a TaskGraphStore as a
+constructor collaborator.
 """
 
 from __future__ import annotations
@@ -25,6 +44,7 @@ from config.schema import PlanningConfig
 from core.logging_setup import get_logger
 from database.sqlite_client import SqliteClient
 from planning.planning_model import Goal, Milestone, PlanningStatus, Task
+from planning.self_evaluator import EvaluationOutcome, EvaluationRecord
 from planning.task_graph import TaskEdge
 
 logger = get_logger(__name__)
@@ -71,6 +91,18 @@ CREATE TABLE IF NOT EXISTS task_edges (
 )
 """
 
+_CREATE_EVALUATION_RECORDS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS evaluation_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id TEXT NOT NULL UNIQUE,
+    subject_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    improvement_note TEXT,
+    evaluated_at TEXT NOT NULL
+)
+"""
+
 
 class TaskGraphStore:
     """Constructor DI: (sqlite_client, planning_config)."""
@@ -86,6 +118,7 @@ class TaskGraphStore:
         self._sqlite_client.execute(_CREATE_MILESTONES_TABLE_SQL)
         self._sqlite_client.execute(_CREATE_TASKS_TABLE_SQL)
         self._sqlite_client.execute(_CREATE_TASK_EDGES_TABLE_SQL)
+        self._sqlite_client.execute(_CREATE_EVALUATION_RECORDS_TABLE_SQL)
         self._started = True
         logger.info("Task graph store started.")
 
@@ -158,15 +191,27 @@ class TaskGraphStore:
         return self._build_goal(rows[0])
 
     def list_goals(self, status: PlanningStatus | None = None) -> list[Goal]:
-        if status is None:
-            rows = self._sqlite_client.query(
-                "SELECT goal_id, statement, created_at, status FROM goals"
-            )
-        else:
-            rows = self._sqlite_client.query(
-                "SELECT goal_id, statement, created_at, status FROM goals WHERE status = ?",
-                (status.value,),
-            )
+        """Sprint 6.14 hardening (scenario b): CommunicationPipeline.
+        _run_accepted_plan() (6.13) is a real, live caller now — a SQLite
+        failure here degrades to [], matching CalendarStore.
+        list_due_within()'s identical precedent, rather than propagating
+        up to _handle_turn_complete()'s own outer catch and ending the
+        whole session. [] composes correctly with that caller's own
+        existing "You don't have an accepted plan to run yet." reply, no
+        pipeline.py change needed at that call site."""
+        try:
+            if status is None:
+                rows = self._sqlite_client.query(
+                    "SELECT goal_id, statement, created_at, status FROM goals"
+                )
+            else:
+                rows = self._sqlite_client.query(
+                    "SELECT goal_id, statement, created_at, status FROM goals WHERE status = ?",
+                    (status.value,),
+                )
+        except Exception:
+            logger.exception("Failed to query goals; treating as none found.")
+            return []
         return [self._build_goal(row) for row in rows]
 
     def save_edges(self, goal_id: str, edges: list[TaskEdge]) -> None:
@@ -185,11 +230,76 @@ class TaskGraphStore:
         save_edges(), needed to satisfy this sprint's own Acceptance
         Criteria ("A Goal with its full milestone/task/edge structure
         survives a close/reopen cycle... unchanged"), which is otherwise
-        unsatisfiable: nothing else in this store can read edges back."""
-        rows = self._sqlite_client.query(
-            "SELECT from_task_id, to_task_id FROM task_edges WHERE goal_id = ?", (goal_id,)
-        )
+        unsatisfiable: nothing else in this store can read edges back.
+
+        Sprint 6.14 hardening (scenario b): _run_accepted_plan() (6.13)
+        is a real, live caller now — a SQLite failure here degrades to
+        [] (an edge-less TaskGraph, every task looking unblocked) rather
+        than ending the session, the safer of the two available failure
+        modes since a real TaskGraph the user already accepted should
+        still be attemptable, logged clearly, rather than refused
+        outright over a transient edge-read failure."""
+        try:
+            rows = self._sqlite_client.query(
+                "SELECT from_task_id, to_task_id FROM task_edges WHERE goal_id = ?", (goal_id,)
+            )
+        except Exception:
+            logger.exception(
+                "Failed to query task edges for goal %r; treating as no known "
+                "dependencies.",
+                goal_id,
+            )
+            return []
         return [TaskEdge(from_task_id=row[0], to_task_id=row[1]) for row in rows]
+
+    def save_evaluation(self, record: EvaluationRecord) -> None:
+        """Append-only — unlike save_goal()/save_edges(), this never
+        deletes or replaces an existing row; each call always inserts a
+        new evaluation_records row, matching EvaluationRecord's own
+        Potential Risks disclosure that repeated evaluation of the same
+        subject is never de-duplicated here."""
+        self._sqlite_client.execute(
+            "INSERT INTO evaluation_records (record_id, subject_id, outcome, summary, "
+            "improvement_note, evaluated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record.record_id,
+                record.subject_id,
+                record.outcome.value,
+                record.summary,
+                record.improvement_note,
+                record.evaluated_at.isoformat(),
+            ),
+        )
+
+    def list_evaluations_for_goal(self, goal_id: str) -> list[EvaluationRecord]:
+        """evaluation_records has no goal_id column of its own — a
+        record's subject_id is a Task.task_id or a WorkflowRunResult.
+        run_id (EvaluationRecord's own docstring), and a WorkflowRunResult
+        has no owning Goal at all. Resolved via the same tasks/milestones
+        join _build_goal()/_build_milestone() already use to reach a
+        goal's own tasks. A real, disclosed scope limit: an evaluation of
+        a WorkflowRunResult is never returned by this method, since
+        "for this goal" cannot honestly apply to one."""
+        rows = self._sqlite_client.query(
+            "SELECT er.record_id, er.subject_id, er.outcome, er.summary, "
+            "er.improvement_note, er.evaluated_at FROM evaluation_records er "
+            "JOIN tasks t ON t.task_id = er.subject_id "
+            "JOIN milestones m ON m.milestone_id = t.milestone_id "
+            "WHERE m.goal_id = ? ORDER BY er.evaluated_at ASC",
+            (goal_id,),
+        )
+        return [self._build_evaluation_record(row) for row in rows]
+
+    def _build_evaluation_record(self, row: tuple) -> EvaluationRecord:
+        record_id, subject_id, outcome, summary, improvement_note, evaluated_at = row
+        return EvaluationRecord(
+            record_id=record_id,
+            subject_id=subject_id,
+            outcome=EvaluationOutcome(outcome),
+            summary=summary,
+            improvement_note=improvement_note,
+            evaluated_at=datetime.fromisoformat(evaluated_at),
+        )
 
     def _build_goal(self, row: tuple) -> Goal:
         goal_id, statement, created_at, status = row

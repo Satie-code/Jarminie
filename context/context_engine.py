@@ -33,7 +33,7 @@ from config.schema import ContextEngineConfig
 from context.context_model import WorkingContext
 from core.logging_setup import get_logger
 from core.resource_monitor import ResourceMonitor
-from memory.memory_store import MemoryStore
+from memory.memory_store import MemoryStoreProtocol
 from memory.models import MemoryType
 from scheduler.calendar_store import CalendarStore
 from voice.context_manager import ContextManager
@@ -46,12 +46,21 @@ class ContextEngine:
     optional (X | None = None) — a WorkingContext built with some
     collaborators absent simply leaves the corresponding field empty
     (never a raised exception), matching the Fail Gracefully Rule
-    applied to composition rather than a live call failure."""
+    applied to composition rather than a live call failure.
+
+    Sprint 6.13 correction: memory_store is typed against
+    MemoryStoreProtocol, not the concrete MemoryStore this sprint file's
+    own text originally named — the Runtime Refactor Sprint (completed
+    2026-08-08, after this class's own Sprint 6.3) threads a
+    LazyMemoryStore proxy through every real memory_store call site
+    project-wide; learning/preference_learner.py's own identical
+    correction already established this exact fix for the identical
+    reason."""
 
     def __init__(
         self,
         context_manager: ContextManager | None = None,
-        memory_store: MemoryStore | None = None,
+        memory_store: MemoryStoreProtocol | None = None,
         usage_store: UsageStore | None = None,
         calendar_store: CalendarStore | None = None,
         resource_monitor: ResourceMonitor | None = None,

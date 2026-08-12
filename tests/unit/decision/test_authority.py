@@ -458,6 +458,90 @@ def test_informational_intent_without_wellness_keyword_does_not_select_wellness(
     assert trace.selected_engine is not EngineSelection.WELLNESS
 
 
+# --- Sprint 6.13: PLANNING/EXPLANATION routing ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "help me plan a birthday party",
+        "let's plan a trip to Paris",
+        "plan a goal for learning guitar",
+        "can you break this down into steps",
+        "run my plan",
+        "resume my session",
+        "resume my previous session",
+    ],
+)
+def test_planning_keyword_selects_planning_regardless_of_category(evaluator, transcript):
+    """Unlike WELLNESS, PLANNING/EXPLANATION are checked unconditionally
+    across every IntentCategory — a real, disclosed design decision (see
+    decision/authority.py's own docstring for _determine_engine())."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript=transcript),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.PLANNING
+    assert "planning" in trace.reasoning_text.lower()
+
+
+def test_planning_keyword_selects_planning_for_informational_intent(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript="help me plan my week"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.PLANNING
+
+
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "why did you do that",
+        "why is that the case",
+        "why was that necessary",
+        "explain that to me",
+        "explain why you chose that",
+        "what's your reasoning",
+    ],
+)
+def test_explanation_keyword_selects_explanation_regardless_of_category(evaluator, transcript):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.INFORMATIONAL, raw_transcript=transcript),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.EXPLANATION
+    assert "explainability" in trace.reasoning_text.lower()
+
+
+def test_planning_keyword_takes_priority_over_explanation_keyword_when_both_absent(evaluator):
+    """No overlap case — confirms PLANNING is checked first, so a
+    transcript matching only a planning keyword never falls through to
+    the explanation branch."""
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="help me plan a project"),
+        make_context_analysis(),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine is EngineSelection.PLANNING
+
+
+def test_neither_planning_nor_explanation_keyword_does_not_select_either(evaluator):
+    trace = evaluator.evaluate(
+        make_intent(IntentCategory.ACTION_REQUEST, raw_transcript="open notepad"),
+        make_context_analysis(mentioned_entities=["notepad"]),
+        [],
+        PriorityLevel.GENERAL_SUGGESTION,
+    )
+    assert trace.selected_engine not in (EngineSelection.PLANNING, EngineSelection.EXPLANATION)
+
+
 # --- reasoning_text -------------------------------------------------------------
 
 

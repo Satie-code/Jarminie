@@ -222,3 +222,50 @@ def test_mark_completed_unknown_task_id_raises_value_error():
 
     with pytest.raises(ValueError, match="ghost"):
         graph.mark_completed("ghost")
+
+
+# --- Sprint 6.14 hardening (scenario e): CyclicDependencyError reachability ------------------
+
+
+def test_add_dependency_has_no_production_caller_anywhere():
+    """Sprint 6.14's own scenario (e) asks to confirm a live
+    _handle_planning_turn() degrades honestly when add_dependency()
+    raises CyclicDependencyError mid-turn. Investigation against the
+    real Sprint 6.13 graph found the scenario's own premise does not
+    currently hold: add_dependency() has no caller anywhere in
+    production code. planning/task_graph.py's own module docstring
+    already discloses why — "Dependency edges are deliberately NOT
+    inferred automatically from a PlanningEngine decomposition anywhere
+    in this module" — PlanningEngine.decompose_goal() (6.1) never
+    proposes edges, and TaskGraph.__init__() (this file) accepts an
+    edges list directly (from TaskGraphStore.get_edges(), the shape
+    _run_accepted_plan() actually uses) without calling this method at
+    all. A CyclicDependencyError can therefore never reach a live turn
+    today — confirmed here via a real, repo-wide AST scan (mirroring
+    tests/unit/proactive/test_proactive_assistant.py's own import-
+    boundary AST proof) rather than fabricating a fix for an
+    unreachable path. If a future sprint ever wires something that DOES
+    call add_dependency() from a live turn, this test will fail and
+    that's the correct, honest signal that _handle_planning_turn()'s own
+    CyclicDependencyError handling (still absent) needs to be added
+    then, not before."""
+    import ast
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    excluded_dirs = {"tests", ".venv", "docs", ".git"}
+    call_sites: list[str] = []
+
+    for py_file in repo_root.rglob("*.py"):
+        if any(part in excluded_dirs for part in py_file.parts):
+            continue
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_dependency"
+            ):
+                call_sites.append(str(py_file.relative_to(repo_root)))
+
+    assert call_sites == []

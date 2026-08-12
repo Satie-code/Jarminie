@@ -37,17 +37,21 @@ from config.schema import (
     InternetConfig,
     LearningConfig,
     MemoryConfig,
+    ProactiveConfig,
     SchedulerConfig,
     SecurityConfig,
     VoiceConfig,
     WellnessConfig,
     WorkflowConfig,
 )
+from context.context_engine import ContextEngine
 from core.manager import CoreManager
 from core.resource_monitor import ResourceMonitor
 from database.sqlite_client import SqliteClient
+from decision.adaptive_prioritizer import AdaptivePrioritizer
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
+from decision.decision_engine_v2 import DecisionEngineV2
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
 from decision.response_generator import ResponseGenerator
@@ -64,6 +68,7 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from knowledge.knowledge_graph_store import KnowledgeGraphStore
 from learning.pattern_recognizer import PatternRecognizer
 from learning.pattern_store import PatternStore
 from learning.preference_learner import PreferenceLearner
@@ -80,6 +85,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from planning.planning_engine import PlanningEngine
+from planning.self_evaluator import SelfEvaluator
+from planning.task_graph_store import TaskGraphStore
 from presentation.adaptive_workspace import AdaptiveWorkspaceController
 from presentation.avatar_renderer_registry import create_avatar_renderer
 from presentation.companion_experience import CompanionExperienceEngine
@@ -92,6 +100,9 @@ from presentation.minie_state_computer import MiniePresentationStateComputer
 from presentation.presentation_controller import PresentationController
 from presentation.transition_engine import TransitionEngine
 from presentation.voice_personality import VoicePersonalityModulator
+from proactive.proactive_assistant import ProactiveAssistant
+from reasoning.explainability import ExplainabilityLayer
+from reasoning.reasoning_engine import ReasoningEngine
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -101,7 +112,7 @@ from security.policy_engine import PermissionPolicyEngine
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, MicrophoneMode
-from voice.pipeline import CallbackRelay, CommunicationPipeline
+from voice.pipeline import CallbackRelay, CommunicationPipeline, DecisionTraceLookupRelay
 from voice.quiet_mode import OperatingMode, QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import TranscriptionResult
@@ -109,6 +120,8 @@ from voice.wake_word import WakeWordDetector
 from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
 from wellness.escalation import WellnessEscalationManager
 from wellness.wellness_tracker import WellnessTracker
+from workflow.session_resumption import SessionResumption
+from workflow.task_graph_adapter import TaskGraphWorkflowAdapter
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
 
@@ -206,7 +219,13 @@ class FakeLanguageModelClient:
     order — lets a test confirm what a specific generation call actually
     contained (e.g. that a retrieved memory's content really reached the
     Response Generation prompt), not just what the fake's own canned
-    reply was."""
+    reply was.
+
+    planning_response/reasoning_response (Sprint 6.13) mirror
+    tests/integration/conftest.py's own identical extension — detected
+    via "planning assistant"/"reasoning engine", the literal, template-
+    unique opening phrases planning/planning_engine.py's/
+    reasoning/reasoning_engine.py's own _build_prompt() always use."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -216,6 +235,11 @@ class FakeLanguageModelClient:
         )
         self.summary_response = "Here is a summary based on the provided sources."
         self.conversational_response = "Here's a real, generated answer to your question."
+        self.planning_response = (
+            "MILESTONE: Get started\n"
+            "TASK: Do the first concrete thing | A concrete first step | 15 minutes"
+        )
+        self.reasoning_response = "CONCLUSION: This is a reasoned conclusion.\nCONFIDENCE: 0.8"
         self.should_raise = False
         self.calls: list[str] = []
 
@@ -233,6 +257,10 @@ class FakeLanguageModelClient:
             return self.summary_response
         if "Reply to the user directly" in prompt:
             return self.conversational_response
+        if "planning assistant" in prompt:
+            return self.planning_response
+        if "reasoning engine" in prompt:
+            return self.reasoning_response
         return self.context_response
 
 
@@ -333,6 +361,7 @@ def _app_harness_impl(
     wellness_config: WellnessConfig | None = None,
     learning_config: LearningConfig | None = None,
     analytics_config: AnalyticsConfig | None = None,
+    proactive_config: ProactiveConfig | None = None,
 ):
     """Builds the real Level 2 + Level 3 module graph exactly as main.py's
     _register_level2_modules()/_register_level3_modules() do, registers
@@ -582,6 +611,62 @@ def _app_harness_impl(
     preference_learner = PreferenceLearner(memory_store, pattern_store, config.learning)
     recommendation_engine = RecommendationEngine(pattern_store, config.learning)
 
+    # Sprint 6.13 — Level 6 Part A (Autonomous Intelligence & Cognitive
+    # Architecture), matching main.py's own _construct_level6_part_a_
+    # modules() exactly — see tests/integration/conftest.py's own
+    # identical extension for the full reasoning (llm_client is the same
+    # FakeLanguageModelClient IntentDetector/ContextAnalyzer already use,
+    # never a real OllamaClient).
+    resolved_proactive_config = (
+        proactive_config if proactive_config is not None else ProactiveConfig()
+    )
+    task_graph_sqlite_client = SqliteClient(config.database.sqlite_path)
+    task_graph_store = TaskGraphStore(task_graph_sqlite_client, config.planning)
+    knowledge_graph_sqlite_client = SqliteClient(config.database.sqlite_path)
+    knowledge_graph_store = KnowledgeGraphStore(
+        knowledge_graph_sqlite_client, config.knowledge_graph
+    )
+
+    context_engine = ContextEngine(
+        context_manager=context_manager,
+        memory_store=memory_store,
+        usage_store=usage_store,
+        calendar_store=calendar_store,
+        resource_monitor=resource_monitor,
+        context_engine_config=config.context_engine,
+    )
+
+    planning_engine = PlanningEngine(llm_client, config.models, config.planning)
+    reasoning_engine = ReasoningEngine(llm_client, config.models, config.reasoning)
+
+    permission_policy_engine_for_level6a = PermissionPolicyEngine(security_config)
+    decision_engine_v2 = DecisionEngineV2(
+        authority_evaluator,
+        permission_policy_engine_for_level6a,
+        reasoning_engine,
+        config.decision_engine_v2,
+    )
+
+    decision_trace_lookup_relay = DecisionTraceLookupRelay()
+    explainability_layer = ExplainabilityLayer(
+        reasoning_engine, task_graph_store, decision_trace_lookup_relay, config.reasoning
+    )
+    adaptive_prioritizer = AdaptivePrioritizer(
+        priority_queue_manager, decision_engine_v2, config.decision_engine_v2, reasoning_engine
+    )
+    task_graph_workflow_adapter = TaskGraphWorkflowAdapter(decision_engine_v2, workflow_config)
+    session_resumption = SessionResumption(knowledge_graph_store, context_engine, workflow_config)
+    self_evaluator = SelfEvaluator(reasoning_engine, task_graph_store, config.planning)
+    proactive_assistant = ProactiveAssistant(
+        task_scheduler,
+        priority_queue_manager,
+        context_engine,
+        decision_engine_v2,
+        knowledge_graph_store,
+        pattern_recognizer,
+        resolved_proactive_config,
+    )
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -636,7 +721,20 @@ def _app_harness_impl(
         runtime_manager=core_manager.runtime_manager(),
         resource_monitor=resource_monitor,
         runtime_config=config.runtime,
+        task_graph_store=task_graph_store,
+        planning_engine=planning_engine,
+        context_engine=context_engine,
+        explainability_layer=explainability_layer,
+        adaptive_prioritizer=adaptive_prioritizer,
+        task_graph_workflow_adapter=task_graph_workflow_adapter,
+        session_resumption=session_resumption,
+        self_evaluator=self_evaluator,
     )
+    # Sprint 6.13's own identical circular-construction resolution as
+    # main.py's own persona_switch_relay/decision_trace_lookup_relay
+    # wiring — see tests/integration/conftest.py's own identical
+    # extension for the full reasoning.
+    decision_trace_lookup_relay.target = pipeline.lookup_last_decision_trace
 
     # task_scheduler/calendar_store registered FIRST, before even
     # microphone — the one deliberate exception to this fixture's own
@@ -697,6 +795,11 @@ def _app_harness_impl(
     core_manager.register_module("pattern_store", pattern_store)
     core_manager.register_module("pattern_recognizer", pattern_recognizer)
     core_manager.register_module("wellness_tracker", wellness_tracker)
+    # Sprint 6.13 — Level 6 Part A, registered last (main.py's own
+    # _register_level6_part_a_modules() ordering).
+    core_manager.register_module("task_graph_store", task_graph_store)
+    core_manager.register_module("knowledge_graph_store", knowledge_graph_store)
+    core_manager.register_module("proactive_assistant", proactive_assistant)
 
     core_manager.startup()
 
@@ -773,6 +876,20 @@ def _app_harness_impl(
         dashboard_service=dashboard_service,
         preference_learner=preference_learner,
         recommendation_engine=recommendation_engine,
+        # Sprint 6.13 (Level 6 Part A) additions.
+        task_graph_store=task_graph_store,
+        knowledge_graph_store=knowledge_graph_store,
+        planning_engine=planning_engine,
+        context_engine=context_engine,
+        reasoning_engine=reasoning_engine,
+        decision_engine_v2=decision_engine_v2,
+        explainability_layer=explainability_layer,
+        adaptive_prioritizer=adaptive_prioritizer,
+        task_graph_workflow_adapter=task_graph_workflow_adapter,
+        session_resumption=session_resumption,
+        self_evaluator=self_evaluator,
+        proactive_assistant=proactive_assistant,
+        proactive_config=resolved_proactive_config,
     )
     try:
         yield harness
@@ -853,6 +970,24 @@ def fast_level5_part_b_app_harness(tmp_path, voice_config, qapp):
         wellness_config=fast_wellness_config,
         learning_config=fast_learning_config,
         analytics_config=fast_analytics_config,
+    )
+
+
+@pytest.fixture
+def fast_level6_part_a_app_harness(tmp_path, voice_config, qapp):
+    """Identical object graph to app_harness, but with short
+    scheduler_config.poll_interval_seconds (the announcement job's own
+    cadence) PLUS short proactive_config.evaluation_interval_seconds
+    (ProactiveAssistant's own tick) — for a dedicated Level 6 Part A
+    job-recurrence test only, matching fast_level5_part_b_app_harness's
+    own identical "not shared with any other test file" precedent."""
+    fast_scheduler_config = SchedulerConfig(poll_interval_seconds=0.3)
+    fast_proactive_config = ProactiveConfig(evaluation_interval_seconds=0.3)
+    yield from _app_harness_impl(
+        tmp_path,
+        voice_config,
+        fast_scheduler_config,
+        proactive_config=fast_proactive_config,
     )
 
 

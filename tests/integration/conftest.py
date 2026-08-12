@@ -44,14 +44,20 @@ from analytics.usage_store import UsageStore
 from analytics.usage_tracker import UsageTracker
 from config.schema import (
     AnalyticsConfig,
+    ContextEngineConfig,
     DatabaseConfig,
+    DecisionEngineConfig,
     DeviceControlConfig,
     EmotionConfig,
     InternetConfig,
+    KnowledgeGraphConfig,
     LearningConfig,
     MemoryConfig,
     ModelConfig,
+    PlanningConfig,
     PresentationConfig,
+    ProactiveConfig,
+    ReasoningConfig,
     ResourceThresholds,
     RuntimeConfig,
     SchedulerConfig,
@@ -61,11 +67,14 @@ from config.schema import (
     WellnessConfig,
     WorkflowConfig,
 )
+from context.context_engine import ContextEngine
 from core.resource_monitor import ResourceMonitor, ResourceSnapshot
 from core.runtime_manager import RuntimeManager
 from database.sqlite_client import SqliteClient
+from decision.adaptive_prioritizer import AdaptivePrioritizer
 from decision.authority import AuthorityEvaluator
 from decision.context_analyzer import ContextAnalyzer
+from decision.decision_engine_v2 import DecisionEngineV2
 from decision.intent_detector import IntentDetector
 from decision.priority_queue import PriorityQueueManager
 from decision.response_generator import ResponseGenerator
@@ -82,6 +91,7 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from knowledge.knowledge_graph_store import KnowledgeGraphStore
 from learning.pattern_recognizer import PatternRecognizer
 from learning.pattern_store import PatternStore
 from learning.preference_learner import PreferenceLearner
@@ -98,6 +108,9 @@ from memory.short_term_memory import ShortTermMemory
 from personas.jarvis import JarvisPersona
 from personas.minie import MiniePersona
 from personas.persona_manager import PersonaManager
+from planning.planning_engine import PlanningEngine
+from planning.self_evaluator import SelfEvaluator
+from planning.task_graph_store import TaskGraphStore
 from presentation.adaptive_workspace import AdaptiveWorkspaceController
 from presentation.avatar_renderer_registry import create_avatar_renderer
 from presentation.companion_experience import CompanionExperienceEngine
@@ -110,6 +123,9 @@ from presentation.minie_state_computer import MiniePresentationStateComputer
 from presentation.presentation_controller import PresentationController
 from presentation.transition_engine import TransitionEngine
 from presentation.voice_personality import VoicePersonalityModulator
+from proactive.proactive_assistant import ProactiveAssistant
+from reasoning.explainability import ExplainabilityLayer
+from reasoning.reasoning_engine import ReasoningEngine
 from scheduler.calendar_store import CalendarStore
 from scheduler.reminder_engine import ReminderEngine
 from scheduler.task_scheduler import TaskScheduler
@@ -119,7 +135,7 @@ from security.policy_engine import PermissionPolicyEngine
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, MicrophoneMode
-from voice.pipeline import CallbackRelay, CommunicationPipeline
+from voice.pipeline import CallbackRelay, CommunicationPipeline, DecisionTraceLookupRelay
 from voice.quiet_mode import OperatingMode, QuietModeController
 from voice.session_manager import VoiceSessionManager
 from voice.speech_to_text import TranscriptionResult
@@ -127,6 +143,8 @@ from voice.wake_word import WakeWordDetector
 from wellness.adaptive_wellness import AdaptiveWellnessAdjuster
 from wellness.escalation import WellnessEscalationManager
 from wellness.wellness_tracker import WellnessTracker
+from workflow.session_resumption import SessionResumption
+from workflow.task_graph_adapter import TaskGraphWorkflowAdapter
 from workflow.workflow_executor import WorkflowExecutor
 from workflow.workflow_store import WorkflowStore
 
@@ -271,7 +289,20 @@ class FakeLanguageModelClient:
     fails ONLY the ResponseGenerator's own call, so a test can exercise
     "everything upstream succeeded, only response generation failed,
     degrade to the templated reply for this one turn" without every
-    earlier stage failing too."""
+    earlier stage failing too.
+
+    planning_response (Sprint 6.13)/reasoning_response (Sprint 6.13) are
+    detected the same "dispatch on a template-unique literal substring"
+    way — PlanningEngine's own _build_prompt() always opens with "You are
+    a planning assistant"; ReasoningEngine's own _build_prompt() (all
+    four question shapes: explain_why()/what_if()/alternatives()/
+    estimate_confidence()) always opens with "You are JARMINEI's
+    reasoning engine". reasoning_response's own default line carries both
+    a CONCLUSION and a CONFIDENCE line so it parses sensibly regardless
+    of which of the four ReasoningEngine methods a test happens to
+    exercise — each parser reads only the field it needs and ignores the
+    rest, the same tolerant shape reasoning/reasoning_engine.py's own
+    real parsers already have."""
 
     def __init__(self) -> None:
         self.intent_response = "CATEGORY: INFORMATIONAL\nCONFIDENCE: 0.9"
@@ -281,6 +312,11 @@ class FakeLanguageModelClient:
         )
         self.summary_response = "Here is a summary based on the provided sources."
         self.conversational_response = "Here's a real, generated answer to your question."
+        self.planning_response = (
+            "MILESTONE: Get started\n"
+            "TASK: Do the first concrete thing | A concrete first step | 15 minutes"
+        )
+        self.reasoning_response = "CONCLUSION: This is a reasoned conclusion.\nCONFIDENCE: 0.8"
         self.calls: list[str] = []
         self.should_raise = False
         self.should_raise_for_summary = False
@@ -306,6 +342,10 @@ class FakeLanguageModelClient:
 
                 raise LlmError("simulated Ollama connection failure during response generation")
             return self.conversational_response
+        if "planning assistant" in prompt:
+            return self.planning_response
+        if "reasoning engine" in prompt:
+            return self.reasoning_response
         if "CATEGORY:" in prompt:
             return self.intent_response
         return self.context_response
@@ -414,6 +454,8 @@ def _pipeline_harness_impl(
     learning_config: LearningConfig | None = None,
     analytics_config: AnalyticsConfig | None = None,
     level5_part_b_available: bool = True,
+    proactive_config: ProactiveConfig | None = None,
+    level6_part_a_available: bool = True,
 ):
     """The real Communication Pipeline object graph, matching
     main.py's own composition order exactly (_register_level2_modules,
@@ -666,6 +708,69 @@ def _pipeline_harness_impl(
     preference_learner = PreferenceLearner(memory_store, pattern_store, learning_config)
     recommendation_engine = RecommendationEngine(pattern_store, learning_config)
 
+    # Sprint 6.13 — Level 6 Part A (Autonomous Intelligence & Cognitive
+    # Architecture), matching main.py's own _construct_level6_part_a_
+    # modules() exactly, with one deliberate harness-only substitution:
+    # llm_client is the SAME FakeLanguageModelClient IntentDetector/
+    # ContextAnalyzer above already use (never a real OllamaClient) —
+    # this harness's own established "fake only at the ML boundary"
+    # discipline, extended to PlanningEngine/ReasoningEngine rather than
+    # constructing a second, real LLM integration a test could
+    # accidentally depend on a running Ollama service for.
+    planning_config = PlanningConfig()
+    context_engine_config = ContextEngineConfig()
+    reasoning_config = ReasoningConfig()
+    decision_engine_config = DecisionEngineConfig()
+    knowledge_graph_config = KnowledgeGraphConfig()
+    proactive_config = proactive_config if proactive_config is not None else ProactiveConfig()
+
+    task_graph_sqlite_client = SqliteClient(database_config.sqlite_path)
+    task_graph_store = TaskGraphStore(task_graph_sqlite_client, planning_config)
+    knowledge_graph_sqlite_client = SqliteClient(database_config.sqlite_path)
+    knowledge_graph_store = KnowledgeGraphStore(
+        knowledge_graph_sqlite_client, knowledge_graph_config
+    )
+
+    context_engine = ContextEngine(
+        context_manager=context_manager,
+        memory_store=memory_store,
+        usage_store=usage_store,
+        calendar_store=calendar_store,
+        resource_monitor=resource_monitor,
+        context_engine_config=context_engine_config,
+    )
+
+    planning_engine = PlanningEngine(llm_client, model_config, planning_config)
+    reasoning_engine = ReasoningEngine(llm_client, model_config, reasoning_config)
+
+    permission_policy_engine_for_level6a = PermissionPolicyEngine(security_config)
+    decision_engine_v2 = DecisionEngineV2(
+        authority_evaluator,
+        permission_policy_engine_for_level6a,
+        reasoning_engine,
+        decision_engine_config,
+    )
+
+    decision_trace_lookup_relay = DecisionTraceLookupRelay()
+    explainability_layer = ExplainabilityLayer(
+        reasoning_engine, task_graph_store, decision_trace_lookup_relay, reasoning_config
+    )
+    adaptive_prioritizer = AdaptivePrioritizer(
+        priority_queue_manager, decision_engine_v2, decision_engine_config, reasoning_engine
+    )
+    task_graph_workflow_adapter = TaskGraphWorkflowAdapter(decision_engine_v2, workflow_config)
+    session_resumption = SessionResumption(knowledge_graph_store, context_engine, workflow_config)
+    self_evaluator = SelfEvaluator(reasoning_engine, task_graph_store, planning_config)
+    proactive_assistant = ProactiveAssistant(
+        task_scheduler,
+        priority_queue_manager,
+        context_engine,
+        decision_engine_v2,
+        knowledge_graph_store,
+        pattern_recognizer,
+        proactive_config,
+    )
+
     pipeline = CommunicationPipeline(
         mic=mic,
         wake_word_detector=wake_word_detector,
@@ -733,7 +838,32 @@ def _pipeline_harness_impl(
         runtime_manager=runtime_manager,
         resource_monitor=resource_monitor,
         runtime_config=RuntimeConfig(),
+        # Sprint 6.13's own identical null-fallback path, same discipline
+        # as level5_part_b_available immediately above: the real objects
+        # are still constructed/started/registered regardless of this
+        # flag, only the eight CommunicationPipeline constructor
+        # parameters go to None — validating the one thing this sprint's
+        # own Acceptance Criteria cares about, that CommunicationPipeline
+        # tolerates None for all eight.
+        task_graph_store=task_graph_store if level6_part_a_available else None,
+        planning_engine=planning_engine if level6_part_a_available else None,
+        context_engine=context_engine if level6_part_a_available else None,
+        explainability_layer=explainability_layer if level6_part_a_available else None,
+        adaptive_prioritizer=adaptive_prioritizer if level6_part_a_available else None,
+        task_graph_workflow_adapter=(
+            task_graph_workflow_adapter if level6_part_a_available else None
+        ),
+        session_resumption=session_resumption if level6_part_a_available else None,
+        self_evaluator=self_evaluator if level6_part_a_available else None,
     )
+    # Sprint 6.13's own identical circular-construction resolution as
+    # main.py's own persona_switch_relay/decision_trace_lookup_relay
+    # wiring: ExplainabilityLayer needed a decision_trace_lookup callable
+    # before this pipeline existed; now that it does, point the relay at
+    # the real method. Unconditional, matching main.py's own reasoning
+    # (lookup_last_decision_trace() is always a safe, real method
+    # regardless of level6_part_a_available).
+    decision_trace_lookup_relay.target = pipeline.lookup_last_decision_trace
 
     # task_scheduler/calendar_store start FIRST, before pipeline.start()
     # — CommunicationPipeline.start() (Sprint 4.18) calls
@@ -773,6 +903,13 @@ def _pipeline_harness_impl(
     pattern_store.start()
     pattern_recognizer.start()
     wellness_tracker.start()
+    # Sprint 6.13 — Level 6 Part A, started after Level 5 Part B (stores
+    # before proactive_assistant, which needs task_scheduler already
+    # started — true since task_scheduler.start() ran first of all,
+    # above), before pipeline.start().
+    task_graph_store.start()
+    knowledge_graph_store.start()
+    proactive_assistant.start()
     pipeline.start()
     wake_word_detector.start()
 
@@ -839,12 +976,28 @@ def _pipeline_harness_impl(
         dashboard_service=dashboard_service,
         preference_learner=preference_learner,
         recommendation_engine=recommendation_engine,
+        task_graph_store=task_graph_store,
+        knowledge_graph_store=knowledge_graph_store,
+        planning_engine=planning_engine,
+        context_engine=context_engine,
+        reasoning_engine=reasoning_engine,
+        decision_engine_v2=decision_engine_v2,
+        explainability_layer=explainability_layer,
+        adaptive_prioritizer=adaptive_prioritizer,
+        task_graph_workflow_adapter=task_graph_workflow_adapter,
+        session_resumption=session_resumption,
+        self_evaluator=self_evaluator,
+        proactive_assistant=proactive_assistant,
+        proactive_config=proactive_config,
     )
     try:
         yield harness
     finally:
         wake_word_detector.stop()
         pipeline.stop()
+        proactive_assistant.stop()
+        knowledge_graph_store.stop()
+        task_graph_store.stop()
         wellness_tracker.stop()
         pattern_recognizer.stop()
         pattern_store.stop()
@@ -998,6 +1151,36 @@ def pipeline_harness_without_level5_part_b(tmp_path, voice_config, qapp):
     own Level 5 Part B construction-failure scenario only."""
     yield from _pipeline_harness_impl(
         tmp_path, voice_config, SchedulerConfig(), level5_part_b_available=False
+    )
+
+
+@pytest.fixture
+def fast_level6_part_a_harness(tmp_path, voice_config, qapp):
+    """Identical object graph to pipeline_harness, but with short
+    scheduler_config.poll_interval_seconds (the announcement job's own
+    cadence) PLUS short proactive_config.evaluation_interval_seconds
+    (ProactiveAssistant's own tick) — for
+    test_autonomous_intelligence_integration.py's own real-recurrence
+    test only, matching fast_level5_part_b_harness's own identical "not
+    shared with any other test file" precedent."""
+    fast_scheduler_config = SchedulerConfig(poll_interval_seconds=0.3)
+    fast_proactive_config = ProactiveConfig(evaluation_interval_seconds=0.3)
+    yield from _pipeline_harness_impl(
+        tmp_path, voice_config, fast_scheduler_config, proactive_config=fast_proactive_config
+    )
+
+
+@pytest.fixture
+def pipeline_harness_without_level6_part_a(tmp_path, voice_config, qapp):
+    """Identical object graph to pipeline_harness, but CommunicationPipeline
+    itself is constructed with every one of its eight Sprint 6.13
+    optional parameters set to None — see _pipeline_harness_impl()'s own
+    level6_part_a_available docstring for exactly what this does and
+    doesn't simulate. For
+    test_autonomous_intelligence_integration.py's own Level 6 Part A
+    construction-failure scenario only."""
+    yield from _pipeline_harness_impl(
+        tmp_path, voice_config, SchedulerConfig(), level6_part_a_available=False
     )
 
 

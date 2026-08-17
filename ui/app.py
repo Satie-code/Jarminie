@@ -30,6 +30,15 @@ effect in production until Runtime Phases 5-8 retag specific subsystems.
 The mechanism is proven here first, against synthetic tiers in this
 module's own tests (tests/unit/ui/test_app.py), deliberately decoupled
 from which real subsystems end up in which tier.
+
+JARVIS Holographic HUD reskin, Phase 4: run_app() gains calendar_store/
+action_registry, threaded straight through to MainWindow for the same
+reason as the four Level 5 handles above — both are already constructed
+in main.py, only newly needed by the UI layer starting this phase.
+
+Phase 6: run_app() gains voice_session_manager/pipeline (a
+CommunicationPipeline), the identical "already constructed in main.py,
+only newly needed by the UI layer" reasoning.
 """
 
 import sys
@@ -41,11 +50,16 @@ from PySide6.QtWidgets import QApplication
 from core.logging_setup import get_logger
 from core.manager import CoreManager
 from core.runtime_manager import ServiceTier
+from device_control.action_engine import ActionRegistry
+from presentation import theme
 from presentation.jarvis_renderer import JarvisRenderer
 from presentation.minie_renderer import MinieRenderer
 from presentation.presentation_controller import PresentationController
 from presentation.transition_engine import TransitionEngine
+from scheduler.calendar_store import CalendarStore
 from ui.main_window import MainWindow
+from voice.pipeline import CommunicationPipeline
+from voice.session_manager import VoiceSessionManager
 
 logger = get_logger(__name__)
 
@@ -56,6 +70,10 @@ def run_app(
     jarvis_renderer: JarvisRenderer,
     minie_renderer: MinieRenderer,
     transition_engine: TransitionEngine,
+    calendar_store: CalendarStore,
+    action_registry: ActionRegistry,
+    voice_session_manager: VoiceSessionManager,
+    pipeline: CommunicationPipeline,
 ) -> int:
     """Start Tier A, show the main window, warm up Tier B/C in the
     background, and run the Qt event loop.
@@ -71,8 +89,22 @@ def run_app(
     # which shares a process-wide QApplication with every other test in
     # tests/unit/ui/ via pytest-qt's own session-scoped qapp fixture.
     app = QApplication.instance() or QApplication(sys.argv)
+    # JARVIS Holographic HUD reskin, Phase 1: applied once, immediately
+    # after QApplication exists and before any widget is constructed, so
+    # every widget (including MainWindow's own children below) picks up
+    # the theme from its very first paint rather than a visible flash of
+    # Qt's own default style.
+    theme.apply_dark_theme(app)
     window = MainWindow(
-        core_manager, presentation_controller, jarvis_renderer, minie_renderer, transition_engine
+        core_manager,
+        presentation_controller,
+        jarvis_renderer,
+        minie_renderer,
+        transition_engine,
+        calendar_store,
+        action_registry,
+        voice_session_manager,
+        pipeline,
     )
 
     startup_started_at = time.monotonic()

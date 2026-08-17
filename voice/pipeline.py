@@ -305,6 +305,7 @@ from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.models import MemoryType
 from memory.retrieval_engine import MemoryRetrievalEngine
 from memory.short_term_memory import ShortTermMemory
+from personas.base import Persona
 from personas.persona_manager import PersonaManager, SwitchReason
 from planning.planning_engine import PlanningEngine
 from planning.planning_model import Goal, PlanningStatus, Task
@@ -1032,130 +1033,21 @@ class CommunicationPipeline:
         tracks _last_session_id (every turn, unconditionally — needed by
         _check_and_announce_priority_item()'s own later ContextEngine.
         build() call) and _last_decision_trace (every turn EXCEPT an
-        EXPLANATION one — see this class's own docstring for why)."""
+        EXPLANATION one — see this class's own docstring for why).
+
+        JARVIS Holographic HUD reskin, Phase 6: everything from Decision
+        Engine pipeline through pacing now lives in _process_turn() below
+        — extracted unchanged (same calls, same order, same exception
+        boundaries) so ui/jarvis/command_bar.py's own submit_text() entry
+        point can reuse the exact same turn-processing core without a
+        live voice session, rather than duplicating it. This method's own
+        outer try/except and the SPEAKING/speak_reply()/LISTENING tail
+        stay here — a typed command's own equivalent tail is submit_text()'s
+        own job, since it must not unconditionally speak (see that
+        method's own docstring)."""
         self._last_session_id = session_id
         try:
-            persona_before = self._persona_manager.active_persona()
-            context = self._context_manager.current_context(session_id, persona_before.name)
-            self._apply_turn_phase(RingState.THINKING)
-            companion_moment = self._maybe_prepare_companion_moment(context, session_id)
-
-            try:
-                decision_trace = self._run_decision_pipeline(transcript, context, session_id)
-            except Exception:
-                logger.exception(
-                    "Decision Engine pipeline failed for this turn; continuing with "
-                    "decision_trace=None (a degraded, Level-2-quality reply) rather "
-                    "than ending the session."
-                )
-                decision_trace = None
-
-            context_analysis = (
-                decision_trace.context_analysis if decision_trace is not None else None
-            )
-
-            try:
-                self._run_presentation_pipeline(context, context_analysis)
-            except Exception:
-                logger.exception(
-                    "Presentation pipeline failed for this turn; continuing without a "
-                    "presentation update."
-                )
-
-            explicit = self._persona_manager.detect_explicit_selection(transcript)
-            if explicit is not None:
-                self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
-            else:
-                self._persona_manager.select_from_context(context_analysis, transcript)
-
-            persona = self._persona_manager.active_persona()
-            selected_engine = (
-                decision_trace.selected_engine if decision_trace is not None else None
-            )
-            emotional_state = self._emotional_state_manager.current_state()
-
-            if selected_engine is not EngineSelection.EXPLANATION:
-                self._last_decision_trace = decision_trace
-
-            if (
-                self._pending_proposed_goal is not None
-                and decision_trace is not None
-                and (_is_acceptance_phrase(transcript) or _is_rejection_phrase(transcript))
-            ):
-                reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
-            elif selected_engine is EngineSelection.DEVICE_CONTROL:
-                reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
-            elif selected_engine is EngineSelection.WORKFLOW:
-                reply = self._handle_workflow_turn(decision_trace, session_id, persona.name)
-            elif selected_engine is EngineSelection.SCHEDULER:
-                reply = self._handle_scheduler_turn(decision_trace)
-            elif selected_engine is EngineSelection.INTERNET_AGENT:
-                reply = self._handle_internet_agent_turn(decision_trace)
-            elif selected_engine is EngineSelection.WELLNESS:
-                reply = self._handle_wellness_turn(decision_trace)
-            elif selected_engine is EngineSelection.PLANNING:
-                reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
-            elif selected_engine is EngineSelection.EXPLANATION:
-                reply = self._handle_explanation_turn(decision_trace)
-            elif selected_engine is EngineSelection.EMOTION_SUPPORT:
-                # EMOTION_SUPPORT selects a tone within compose_reply_safely()'s
-                # own template path, not a distinct subsystem — see
-                # decision/authority.py's own docstring and Sprint 5.4's
-                # Engineering Rationale.
-                reply = self._persona_manager.compose_reply_safely(
-                    transcript, context, decision_trace, emotional_state
-                )
-            else:
-                reply = self._compose_conversational_reply(
-                    transcript, context, decision_trace, persona.name
-                )
-
-            if companion_moment is not None:
-                reply = _prefix_companion_moment(reply, companion_moment)
-
-            turn = ConversationTurn(
-                session_id=session_id,
-                persona_name=persona.name,
-                timestamp=datetime.now(UTC),
-                user_text=transcript,
-                response_text=reply,
-            )
-            self._conversation_store.record_turn(turn)
-
-            # Sprint 6.18 (Stress & Recovery Testing) hardening: caught
-            # locally, not left to the broad except below, matching
-            # self._conversation_store.record_turn()'s own established
-            # "a best-effort side write must never break the user's
-            # already-composed reply" degrade immediately above.
-            # MemoryStore.store() deliberately raises MemoryStoreError
-            # rather than swallowing it (memory/memory_store.py's own
-            # docstring) so a caller with a real opinion can decide how
-            # to degrade — unlike _accept_pending_goal()'s own
-            # MemoryStoreError-shaped handling (where the write IS the
-            # user's actual request, so an honest spoken failure is
-            # correct), this memory promotion is invisible background
-            # bookkeeping the user never asked for; found directly via
-            # tests/system/test_level6_part_b_stress.py's own recovery
-            # scenario (b), where a real, external SQLite lock on
-            # promote_from_turn()'s own write was silently escalating
-            # into ending the whole session and discarding an already-
-            # composed reply that had nothing to do with memory storage.
-            try:
-                promoted_record_id = self._short_term_memory.promote_from_turn(turn)
-            except MemoryStoreError:
-                logger.exception("Failed to promote turn to short-term memory; continuing.")
-                promoted_record_id = None
-            if promoted_record_id is not None and self._confidence_scorer.detect_override_phrase(
-                transcript
-            ):
-                self._memory_lifecycle_manager.apply_user_override(promoted_record_id)
-
-            presentation_state = self._presentation_controller.last_state_for(persona.name)
-            voice_warmth = (
-                presentation_state.voice_warmth if presentation_state is not None else 0.5
-            )
-            paced_reply = self._voice_personality_modulator.shape_pacing(reply, voice_warmth)
-
+            persona, paced_reply = self._process_turn(transcript, session_id)
             self._apply_turn_phase(RingState.SPEAKING)
             self._session_manager.speak_reply(
                 paced_reply, persona.voice_id, on_audio_ready=self._drive_lip_sync_if_avatar_mounted
@@ -1167,6 +1059,188 @@ class CommunicationPipeline:
                 "rather than leaving it stuck."
             )
             self._session_manager.end_session(SessionEndReason.ERROR)
+
+    def _process_turn(self, transcript: str, session_id: str) -> tuple[Persona, str]:
+        """The real turn-processing core shared by _handle_turn_complete()
+        (a completed voice utterance) and submit_text() (a typed command,
+        JARVIS Holographic HUD reskin, Phase 6) — Decision Engine pipeline
+        -> persona selection -> reply composition -> persistence -> memory
+        promotion/override -> pacing. Returns (persona, paced_reply);
+        deliberately does NOT speak the reply — that's each caller's own
+        decision (always, for a voice turn; only if a session happens to
+        be active, for a typed one). Raises on an unexpected failure,
+        exactly as this body always has — each caller supplies its own
+        outer try/except with its own appropriate degradation, matching
+        this class's now-longstanding "every stage fails safe internally;
+        outer catches exist for whatever isn't already covered" discipline
+        (see _handle_turn_complete()'s own docstring history above)."""
+        persona_before = self._persona_manager.active_persona()
+        context = self._context_manager.current_context(session_id, persona_before.name)
+        self._apply_turn_phase(RingState.THINKING)
+        companion_moment = self._maybe_prepare_companion_moment(context, session_id)
+
+        try:
+            decision_trace = self._run_decision_pipeline(transcript, context, session_id)
+        except Exception:
+            logger.exception(
+                "Decision Engine pipeline failed for this turn; continuing with "
+                "decision_trace=None (a degraded, Level-2-quality reply) rather "
+                "than ending the session."
+            )
+            decision_trace = None
+
+        context_analysis = decision_trace.context_analysis if decision_trace is not None else None
+
+        try:
+            self._run_presentation_pipeline(context, context_analysis)
+        except Exception:
+            logger.exception(
+                "Presentation pipeline failed for this turn; continuing without a "
+                "presentation update."
+            )
+
+        explicit = self._persona_manager.detect_explicit_selection(transcript)
+        if explicit is not None:
+            self._persona_manager.select(explicit, SwitchReason.EXPLICIT_SELECTION)
+        else:
+            self._persona_manager.select_from_context(context_analysis, transcript)
+
+        persona = self._persona_manager.active_persona()
+        selected_engine = decision_trace.selected_engine if decision_trace is not None else None
+        emotional_state = self._emotional_state_manager.current_state()
+
+        if selected_engine is not EngineSelection.EXPLANATION:
+            self._last_decision_trace = decision_trace
+
+        if (
+            self._pending_proposed_goal is not None
+            and decision_trace is not None
+            and (_is_acceptance_phrase(transcript) or _is_rejection_phrase(transcript))
+        ):
+            reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
+        elif selected_engine is EngineSelection.DEVICE_CONTROL:
+            reply = self._handle_device_control_turn(decision_trace, session_id, persona.name)
+        elif selected_engine is EngineSelection.WORKFLOW:
+            reply = self._handle_workflow_turn(decision_trace, session_id, persona.name)
+        elif selected_engine is EngineSelection.SCHEDULER:
+            reply = self._handle_scheduler_turn(decision_trace)
+        elif selected_engine is EngineSelection.INTERNET_AGENT:
+            reply = self._handle_internet_agent_turn(decision_trace)
+        elif selected_engine is EngineSelection.WELLNESS:
+            reply = self._handle_wellness_turn(decision_trace)
+        elif selected_engine is EngineSelection.PLANNING:
+            reply = self._handle_planning_turn(decision_trace, session_id, persona.name)
+        elif selected_engine is EngineSelection.EXPLANATION:
+            reply = self._handle_explanation_turn(decision_trace)
+        elif selected_engine is EngineSelection.EMOTION_SUPPORT:
+            # EMOTION_SUPPORT selects a tone within compose_reply_safely()'s
+            # own template path, not a distinct subsystem — see
+            # decision/authority.py's own docstring and Sprint 5.4's
+            # Engineering Rationale.
+            reply = self._persona_manager.compose_reply_safely(
+                transcript, context, decision_trace, emotional_state
+            )
+        else:
+            reply = self._compose_conversational_reply(
+                transcript, context, decision_trace, persona.name
+            )
+
+        if companion_moment is not None:
+            reply = _prefix_companion_moment(reply, companion_moment)
+
+        turn = ConversationTurn(
+            session_id=session_id,
+            persona_name=persona.name,
+            timestamp=datetime.now(UTC),
+            user_text=transcript,
+            response_text=reply,
+        )
+        self._conversation_store.record_turn(turn)
+
+        # Sprint 6.18 (Stress & Recovery Testing) hardening: caught
+        # locally, not left to a broader except, matching
+        # self._conversation_store.record_turn()'s own established
+        # "a best-effort side write must never break the user's
+        # already-composed reply" degrade immediately above.
+        # MemoryStore.store() deliberately raises MemoryStoreError
+        # rather than swallowing it (memory/memory_store.py's own
+        # docstring) so a caller with a real opinion can decide how
+        # to degrade — unlike _accept_pending_goal()'s own
+        # MemoryStoreError-shaped handling (where the write IS the
+        # user's actual request, so an honest spoken failure is
+        # correct), this memory promotion is invisible background
+        # bookkeeping the user never asked for; found directly via
+        # tests/system/test_level6_part_b_stress.py's own recovery
+        # scenario (b), where a real, external SQLite lock on
+        # promote_from_turn()'s own write was silently escalating
+        # into ending the whole session and discarding an already-
+        # composed reply that had nothing to do with memory storage.
+        try:
+            promoted_record_id = self._short_term_memory.promote_from_turn(turn)
+        except MemoryStoreError:
+            logger.exception("Failed to promote turn to short-term memory; continuing.")
+            promoted_record_id = None
+        if promoted_record_id is not None and self._confidence_scorer.detect_override_phrase(
+            transcript
+        ):
+            self._memory_lifecycle_manager.apply_user_override(promoted_record_id)
+
+        presentation_state = self._presentation_controller.last_state_for(persona.name)
+        voice_warmth = presentation_state.voice_warmth if presentation_state is not None else 0.5
+        paced_reply = self._voice_personality_modulator.shape_pacing(reply, voice_warmth)
+        return persona, paced_reply
+
+    def submit_text(self, transcript: str, session_id: str) -> str:
+        """JARVIS Holographic HUD reskin, Phase 6 — the real, public entry
+        point `ui/jarvis/command_bar.py`'s text input calls, reusing
+        _process_turn() (the exact same Decision Engine pipeline/persona
+        selection/reply composition/persistence/memory promotion
+        _handle_turn_complete() itself uses for a spoken turn) rather than
+        a second, competing conversational engine, per the brief's own
+        explicit "Do not implement a second conversational engine" rule.
+
+        Two deliberate differences from _handle_turn_complete(), both
+        because a typed command has no live voice session backing it:
+        - A failure degrades to an honest, returned error string rather
+          than calling VoiceSessionManager.end_session() — there is no
+          session for this call to have ended in the first place; this
+          call itself might be running with no session active at all.
+        - The reply is only spoken (speak_reply()) if a voice session
+          genuinely IS active right now (e.g. the user typed while also
+          mid-conversation) — never unconditionally, since
+          VoiceSessionManager.speak_reply() raises SessionError without
+          one (confirmed by this workstream's own research). The reply
+          text itself is always returned regardless, for the command bar
+          to display.
+
+        Runs on whichever thread calls it — ui/jarvis/command_bar.py's own
+        job is to call this from a worker thread, never the Qt main
+        thread, matching this project's "never block the event loop on
+        an LLM turn" discipline; this method itself has no thread
+        affinity of its own to enforce that.
+        """
+        self._last_session_id = session_id
+        try:
+            persona, paced_reply = self._process_turn(transcript, session_id)
+        except Exception:
+            logger.exception("Unexpected failure while handling a typed command.")
+            return "Sorry, something went wrong processing that."
+
+        if self._session_manager.is_active():
+            try:
+                self._apply_turn_phase(RingState.SPEAKING)
+                self._session_manager.speak_reply(
+                    paced_reply,
+                    persona.voice_id,
+                    on_audio_ready=self._drive_lip_sync_if_avatar_mounted,
+                )
+                self._apply_turn_phase(RingState.LISTENING)
+            except Exception:
+                logger.exception(
+                    "Failed to speak the reply to a typed command; the reply text is "
+                    "still returned to the caller."
+                )
+        return paced_reply
 
     def _run_presentation_pipeline(
         self, context: ConversationContext, context_analysis: ContextAnalysis | None

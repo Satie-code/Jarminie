@@ -21,6 +21,7 @@ from PySide6.QtGui import QColor
 from config.schema import PresentationConfig, UIConfig
 from core.resource_monitor import ResourceSnapshot
 from presentation.adaptive_workspace import WorkspaceProfile
+from presentation.animation_manager import DegradationLevel
 from presentation.jarvis_renderer import JarvisRenderer, _derive_ring_state
 from presentation.presentation_state import PresentationState
 from presentation.widgets.holographic_sphere_widget import HolographicSphereWidget
@@ -554,3 +555,136 @@ def test_ring_widget_on_tick_recovers_after_a_transient_failure(qtbot, caplog):
 
     failures = [r for r in caplog.records if "_on_tick" in r.message]
     assert len(failures) == 2
+
+
+# --- JARVIS Holographic HUD reskin, Phase 3: floor/particles/status label ----
+
+
+def test_render_state_sets_the_floor_color(renderer):
+    renderer.mount()
+
+    renderer.render_state(_sample_state())
+
+    assert renderer._floor._color.name() == "#0a84ff"
+
+
+def test_render_state_sets_the_particle_field_target(renderer):
+    renderer.mount()
+    state = _sample_state(animation_speed=1.5)
+    state.particle_density = 0.03
+
+    renderer.render_state(state)
+
+    assert renderer._particles._animation_speed == 1.5
+
+
+def test_render_state_updates_the_status_label_for_idle(renderer):
+    renderer.mount()
+
+    renderer.render_state(_sample_state(avatar_focus="idle"))
+
+    assert renderer._status_label.text() == "Ready."
+
+
+def test_render_state_updates_the_status_label_for_processing(renderer):
+    renderer.mount()
+
+    renderer.render_state(_sample_state(avatar_focus="user"))
+
+    assert renderer._status_label.text() == "Working on that..."
+
+
+def test_apply_turn_phase_updates_the_status_label(renderer):
+    renderer.mount()
+
+    renderer.apply_turn_phase(RingState.LISTENING)
+
+    assert renderer._status_label.text() == "Listening..."
+
+
+def test_status_label_defaults_to_ready_before_any_render_state_call(renderer):
+    assert renderer._status_label.text() == "Ready."
+
+
+def test_on_tick_advances_the_particle_field_too(qtbot, renderer):
+    renderer.mount()
+    state = _sample_state()
+    state.particle_density = 1.0
+    renderer.render_state(state)
+    angle_before = renderer._particles._particles[0].angle
+
+    qtbot.wait(120)  # several ticks at the fixture's 20ms interval
+
+    assert renderer._particles._particles[0].angle != angle_before
+
+
+def test_hologram_stage_layers_floor_sphere_and_ring_around_a_shared_core(renderer):
+    """The floor is a background layer (full stage rect); sphere/ring
+    share a smaller, centered core rect (not the full stage — see
+    _HologramStage's own docstring for why); the particle field is an
+    orbit layer (full stage rect, so an orbit beyond the ring's edge is
+    never clipped) but anchored on the core's own center. resizeEvent()
+    only fires synchronously once a widget has a real window handle
+    (i.e. after show()), the same quirk this workstream's own
+    ui/jarvis/hud_shell.py test already found — show() first, matching
+    how MainWindow actually uses this hierarchy."""
+    stage = renderer._stage
+    assert stage._background_layers == [renderer._floor]
+    assert stage._core_layers == [renderer._sphere, renderer._ring]
+    assert stage._orbit_layers == [renderer._particles]
+    renderer.widget().show()
+
+    stage.resize(300, 300)
+    core_rect = stage.core_rect()
+
+    assert renderer._floor.geometry() == stage.rect()
+    assert renderer._particles.geometry() == stage.rect()
+    assert renderer._sphere.geometry() == core_rect
+    assert renderer._ring.geometry() == core_rect
+    # The core rect is smaller than the full stage (real margin exists
+    # for the floor beneath it and the particles orbiting beyond it).
+    assert core_rect.width() < stage.rect().width()
+
+
+# --- JARVIS Holographic HUD reskin, Phase 7: apply_resource_degradation() ----
+
+
+def test_apply_resource_degradation_minimal_disables_particles(renderer):
+    renderer.mount()
+
+    renderer.apply_resource_degradation(DegradationLevel.MINIMAL)
+    renderer.render_state(_sample_state())
+
+    assert renderer._particles._visible_count == 0
+
+
+def test_apply_resource_degradation_minimal_widens_the_tick_interval(renderer, config):
+    renderer.mount()
+
+    renderer.apply_resource_degradation(DegradationLevel.MINIMAL)
+
+    assert renderer._timer.interval() == config.jarvis_animation_tick_ms * 4
+
+
+def test_apply_resource_degradation_reduced_widens_the_tick_interval_less(renderer, config):
+    renderer.mount()
+
+    renderer.apply_resource_degradation(DegradationLevel.REDUCED)
+
+    assert renderer._timer.interval() == config.jarvis_animation_tick_ms * 2
+
+
+def test_apply_resource_degradation_normal_restores_the_original_interval(renderer, config):
+    renderer.mount()
+    renderer.apply_resource_degradation(DegradationLevel.MINIMAL)
+
+    renderer.apply_resource_degradation(DegradationLevel.NORMAL)
+
+    assert renderer._timer.interval() == config.jarvis_animation_tick_ms
+
+
+def test_apply_resource_degradation_before_any_widget_build_is_a_safe_noop(
+    qtbot, config, core_manager
+):
+    bare_renderer = JarvisRenderer(config, core_manager)
+    bare_renderer.apply_resource_degradation(DegradationLevel.MINIMAL)  # must not raise

@@ -22,15 +22,18 @@ def test_close_calls_core_manager_shutdown_exactly_once(
     mock_core_manager.shutdown.assert_called_once()
 
 
-def test_status_panel_is_embedded_and_functioning(
-    qtbot, mock_core_manager, mock_presentation_handles
-):
+def test_hud_shell_is_embedded_and_functioning(qtbot, mock_core_manager, mock_presentation_handles):
+    """JARVIS Holographic HUD reskin, Phase 5: StatusPanel is no longer
+    embedded in MainWindow — its role (module states + resource usage)
+    is fully superseded by HudShell's own right-rail panels, which read
+    through MetricsAdapter (core_manager.check_resources()/
+    runtime_manager()), not module_states()."""
     window = MainWindow(mock_core_manager, **mock_presentation_handles)
     qtbot.addWidget(window)
 
-    assert window._status_panel is not None
+    assert window._hud_shell is not None
     mock_core_manager.check_resources.assert_called()
-    mock_core_manager.module_states.assert_called()
+    mock_core_manager.runtime_manager.assert_called()
 
 
 def test_settings_menu_action_exists(qtbot, mock_core_manager, mock_presentation_handles):

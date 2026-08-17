@@ -150,6 +150,10 @@ class SettingsWindow(QDialog):
         self._refresh_interval_spin.setRange(250, 60_000)
         self._refresh_interval_spin.setSuffix(" ms")
         form.addRow("Status refresh interval:", self._refresh_interval_spin)
+        # JARVIS Holographic HUD reskin, Phase 2 — powers the HUD top
+        # bar's greeting. Empty means "not configured" (None), not "".
+        self._display_name_edit = QLineEdit()
+        form.addRow("Display name:", self._display_name_edit)
         parent_layout.addWidget(box)
 
     def load_from_config(self, config: AppConfig) -> None:
@@ -173,6 +177,7 @@ class SettingsWindow(QDialog):
         self._backup_count_spin.setValue(config.logging.backup_count)
 
         self._refresh_interval_spin.setValue(config.ui.status_refresh_interval_ms)
+        self._display_name_edit.setText(config.ui.user_display_name or "")
 
     def to_config(self) -> AppConfig:
         """Build a candidate AppConfig from current form values (not yet
@@ -216,7 +221,9 @@ class SettingsWindow(QDialog):
                 backup_count=self._backup_count_spin.value(),
             ),
             ui=replace(
-                original.ui, status_refresh_interval_ms=self._refresh_interval_spin.value()
+                original.ui,
+                status_refresh_interval_ms=self._refresh_interval_spin.value(),
+                user_display_name=self._display_name_edit.text().strip() or None,
             ),
         )
 

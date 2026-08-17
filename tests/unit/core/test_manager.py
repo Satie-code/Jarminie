@@ -3,7 +3,7 @@
 import logging
 from unittest.mock import MagicMock
 
-from config.schema import AppConfig, UIConfig
+from config.schema import AppConfig, ResourceThresholds, UIConfig
 from core.manager import CoreManager
 from core.module_registry import ServiceState
 from core.runtime_manager import RuntimeManager, ServiceTier
@@ -172,6 +172,13 @@ def test_ui_config_returns_the_ui_slice_of_the_injected_config():
     manager = CoreManager(config=config, resource_monitor=MagicMock(), config_loader=MagicMock())
 
     assert manager.ui_config().status_refresh_interval_ms == 1234
+
+
+def test_resource_thresholds_returns_the_resources_slice_of_the_injected_config():
+    config = AppConfig(resources=ResourceThresholds(cpu_warning_percent=55.0))
+    manager = CoreManager(config=config, resource_monitor=MagicMock(), config_loader=MagicMock())
+
+    assert manager.resource_thresholds().cpu_warning_percent == 55.0
 
 
 def test_config_returns_the_injected_config():

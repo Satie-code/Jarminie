@@ -129,6 +129,7 @@ from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
+from security.qt_confirmation_service import QtConfirmationService, RequestedByConfirmationService
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, SoundDeviceAudioBackend
@@ -584,6 +585,10 @@ def main() -> int:
         level5_modules.jarvis_renderer,
         level5_modules.minie_renderer,
         level5_modules.transition_engine,
+        level4b_modules.calendar_store,
+        level4_modules.action_registry,
+        level2_modules.session_manager,
+        pipeline,
     )
 
 
@@ -778,6 +783,20 @@ def _construct_level4_modules(
     plain and lifecycle-free, per each one's own originating sprint —
     only ActionAuditLog and WorkflowStore are real ManagedModules among
     everything constructed here.
+
+    JARVIS Holographic HUD reskin, Phase 4: PermissionGate now receives
+    a RequestedByConfirmationService (security/qt_confirmation_service.py)
+    rather than the raw VoiceConfirmationService — a composite that
+    routes a UI-originated ActionRequest (ActionContext.requested_by
+    "ui", set by ui/jarvis/quick_commands_panel.py) to a real Qt
+    confirmation dialog instead of the voice-only path, which would
+    otherwise auto-deny it (no active voice session to speak/listen
+    through). Every voice-triggered confirmation keeps using
+    voice_confirmation_service, completely unchanged — see that
+    module's own docstring for the full mechanism. qt_confirmation_service
+    has no parent widget here (MainWindow doesn't exist yet at this
+    composition-root point) — its dialogs simply have no owning window
+    to center over, a cosmetic-only limitation.
     """
     device_control_config = config.device_control
     security_config = config.security
@@ -785,10 +804,14 @@ def _construct_level4_modules(
     database_config = config.database
 
     policy_engine = PermissionPolicyEngine(security_config)
-    confirmation_service = VoiceConfirmationService(
+    voice_confirmation_service = VoiceConfirmationService(
         level2_modules.session_manager,
         level2_modules.persona_manager,
         security_config.confirmation_timeout_seconds,
+    )
+    qt_confirmation_service = QtConfirmationService(security_config.confirmation_timeout_seconds)
+    confirmation_service = RequestedByConfirmationService(
+        default=voice_confirmation_service, overrides={"ui": qt_confirmation_service}
     )
     permission_gate = PermissionGate(
         level3_modules.authority_evaluator,

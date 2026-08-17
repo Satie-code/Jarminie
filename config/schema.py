@@ -276,9 +276,19 @@ class UIConfig:
     sprint's own "2-5 seconds" guidance; the (250, 60_000) validated range
     exists so a misconfigured value can't turn Status Panel's polling into
     a resource drain of its own (see Potential Risks in sprint_1_7.md).
+
+    user_display_name (JARVIS Holographic HUD reskin, Phase 2) is a real,
+    previously-nonexistent gap this workstream fills: nothing in this
+    schema named the human user before this field, only the AI's own two
+    persona names (VoiceConfig.jarvis_voice_id/minie_voice_id). Powers
+    ui/jarvis/top_bar.py's "GOOD MORNING, [name]" greeting. None (the
+    default) is an honest "not configured" — the greeting falls back to a
+    generic "there" rather than fabricating a name; never a required
+    field, never guessed from OS account info.
     """
 
     status_refresh_interval_ms: int = 3000
+    user_display_name: str | None = None
 
 
 def _default_allowed_file_roots() -> list[str]:
@@ -925,6 +935,17 @@ class PresentationConfig:
     this class of visual doesn't need"), a real, disclosed, unvalidated
     first-pass number like every other Level 5 config default so far.
 
+    `jarvis_particle_field_max_count`/`jarvis_particle_field_ambient_minimum`
+    (JARVIS Holographic HUD reskin, Phase 3) drive `presentation/widgets/
+    particle_field_widget.py`'s own bounded orbital particle pool —
+    deliberately separate from `jarvis_particle_density_min/max` above
+    (that pair stays untouched, Level 5's own locked "structurally
+    near-zero" Jarvis identity): `jarvis_particle_field_ambient_minimum`
+    particles always orbit regardless of emotional state,
+    `particle_density` only ever adds MORE on top, up to
+    `jarvis_particle_field_max_count`. See that widget's own docstring
+    for the full reasoning.
+
     avatar_backend (Sprint 5.8) names which `AvatarRenderer`
     `presentation/avatar_renderer_registry.py`'s `create_avatar_renderer()`
     constructs — `"vtube_studio"` is the only real, registered value this
@@ -1096,6 +1117,8 @@ class PresentationConfig:
     jarvis_ui_accent: str = "#22D3EE"
     jarvis_ring_segment_count: int = 12
     jarvis_animation_tick_ms: int = 33
+    jarvis_particle_field_max_count: int = 18
+    jarvis_particle_field_ambient_minimum: int = 4
 
     minie_smile_intensity_min: float = 0.15
     minie_smile_intensity_max: float = 0.95
@@ -2291,6 +2314,17 @@ class AppConfig:
             raise ConfigError(
                 "presentation.jarvis_animation_tick_ms must be positive, got "
                 f"{p.jarvis_animation_tick_ms}"
+            )
+        if p.jarvis_particle_field_max_count < 0:
+            raise ConfigError(
+                "presentation.jarvis_particle_field_max_count must be >= 0, got "
+                f"{p.jarvis_particle_field_max_count}"
+            )
+        if not (0 <= p.jarvis_particle_field_ambient_minimum <= p.jarvis_particle_field_max_count):
+            raise ConfigError(
+                "presentation.jarvis_particle_field_ambient_minimum must be between 0 and "
+                f"jarvis_particle_field_max_count ({p.jarvis_particle_field_max_count}), got "
+                f"{p.jarvis_particle_field_ambient_minimum}"
             )
 
         if not p.avatar_backend.strip():

@@ -141,6 +141,10 @@ logging:
 
 ui:
   status_refresh_interval_ms: 3000
+  # JARVIS Holographic HUD reskin, Phase 2. null means the top-bar
+  # greeting falls back to a generic "there" rather than fabricating a
+  # name.
+  user_display_name: null
 
 device_control:
   # Sprint 4.2 — Application Manager. null means no allowlist
@@ -362,6 +366,11 @@ presentation:
   # QTimer interval (~30fps) driving the sphere/ring animation loop.
   jarvis_ring_segment_count: 12
   jarvis_animation_tick_ms: 33
+  # JARVIS Holographic HUD reskin, Phase 3. Bounded orbital particle
+  # pool — deliberately separate from jarvis_particle_density_min/max
+  # above (that pair stays untouched, Level 5's own locked identity).
+  jarvis_particle_field_max_count: 18
+  jarvis_particle_field_ambient_minimum: 4
 
   minie_smile_intensity_min: 0.15
   minie_smile_intensity_max: 0.95

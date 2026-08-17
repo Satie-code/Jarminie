@@ -20,7 +20,7 @@ import time
 import psutil
 
 from config.loader import ConfigLoader
-from config.schema import AppConfig, UIConfig
+from config.schema import AppConfig, PresentationConfig, ResourceThresholds, UIConfig
 from core.logging_setup import get_logger
 from core.module_registry import ManagedModule, ModuleRegistry, ModuleState
 from core.resource_monitor import ResourceMonitor, ResourceSnapshot
@@ -233,6 +233,25 @@ class CoreManager:
         Status Panel) only need a CoreManager, never a direct AppConfig
         reference — keeps the Sprint 1.6 DI boundary intact."""
         return self._config.ui
+
+    def resource_thresholds(self) -> ResourceThresholds:
+        """JARVIS Holographic HUD reskin, Phase 7 — the identical
+        "narrow slice, not the whole AppConfig" precedent ui_config()
+        already established, for presentation/animation_manager.py's
+        own AnimationManager, which needs ResourceThresholds specifically
+        (to reuse ResourceMonitor's own classification logic) and
+        nothing else config() exposes."""
+        return self._config.resources
+
+    def presentation_config(self) -> PresentationConfig:
+        """JARVIS Holographic HUD reskin, Phase 9 — the identical narrow-
+        slice precedent, for ui/jarvis/hud_shell.py's own one-time read
+        of the active persona's locked jarvis_ui_accent/jarvis_lighting_color
+        at construction, so the surrounding HUD chrome (nav rail, HUD
+        frame corner brackets) is genuinely sourced from the same
+        config the hologram itself reads, not a separately-hardcoded
+        theme constant that only coincidentally matches it."""
+        return self._config.presentation
 
     def config(self) -> AppConfig:
         """Expose the full current AppConfig. Broader than ui_config()'s

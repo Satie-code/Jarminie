@@ -8,7 +8,9 @@ local double covers the one failure-injection scenario (a scoring
 exception) a real scorer can't easily simulate.
 """
 
+import time
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,6 +21,18 @@ from memory.confidence_scorer import ConfidenceScorer
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.memory_store import MemoryStore
 from memory.models import MemoryRecord, MemoryType
+from scheduler.task_scheduler import TaskScheduler
+
+_WAIT_TIMEOUT = 2.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 class _ScoreRaisingConfidenceScorer(ConfidenceScorer):
@@ -334,3 +348,126 @@ def test_start_runs_both_lifecycle_passes_once(lifecycle_manager, store, caplog)
     # run_cleanup_pass() genuinely ran, not just logged a claim it did.
     rescored = store.get_by_id(temporary_record.id)
     assert rescored.confidence_score != 0.0
+
+
+# --- Sprint 6.17 (Async Background Task Audit): TaskScheduler job isolation -------------
+
+
+def test_a_raising_run_cleanup_pass_does_not_stop_future_recurrence(
+    lifecycle_manager, store, monkeypatch
+):
+    """One of the 12 jobs not yet individually verified against
+    TaskScheduler's own explicit max_instances=1, mirroring Sprint
+    6.14's own established shape (proactive/test_proactive_assistant.py's
+    test_a_raising_tick_does_not_stop_future_recurrence). Unlike the
+    per-record failures run_cleanup_pass() already catches internally
+    (this file's own test_one_record_scoring_failure_does_not_abort_the_
+    rest_of_the_pass), the outer store.recent() call it iterates over has
+    no such guard — a real, genuinely propagating exception, the shape
+    this sprint's own job-isolation objective actually cares about."""
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    tick_count = 0
+
+    def _raising_recent(memory_type, limit):
+        nonlocal tick_count
+        tick_count += 1
+        raise RuntimeError("MemoryStore.recent() exploded")
+
+    monkeypatch.setattr(store, "recent", _raising_recent)
+    task_scheduler.add_job(
+        lifecycle_manager.run_cleanup_pass, interval_seconds=0.05, job_id="cleanup-pass-isolation"
+    )
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+    finally:
+        task_scheduler.stop()
+
+
+def test_a_raising_run_monthly_review_does_not_stop_future_recurrence(
+    lifecycle_manager, store, monkeypatch
+):
+    """The second of MemoryLifecycleManager's two independently
+    registered TaskScheduler jobs — see the sibling run_cleanup_pass
+    test immediately above for the full rationale; run_monthly_review()
+    has no try/except of its own at all (a pure read query, per its own
+    docstring), so store.recent() raising propagates identically."""
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    tick_count = 0
+
+    def _raising_recent(memory_type, limit):
+        nonlocal tick_count
+        tick_count += 1
+        raise RuntimeError("MemoryStore.recent() exploded")
+
+    monkeypatch.setattr(store, "recent", _raising_recent)
+    task_scheduler.add_job(
+        lifecycle_manager.run_monthly_review,
+        interval_seconds=0.05,
+        job_id="monthly-review-isolation",
+    )
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+    finally:
+        task_scheduler.stop()
+
+
+# --- Sprint 6.19 (Resource Protection & Fail-Gracefully Verification):
+# runtime_manager.ensure_started() before touching memory_store (backlog item 53) -------
+
+
+@pytest.fixture
+def runtime_manager():
+    return MagicMock()
+
+
+@pytest.fixture
+def lifecycle_manager_with_runtime_manager(store, scorer, memory_config, runtime_manager):
+    return MemoryLifecycleManager(store, scorer, memory_config, runtime_manager=runtime_manager)
+
+
+def test_run_cleanup_pass_ensures_memory_store_started_first(
+    lifecycle_manager_with_runtime_manager, runtime_manager
+):
+    lifecycle_manager_with_runtime_manager.run_cleanup_pass()
+
+    runtime_manager.ensure_started.assert_called_once_with("memory_store")
+
+
+def test_run_monthly_review_ensures_memory_store_started_first(
+    lifecycle_manager_with_runtime_manager, runtime_manager
+):
+    lifecycle_manager_with_runtime_manager.run_monthly_review()
+
+    runtime_manager.ensure_started.assert_called_once_with("memory_store")
+
+
+def test_apply_user_override_ensures_memory_store_started_first(
+    lifecycle_manager_with_runtime_manager, runtime_manager, store
+):
+    record_id = store.store(make_temporary_scoring_record())
+
+    lifecycle_manager_with_runtime_manager.apply_user_override(record_id)
+
+    runtime_manager.ensure_started.assert_called_once_with("memory_store")
+
+
+def test_no_runtime_manager_supplied_behaves_exactly_as_before(lifecycle_manager, store):
+    """The default (runtime_manager=None, every existing construction
+    site/test in this file) must keep working completely unchanged —
+    ensure_started() is purely additive and opt-in via this one
+    constructor parameter, matching every other optional cross-cutting
+    collaborator in this codebase (e.g. scheduler/task_scheduler.py's
+    own resource_monitor, Sprint 6.19's own identical pattern)."""
+    record_id = store.store(make_temporary_scoring_record())
+
+    report = lifecycle_manager.run_cleanup_pass()
+    review = lifecycle_manager.run_monthly_review()
+    override_result = lifecycle_manager.apply_user_override(record_id)
+
+    assert isinstance(report.records_rescored, int)
+    assert isinstance(review.records, list)
+    assert override_result is True

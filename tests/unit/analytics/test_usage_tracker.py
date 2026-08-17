@@ -227,6 +227,36 @@ def test_stop_removes_the_job_and_no_further_samples_are_recorded(
     assert usage_store.list_samples_since(datetime(2020, 1, 1, tzinfo=UTC)) == []
 
 
+def test_a_raising_tick_does_not_stop_future_recurrence(task_scheduler, usage_store, monkeypatch):
+    """Sprint 6.17 (Async Background Task Audit) — one of the 12 jobs
+    not yet individually verified against TaskScheduler's own explicit
+    max_instances=1, mirroring Sprint 6.14's own established shape
+    (proactive/test_proactive_assistant.py's test_a_raising_tick_does_
+    not_stop_future_recurrence). _on_tick() has no try/except of its
+    own around _sample_foreground_window() (that method's own narrower
+    NoSuchProcess/AccessDenied degrade is a different, already-covered
+    scenario — see this module's own docstring), so forcing it to raise
+    unconditionally produces a real, genuinely propagating exception."""
+    fast_config = AnalyticsConfig(sample_interval_seconds=0.05)
+    tracker = UsageTracker(task_scheduler, usage_store, fast_config)
+    tick_count = 0
+
+    def _raising_sample_foreground_window():
+        nonlocal tick_count
+        tick_count += 1
+        raise RuntimeError("_sample_foreground_window() exploded")
+
+    monkeypatch.setattr(tracker, "_sample_foreground_window", _raising_sample_foreground_window)
+
+    tracker.start()
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+        assert tracker.health_check() is True
+    finally:
+        tracker.stop()
+
+
 # --- health_check() ---------------------------------------------------------------------
 
 

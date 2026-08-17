@@ -246,10 +246,14 @@ docs/
 ├── CODING_STANDARDS.md              (quick-reference derived from 03; 03 wins on conflict)
 ├── STATUS.md                        (high-level phase/level dashboard across the whole roadmap)
 ├── sprint_book/
-│   ├── sprint_0_1.md
-│   ├── sprint_0_2.md
-│   ├── sprint_0_3.md
-│   └── ...                          (one file per sprint: spec + Sprint Completion Report)
+│   ├── INDEX.md                      (Master Sprint Book index — start here)
+│   ├── README.md                     (numbering convention, file structure, detail status)
+│   ├── sprint_1/
+│   │   ├── sprint_1_1.md
+│   │   ├── sprint_1_2.md
+│   │   └── ...
+│   ├── sprint_2/
+│   └── ...                          (one subdirectory per Level, e.g. sprint_6/; one file per sprint inside: spec + Sprint Completion Report — corrected 2026-08-16, Sprint 6.22: sprint IDs are `<Level>.<SequentialIndex>`, file names `sprint_<level>_<index>.md`, one subdirectory per Level, not the flat `sprint_0_N.md` naming shown here previously and retired since Sprint 1.1, see backlog/technical_debt.md item 4)
 ├── changelog/                       (one entry per released version, e.g. 0.1.0.md)
 ├── tds/                             (Technical Design docs — one per sprint's Step 4 plan, where the plan is non-trivial)
 └── backlog/                         (tracked technical debt and deferred/future work)

@@ -366,6 +366,8 @@ Purpose:
 
 JARMINEI becomes practically useful.
 
+**Delivered as two Sprint Books, Part A (Device Control & Workflow Automation) and Part B (Scheduler & Internet Agent)** — a real delivery-sequencing split made during actual implementation (2026-07-20/07-31), not reflected in this Phase breakdown below. See sprint_book/INDEX.md's "Level 4 breakdown changes" note and STATUS.md's own Level 4 section for the authoritative, current account.
+
 ---
 
 ## Phase 4.1 Device Control
@@ -461,6 +463,8 @@ Complete productivity assistant.
 Purpose:
 
 Transform JARMINEI into a long-term companion.
+
+**Delivered as two Sprint Books, Part A (Emotional Intelligence & Presentation Layer) and Part B (Companion Intelligence — Wellness/Analytics/Learning)** — a real delivery-sequencing split made during actual implementation (2026-08-02/08-04), not reflected in this Phase breakdown below. See sprint_book/INDEX.md's "Level 5 breakdown changes"/"Level 5 Part B breakdown changes" notes and STATUS.md's own Level 5 section for the authoritative, current account.
 
 ---
 
@@ -561,6 +565,8 @@ Complete personal AI companion.
 Purpose:
 
 Prepare Version 1.
+
+**Real, disclosed expansion beyond this Phase breakdown, made during actual implementation (2026-08-06)**: Level 6 was split into two Sprint Books after an explicit stop-and-ask gate. **Part A — Autonomous Intelligence & Cognitive Architecture** (sprints 6.1–6.15, complete and frozen 2026-08-12) was inserted *before* this Phase's own five Stabilization phases — a real, new major capability layer (Planning Engine, Task Graph, Context Engine, Reasoning Engine, Decision Engine v2, Knowledge Graph, Learning Engine v2, Proactive Assistant, Multi-Step Workflow Engine, Self Evaluation, Explainability Layer, Adaptive Prioritization — five new top-level packages: `planning/`, `context/`, `reasoning/`, `knowledge/`, `proactive/`) that does not appear anywhere in this document. The five phases below (6.1 Performance through 6.5 Final Testing) became **Part B**, renumbered sprints 6.16–6.23. See sprint_book/INDEX.md's "Level 6 breakdown changes" note and STATUS.md's own Level 6 section for the authoritative, current account.
 
 ---
 

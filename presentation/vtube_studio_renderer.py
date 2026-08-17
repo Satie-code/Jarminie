@@ -78,13 +78,13 @@ silent no-op permanently, never a retry storm; a real `unmount()`/
 import json
 import threading
 import uuid
-from pathlib import Path
 
 from websockets.sync.client import connect
 
 from config.schema import PresentationConfig
 from core.logging_setup import get_logger
 from presentation.presentation_state import PresentationState
+from security.secret_store import SecretStore
 
 logger = get_logger(__name__)
 
@@ -105,11 +105,21 @@ for."""
 
 
 class VTubeStudioAvatarRenderer:
-    """Constructor DI per 03_Engineering_Standards.md: receives only the
-    PresentationConfig it reads every vtube_studio_* field from."""
+    """Constructor DI per 03_Engineering_Standards.md: receives the
+    PresentationConfig it reads every vtube_studio_* field from, plus an
+    optional SecretStore collaborator (Sprint 6.20 — Permission &
+    Encryption Audit) the auth token is persisted through — defaults to
+    a real SecretStore() when not supplied, the same "optional
+    collaborator" pattern memory/lifecycle_manager.py's own
+    runtime_manager already established (Sprint 6.19)."""
 
-    def __init__(self, presentation_config: PresentationConfig) -> None:
+    def __init__(
+        self,
+        presentation_config: PresentationConfig,
+        secret_store: SecretStore | None = None,
+    ) -> None:
         self._config = presentation_config
+        self._secret_store = secret_store if secret_store is not None else SecretStore()
         self._connection = None
         self._connected = False
         self._auth_token: str | None = None
@@ -319,23 +329,18 @@ class VTubeStudioAvatarRenderer:
         return token
 
     def _load_persisted_token(self) -> str | None:
-        path = Path(self._config.vtube_studio_auth_token_path)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return data.get("authenticationToken")
-        except Exception:
-            logger.warning(
-                "Could not read persisted VTube Studio auth token at %s; requesting a new one.",
-                path,
-            )
-            return None
+        """Sprint 6.20 — Permission & Encryption Audit: reads through
+        SecretStore (OS-level credential storage) rather than a plaintext
+        JSON file. A pre-existing plaintext token file from before this
+        sprint is not auto-migrated — SecretStore simply has nothing
+        stored yet, so this returns None and _authenticate() requests a
+        fresh token exactly as it would for any other first run; a real,
+        disclosed, deliberate choice, not a gap (see this module's own
+        Sprint 6.20 Objectives)."""
+        return self._secret_store.get_secret("vtube_studio_auth_token")
 
     def _persist_token(self, token: str) -> None:
-        path = Path(self._config.vtube_studio_auth_token_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"authenticationToken": token}), encoding="utf-8")
+        self._secret_store.set_secret("vtube_studio_auth_token", token)
 
     def _send_request(self, message_type: str, data: dict) -> dict:
         """Raises on any transport/protocol failure — callers during

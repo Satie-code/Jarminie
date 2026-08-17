@@ -169,13 +169,40 @@ class VoiceSessionManager:
         logger.info("Voice session watchdog started.")
 
     def stop(self) -> None:
-        """Stop the watchdog and end any active session."""
+        """Stop the watchdog and end any active session.
+
+        Sprint 6.17 (Async Background Task Audit) hardening: also joins
+        _listen_thread ("voice-session-listener"), which every prior
+        sprint left unjoined — asymmetric with its own _watchdog_thread
+        sibling three lines above, joined since this class's original
+        Sprint 2.5 implementation. Confirmed as the direct root cause of
+        backlog/technical_debt.md item 50's real, measured 1750+-thread
+        full-suite accumulation: end_session() (called here, or earlier
+        by the watchdog/the listener thread itself) signals
+        _stop_listening but stop() previously returned immediately
+        without confirming _session_loop() actually observed it and
+        exited, so a fixture's next setup could already be constructing
+        a fresh VoiceSessionManager (and fresh threads) while the prior
+        test's own listener was still winding down — across thousands of
+        tests in one process, straggling not-yet-exited listener threads
+        compound (heavier GIL contention makes each successive straggler
+        take longer to get scheduled), a real, self-reinforcing
+        accumulation, not merely a cosmetic delay. Joined AFTER
+        end_session() (not inside it): end_session() can itself run on
+        this very listener thread (_session_loop()'s own MicrophoneError/
+        SpeechToTextError paths), where joining would be a same-thread
+        self-join — safe only from stop()'s own external caller."""
         self._watchdog_stop.set()
         if self._watchdog_thread is not None:
             self._watchdog_thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
             self._watchdog_thread = None
         if self.is_active():
             self.end_session(SessionEndReason.EXPLICIT_END)
+        if self._listen_thread is not None:
+            self._listen_thread.join(timeout=_THREAD_JOIN_TIMEOUT_SECONDS)
+            if self._listen_thread.is_alive():
+                logger.error("Voice session listener thread did not stop within timeout.")
+            self._listen_thread = None
         logger.info("Voice session watchdog stopped.")
 
     def health_check(self) -> bool:
@@ -384,8 +411,18 @@ class VoiceSessionManager:
                 logger.exception("Microphone failure during utterance capture.")
                 self.end_session(SessionEndReason.ERROR)
                 return
-            if audio is None or self._stop_listening.is_set():
+            if self._stop_listening.is_set():
                 return
+            if audio is None:
+                # Sprint 6.18 (Stress & Recovery Testing) hardening: a
+                # None here (distinct from the stop_listening case just
+                # above) means _capture_one_utterance()'s own safety cap
+                # fired on pure silence — no real speech was ever heard,
+                # so there is no utterance to process. Loop back and keep
+                # listening rather than treating this as a completed turn
+                # — see _capture_one_utterance()'s own docstring for the
+                # real livelock this closes.
+                continue
 
             self._state = SessionState.PROCESSING
             self._on_utterance_ready(audio)
@@ -402,7 +439,29 @@ class VoiceSessionManager:
         """Buffer frames until trailing silence (utterance_silence_ms)
         follows detected speech, or max_utterance_seconds is reached as a
         safety cap against unbounded buffering. Returns None if listening
-        was stopped mid-capture (session ending)."""
+        was stopped mid-capture (session ending), or if the safety cap
+        fires without any real speech ever detected (has_spoken stays
+        False) — pure ambient silence, nothing to transcribe.
+
+        Sprint 6.18 (Stress & Recovery Testing) hardening: this second
+        None case is a real, found-directly fix, not a defensive
+        addition — before it, a pure-silence capture still returned the
+        (all-silent) buffered frames, which _on_utterance_ready() then
+        unconditionally treated as real activity (refreshing
+        session.last_activity_at) and routed through a full phantom
+        empty-transcript turn. Because _session_loop() re-enters this
+        method immediately after every turn for as long as the session
+        stays active, a session with no further real speech coming in
+        (the exact shape of every tests/system/ scenario driving a
+        single turn, and — per this project's own already-disclosed
+        backlog item 9 — a real, reachable production shape too, since
+        WhisperSpeechToText already produces empty transcripts for
+        near-silent real audio) re-stamped last_activity_at roughly
+        every max_utterance_seconds forever, making _watchdog_loop()'s
+        own session_timeout_seconds idle threshold structurally
+        unreachable — a real livelock, not merely a slow path. Callers
+        must not conflate this return with the stop_listening case
+        above — see _session_loop()'s own two now-separate checks."""
         frames: list[bytes] = []
         has_spoken = False
         silence_started_at: float | None = None
@@ -424,6 +483,12 @@ class VoiceSessionManager:
                     return b"".join(frames)
 
             if (time.monotonic() - started_at) >= max_duration:
+                if not has_spoken:
+                    logger.debug(
+                        "Utterance capture hit max_utterance_seconds with no speech "
+                        "detected; treating as ambient silence, not a phantom turn."
+                    )
+                    return None
                 logger.warning("Utterance capture hit max_utterance_seconds safety cap.")
                 return b"".join(frames)
         return None

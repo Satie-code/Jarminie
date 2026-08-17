@@ -35,7 +35,7 @@ established for reminders (Sprint 4.14).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from analytics.usage_model import AppFocusSample, UsageSession
 from config.schema import AnalyticsConfig
@@ -112,6 +112,31 @@ class UsageStore:
             logger.exception("Failed to query usage samples; treating as none recorded.")
             return []
         return [self._build_sample(row) for row in rows]
+
+    def purge_older_than(self, days: int | None = None) -> int:
+        """Delete AppFocusSample rows older than `days` (default:
+        AnalyticsConfig.sample_retention_days). Returns the count
+        removed, or 0 if the purge itself failed — mirrors
+        ConversationSessionStore.purge_older_than()'s own established
+        shape exactly (Sprint 2.14 hardening precedent). A real,
+        persistent, potentially-identifying record (which application
+        had focus, and when) with no retention mechanism at all until
+        this sprint — see AnalyticsConfig.sample_retention_days's own
+        docstring."""
+        if days is None:
+            days = self._config.sample_retention_days
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            removed = self._sqlite_client.query(
+                "SELECT COUNT(*) FROM app_focus_samples WHERE sampled_at < ?", (cutoff,)
+            )[0][0]
+            self._sqlite_client.execute(
+                "DELETE FROM app_focus_samples WHERE sampled_at < ?", (cutoff,)
+            )
+        except Exception:
+            logger.exception("Failed to purge usage samples older than %d days.", days)
+            return 0
+        return removed
 
     def list_sessions_since(self, since: datetime) -> list[UsageSession]:
         """Groups list_samples_since()'s own result into UsageSessions —

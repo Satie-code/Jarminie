@@ -4,12 +4,14 @@ import pytest
 
 from config.errors import ConfigError
 from config.schema import (
+    AnalyticsConfig,
     AppConfig,
     ContextEngineConfig,
     DatabaseConfig,
     DecisionEngineConfig,
     DeviceControlConfig,
     EmotionConfig,
+    InternetConfig,
     KnowledgeGraphConfig,
     LearningConfig,
     LoggingConfig,
@@ -784,6 +786,36 @@ def test_non_positive_max_relationships_per_entity_raises():
     config = AppConfig(knowledge_graph=KnowledgeGraphConfig(max_relationships_per_entity=0))
     with pytest.raises(ConfigError, match="max_relationships_per_entity"):
         config.validate()
+
+
+def test_knowledge_graph_retention_days_default_is_positive():
+    assert KnowledgeGraphConfig().retention_days > 0
+
+
+def test_non_positive_knowledge_graph_retention_days_raises():
+    config = AppConfig(knowledge_graph=KnowledgeGraphConfig(retention_days=0))
+    with pytest.raises(ConfigError, match="retention_days"):
+        config.validate()
+
+
+# --- analytics/internet, Sprint 6.21 additions only (Privacy Verification, Level 6 Part B) --
+# Note: every other AnalyticsConfig/InternetConfig field still has no validation test
+# coverage anywhere in this suite (the same pre-existing gap the note above already
+# discloses) — only the two fields this sprint actually added are covered here.
+
+
+def test_analytics_sample_retention_days_default_is_positive():
+    assert AnalyticsConfig().sample_retention_days > 0
+
+
+def test_non_positive_analytics_sample_retention_days_raises():
+    config = AppConfig(analytics=AnalyticsConfig(sample_retention_days=0))
+    with pytest.raises(ConfigError, match="sample_retention_days"):
+        config.validate()
+
+
+def test_internet_enabled_defaults_to_true():
+    assert InternetConfig().enabled is True
 
 
 # --- learning, Sprint 6.7 additions only (Learning Engine v2, Level 6 Part A) ------------

@@ -628,6 +628,19 @@ def _pipeline_harness_impl(
     # instead of merely avoiding it by staying slow.
     internet_config = InternetConfig()
 
+    # Sprint 6.19 (Resource Protection & Fail-Gracefully Verification):
+    # resource_monitor is deliberately NOT threaded into TaskScheduler
+    # here, unlike main.py's own real production wiring — found directly,
+    # not assumed: wiring it in unconditionally (an earlier version of
+    # this fix) risks real, transient host CPU/RAM pressure legitimately
+    # skipping real resource_sensitive=True jobs (memory lifecycle
+    # passes, most directly) inside tests/integration/test_scheduler_
+    # integration.py's own maintenance-job recurrence assertions, which
+    # have nothing to do with resource protection. See tests/system/
+    # conftest.py's own identical resource_aware_scheduler note — no
+    # integration-level test currently exercises this mechanism (Sprint
+    # 6.19's own Acceptance Criteria is satisfied by a real system-level
+    # test instead), so there is nothing here that needs it wired in.
     task_scheduler = TaskScheduler()
     calendar_sqlite_client = SqliteClient(database_config.sqlite_path)
     calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
@@ -799,6 +812,7 @@ def _pipeline_harness_impl(
         research_engine=research_engine,
         source_validator=source_validator,
         summarizer=summarizer,
+        internet_config=internet_config,
         action_audit_log=audit_log,
         scheduler_config=scheduler_config,
         memory_config=memory_config,
@@ -831,6 +845,7 @@ def _pipeline_harness_impl(
         ),
         dashboard_service=dashboard_service if level5_part_b_available else None,
         usage_tracker=usage_tracker if level5_part_b_available else None,
+        usage_store=usage_store if level5_part_b_available else None,
         pattern_recognizer=pattern_recognizer if level5_part_b_available else None,
         recommendation_engine=recommendation_engine if level5_part_b_available else None,
         learning_config=learning_config,
@@ -846,6 +861,7 @@ def _pipeline_harness_impl(
         # own Acceptance Criteria cares about, that CommunicationPipeline
         # tolerates None for all eight.
         task_graph_store=task_graph_store if level6_part_a_available else None,
+        knowledge_graph_store=knowledge_graph_store if level6_part_a_available else None,
         planning_engine=planning_engine if level6_part_a_available else None,
         context_engine=context_engine if level6_part_a_available else None,
         explainability_layer=explainability_layer if level6_part_a_available else None,

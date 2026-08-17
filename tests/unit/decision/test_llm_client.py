@@ -71,6 +71,21 @@ def test_generate_omits_options_when_no_stop_sequence_given(model_config):
     )
 
 
+def test_generate_wraps_a_malformed_response_object_in_llm_error(model_config):
+    """Sprint 6.19 hardening (backlog item 33): a response object
+    missing its own .response attribute (a malformed/unexpected shape,
+    the identical class of gap item 32 already fixed for
+    BraveSearchProvider.search()) must raise LlmError, not a raw
+    AttributeError this method's own docstring already promises never
+    to leak."""
+    client = OllamaClient(model_config)
+    with patch("ollama.Client") as mock_client_cls:
+        mock_client_cls.return_value.generate.return_value = SimpleNamespace()
+
+        with pytest.raises(LlmError, match="Ollama generate\\(\\) failed"):
+            client.generate("prompt", timeout_seconds=5.0)
+
+
 def test_generate_wraps_an_unpulled_model_response_error_in_llm_error(model_config):
     client = OllamaClient(model_config)
     with patch("ollama.Client") as mock_client_cls:

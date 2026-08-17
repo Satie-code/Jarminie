@@ -437,13 +437,28 @@ class LazyMemoryStore:
     public methods MemoryStore does (MemoryStoreProtocol, above).
 
     MemoryLifecycleManager is the one deliberate exception: it keeps a
-    direct MemoryStore dependency, not this proxy, because its own
-    start() is guaranteed by CoreManager's own tier-plus-registration-
-    order sequencing to run only after the real MemoryStore.start()
-    already has (same WARM tier, registered immediately after it, per
-    main.py's own _register_level3_modules()) — threading a second,
-    redundant lazy gate through it would be pure duplication, not a
-    correctness need.
+    direct MemoryStore dependency, not this proxy — its own health_check()
+    needs the real, non-Protocol .health_check() method this class
+    doesn't expose. Its own one-time start()-time call IS safe purely by
+    CoreManager's own tier-plus-registration-order sequencing (same WARM
+    tier, registered immediately after MemoryStore, per main.py's own
+    _register_level3_modules()) — but that sequencing guarantee only
+    ever covered that one startup-time call.
+
+    **Correction (Sprint 6.19, backlog/technical_debt.md item 53)**: this
+    docstring previously claimed threading a second lazy gate through
+    MemoryLifecycleManager "would be pure duplication, not a correctness
+    need" — true when Runtime Phase 6 wrote it, false once Runtime Phase
+    9's later resource-pressure eviction (RuntimeManager.
+    evict_least_recently_used()) could stop memory_store mid-run
+    regardless of how it started. MemoryLifecycleManager's own two real
+    recurring TaskScheduler jobs and one live per-turn call
+    (apply_user_override(), from CommunicationPipeline._handle_turn_
+    complete()) all run well after startup ordering has stopped
+    mattering — each now calls RuntimeManager.ensure_started() directly
+    (a plain optional constructor collaborator, not this proxy class) at
+    the top of its own body; see MemoryLifecycleManager's own docstring
+    (memory/lifecycle_manager.py) for the full account.
     """
 
     def __init__(

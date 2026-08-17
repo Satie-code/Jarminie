@@ -67,7 +67,7 @@ caller.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from config.schema import KnowledgeGraphConfig
 from core.logging_setup import get_logger
@@ -200,6 +200,40 @@ class KnowledgeGraphStore:
             logger.exception("Failed to query entities; treating as none found.")
             return []
         return [self._build_entity(row) for row in rows]
+
+    def purge_older_than(self, days: int | None = None) -> int:
+        """Delete entities whose own last_referenced_at is older than
+        `days` (default: KnowledgeGraphConfig.retention_days). Returns
+        the count removed, or 0 if the purge itself failed — mirrors
+        ConversationSessionStore.purge_older_than()'s own established
+        shape exactly (Sprint 2.14 hardening precedent), with one real,
+        disclosed difference: staleness-based on last_referenced_at, not
+        blind creation-age, since a PROJECT/PERSON entity is a durable
+        fact, not an ephemeral chat turn — see this module's own
+        docstring and KnowledgeGraphConfig.retention_days's own
+        docstring for why.
+
+        Relationship rows referencing a purged entity are deliberately
+        left in place — related_entities()'s own BFS already treats a
+        missing endpoint gracefully (get_entity() returns None,
+        filtered out of the final result by related_entities()'s own
+        list comprehension), and a real orphan-relationship sweep is a
+        separate, larger decision this sprint's own Objectives don't
+        name."""
+        if days is None:
+            days = self._config.retention_days
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        try:
+            removed = self._sqlite_client.query(
+                "SELECT COUNT(*) FROM entities WHERE last_referenced_at < ?", (cutoff,)
+            )[0][0]
+            self._sqlite_client.execute(
+                "DELETE FROM entities WHERE last_referenced_at < ?", (cutoff,)
+            )
+        except Exception:
+            logger.exception("Failed to purge entities last referenced before %d days ago.", days)
+            return 0
+        return removed
 
     def add_relationship(self, relationship: Relationship) -> None:
         """Raises TooManyRelationshipsError, without inserting anything,

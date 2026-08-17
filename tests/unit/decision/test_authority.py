@@ -60,6 +60,16 @@ def evaluator() -> AuthorityEvaluator:
 # --- Whitelist gate (EMERGENCY_ASSIST) ----------------------------------------
 
 
+def test_approved_emergency_procedures_ships_empty_by_default(evaluator):
+    """Sprint 6.20 (Permission & Encryption Audit) re-confirmation,
+    direct field check mirroring
+    tests/unit/security/test_policy_engine.py's own
+    test_hard_denylist_ships_empty_by_default precedent — the
+    exhaustive behavioral proof lives right below in
+    test_empty_whitelist_makes_emergency_assist_unreachable()."""
+    assert evaluator._approved_emergency_procedures == frozenset()
+
+
 @pytest.mark.parametrize(
     ("priority_level", "category"),
     list(itertools.product(PriorityLevel, IntentCategory)),

@@ -9,14 +9,27 @@ it's specific to this one failure-injection scenario) covers the one
 failure-path test that a real client can't easily simulate.
 """
 
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from config.schema import DatabaseConfig
 from database.sqlite_client import SqliteClient
+from scheduler.task_scheduler import TaskScheduler
 from voice.conversation_store import ConversationSessionStore, ConversationTurn
 from voice.errors import ConversationStoreError
+
+_WAIT_TIMEOUT = 2.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 @pytest.fixture
@@ -196,6 +209,49 @@ def test_get_recent_turns_swallows_and_logs_a_read_failure(db_path, database_con
         store.stop()
 
     assert recent == []
+
+
+# --- Sprint 6.17 (Async Background Task Audit): TaskScheduler job isolation -------------
+
+
+def test_a_persistently_failing_purge_keeps_recurring_via_real_task_scheduler(
+    db_path, database_config
+):
+    """One of the 12 jobs not yet individually verified against
+    TaskScheduler's own explicit max_instances=1, mirroring Sprint
+    6.14's own established shape. purge_older_than() already swallows
+    its own sqlite failures internally (Sprint 2.14 hardening, the two
+    tests immediately above) rather than raising, so — unlike a job that
+    genuinely propagates — the meaningful property to prove here is that
+    the real, registered production callable keeps being invoked by a
+    real TaskScheduler on its own real schedule despite a persistently
+    and continuously failing SqliteClient, not merely that one direct
+    call degrades gracefully."""
+    raising_client = _RaisingSqliteClient(SqliteClient(db_path))
+    store = ConversationSessionStore(raising_client, database_config)
+    store.start()
+    raising_client.should_raise = True
+    raising_client.should_raise_on_query = True
+
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    tick_count = 0
+    real_purge = store.purge_older_than
+
+    def _counting_purge():
+        nonlocal tick_count
+        tick_count += 1
+        return real_purge()
+
+    task_scheduler.add_job(
+        _counting_purge, interval_seconds=0.05, job_id="conversation-purge-isolation"
+    )
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+    finally:
+        task_scheduler.stop()
+        store.stop()
 
 
 def test_start_raises_conversation_store_error_on_connect_failure(database_config):

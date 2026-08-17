@@ -11,12 +11,14 @@ tests/integration/test_decision_engine_integration.py for the Sprint
 """
 
 import logging
+import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pytest
 
 from config.schema import (
+    InternetConfig,
     LearningConfig,
     MemoryConfig,
     RuntimeConfig,
@@ -30,22 +32,37 @@ from decision.llm_client import LlmError
 from decision.priority_queue import PriorityLevel
 from device_control.action_engine import ActionResult, ActionStatus
 from emotion.state_manager import EmotionalState
+from internet.research_engine import ResearchEngine
 from internet.search_provider import SearchResult
 from internet.source_validator import Citation
 from internet.summarizer import ResearchSummary
 from learning.recommendation import Recommendation
+from memory.models import MemoryRecord, MemoryType
+from memory.retrieval_engine import RetrievedMemory
 from personas.persona_manager import SwitchReason
 from planning.planning_model import Goal, Milestone, PlanningStatus, Task
 from planning.task_graph import TaskGraph
 from presentation.adaptive_workspace import WorkspaceProfile
 from reasoning.explainability import Explanation
 from scheduler.scheduler_model import ItemType, ScheduledItem
+from scheduler.task_scheduler import TaskScheduler
 from security.confirmation_service import ConfirmationOutcome
 from voice.pipeline import CallbackRelay, CommunicationPipeline
 from voice.quiet_mode import ActivationReason, OperatingMode
 from voice.session_manager import SessionEndReason
 from wellness.wellness_model import WellnessPrompt, WellnessTriggerType
 from workflow.workflow_executor import WorkflowRunResult
+
+_WAIT_TIMEOUT = 2.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 @pytest.fixture
@@ -165,6 +182,7 @@ def collaborators():
     adaptive_wellness_adjuster.compute_overrides.return_value = {}
     dashboard_service = MagicMock()
     usage_tracker = MagicMock()
+    usage_store = MagicMock()
     pattern_recognizer = MagicMock()
     recommendation_engine = MagicMock()
     recommendation_engine.generate_recommendations.return_value = []
@@ -201,6 +219,7 @@ def collaborators():
     # collaborators dict" pattern _build_pipeline()'s own docstring
     # already names) is what actually exercises the new path.
     task_graph_store = MagicMock()
+    knowledge_graph_store = MagicMock()
     planning_engine = MagicMock()
     context_engine = None
     explainability_layer = MagicMock()
@@ -237,6 +256,7 @@ def collaborators():
         "research_engine": MagicMock(),
         "source_validator": MagicMock(),
         "summarizer": MagicMock(),
+        "internet_config": InternetConfig(),
         "action_audit_log": MagicMock(),
         "scheduler_config": SchedulerConfig(),
         "memory_config": MemoryConfig(),
@@ -256,6 +276,7 @@ def collaborators():
         "adaptive_wellness_adjuster": adaptive_wellness_adjuster,
         "dashboard_service": dashboard_service,
         "usage_tracker": usage_tracker,
+        "usage_store": usage_store,
         "pattern_recognizer": pattern_recognizer,
         "recommendation_engine": recommendation_engine,
         "learning_config": LearningConfig(),
@@ -264,6 +285,7 @@ def collaborators():
         "resource_monitor": resource_monitor,
         "runtime_config": RuntimeConfig(),
         "task_graph_store": task_graph_store,
+        "knowledge_graph_store": knowledge_graph_store,
         "planning_engine": planning_engine,
         "context_engine": context_engine,
         "explainability_layer": explainability_layer,
@@ -313,6 +335,7 @@ def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
         research_engine=collaborators["research_engine"],
         source_validator=collaborators["source_validator"],
         summarizer=collaborators["summarizer"],
+        internet_config=collaborators["internet_config"],
         action_audit_log=collaborators["action_audit_log"],
         scheduler_config=collaborators["scheduler_config"],
         memory_config=collaborators["memory_config"],
@@ -332,6 +355,7 @@ def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
         adaptive_wellness_adjuster=collaborators["adaptive_wellness_adjuster"],
         dashboard_service=collaborators["dashboard_service"],
         usage_tracker=collaborators["usage_tracker"],
+        usage_store=collaborators["usage_store"],
         pattern_recognizer=collaborators["pattern_recognizer"],
         recommendation_engine=collaborators["recommendation_engine"],
         learning_config=collaborators["learning_config"],
@@ -340,6 +364,7 @@ def _build_pipeline(collaborators: dict) -> CommunicationPipeline:
         resource_monitor=collaborators["resource_monitor"],
         runtime_config=collaborators["runtime_config"],
         task_graph_store=collaborators["task_graph_store"],
+        knowledge_graph_store=collaborators["knowledge_graph_store"],
         planning_engine=collaborators["planning_engine"],
         context_engine=collaborators["context_engine"],
         explainability_layer=collaborators["explainability_layer"],
@@ -404,6 +429,8 @@ def test_start_registers_every_maintenance_job(pipeline, collaborators):
         "pattern_detection_pass",
         "recommendation_generation",
         "runtime_housekeeping",
+        "knowledge_graph_purge",
+        "usage_store_purge",
     }
 
 
@@ -436,6 +463,29 @@ def test_start_registers_maintenance_jobs_with_the_configured_interval(pipeline,
     assert interval_for_job_id["runtime_housekeeping"] == (
         collaborators["runtime_config"].housekeeping_interval_seconds
     )
+    assert interval_for_job_id["knowledge_graph_purge"] == (
+        scheduler_config.maintenance_interval_seconds
+    )
+    assert interval_for_job_id["usage_store_purge"] == (
+        scheduler_config.maintenance_interval_seconds
+    )
+
+
+def test_start_registers_the_two_privacy_purge_jobs_as_resource_sensitive(pipeline, collaborators):
+    """Sprint 6.21 — Privacy Verification. Neither has real user-facing
+    lateness cost, the same classification Sprint 6.19 already gave the
+    maintenance passes/pattern detection/recommendation generation
+    jobs — see this module's own _KNOWLEDGE_GRAPH_PURGE_JOB_ID/
+    _USAGE_STORE_PURGE_JOB_ID docstring."""
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    resource_sensitive_for_job_id = {
+        call.kwargs["job_id"]: call.kwargs.get("resource_sensitive", False)
+        for call in add_job.call_args_list
+    }
+    assert resource_sensitive_for_job_id["knowledge_graph_purge"] is True
+    assert resource_sensitive_for_job_id["usage_store_purge"] is True
 
 
 def test_start_registers_maintenance_jobs_with_the_real_bound_methods(pipeline, collaborators):
@@ -466,6 +516,29 @@ def test_start_registers_maintenance_jobs_with_the_real_bound_methods(pipeline, 
         pipeline._generate_and_enqueue_recommendations
     )
     assert func_for_job_id["runtime_housekeeping"] == pipeline._run_runtime_housekeeping
+    assert func_for_job_id["knowledge_graph_purge"] == (
+        collaborators["knowledge_graph_store"].purge_older_than
+    )
+    assert func_for_job_id["usage_store_purge"] == (
+        collaborators["usage_store"].purge_older_than
+    )
+
+
+def test_start_does_not_register_privacy_purge_jobs_when_dependencies_are_none(collaborators):
+    """Sprint 6.21 — Privacy Verification. knowledge_graph_store/
+    usage_store are both optional (Level 6 Part A/Level 5 Part B
+    collaborators respectively) — the same None-guard discipline the
+    wellness/learning jobs below already established."""
+    collaborators["knowledge_graph_store"] = None
+    collaborators["usage_store"] = None
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline.start()
+
+    add_job = collaborators["task_scheduler"].add_job
+    registered_job_ids = {call.kwargs["job_id"] for call in add_job.call_args_list}
+    assert "knowledge_graph_purge" not in registered_job_ids
+    assert "usage_store_purge" not in registered_job_ids
 
 
 def test_start_does_not_register_wellness_or_learning_jobs_when_dependencies_are_none(
@@ -547,6 +620,8 @@ def test_stop_removes_every_job_and_unregisters_reminder_engine(pipeline, collab
         "pattern_detection_pass",
         "recommendation_generation",
         "runtime_housekeeping",
+        "knowledge_graph_purge",
+        "usage_store_purge",
     }
     collaborators["reminder_engine"].unregister.assert_called_once()
 
@@ -1123,6 +1198,128 @@ def test_internet_agent_turn_with_no_results_reports_it_and_never_summarizes(
         "p340",
         on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
     )
+
+
+# --- InternetConfig.enabled gate (Sprint 6.21 — Privacy Verification) ---------
+
+
+def test_internet_agent_turn_when_disabled_never_calls_research_and_says_so(
+    pipeline, collaborators
+):
+    """InternetConfig.enabled=False must reliably prevent any outbound
+    network call, verified directly (research_engine.research is never
+    called at all), not just that the spoken reply changes while a
+    request still goes out — this sprint's own Acceptance Criteria."""
+    collaborators["internet_config"] = InternetConfig(enabled=False)
+    pipeline = _build_pipeline(collaborators)
+    collaborators["decision_trace"].selected_engine = EngineSelection.INTERNET_AGENT
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "search for the latest Python release"
+    collaborators["context_analysis"].primary_topic = "latest Python release"
+
+    pipeline._handle_turn_complete("search for the latest Python release", "session-1")
+
+    collaborators["research_engine"].research.assert_not_called()
+    collaborators["summarizer"].summarize.assert_not_called()
+    collaborators["session_manager"].speak_reply.assert_called_once_with(
+        "Internet research is currently turned off.",
+        "p340",
+        on_audio_ready=pipeline._drive_lip_sync_if_avatar_mounted,
+    )
+
+
+def test_internet_agent_turn_when_enabled_still_calls_research_as_before(pipeline, collaborators):
+    """The default (True) preserves existing behavior exactly — a
+    regression guard against the new gate accidentally flipping sense."""
+    assert collaborators["internet_config"].enabled is True
+    collaborators["decision_trace"].selected_engine = EngineSelection.INTERNET_AGENT
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["intent"].raw_transcript = "search for something"
+    collaborators["context_analysis"].primary_topic = "something"
+    collaborators["research_engine"].research.return_value = []
+
+    pipeline._handle_turn_complete("search for something", "session-1")
+
+    collaborators["research_engine"].research.assert_called_once_with("something")
+
+
+# --- Egress-boundary regression (Sprint 6.21 — Privacy Verification) ----------
+
+
+class _CapturingSearchProvider:
+    """A real SearchProvider implementation (not a MagicMock) recording
+    every query it's actually asked to search — proves what text reaches
+    the search boundary rather than merely asserting on a mock's call
+    args, formalizing this sprint's own "only the current turn's own
+    query text ever leaves the machine" research finding as a permanent
+    regression guard."""
+
+    def __init__(self):
+        self.received_queries: list[str] = []
+
+    def search(self, query: str, max_results: int) -> list[SearchResult]:
+        self.received_queries.append(query)
+        return [
+            SearchResult(
+                title="T", url="https://example.com", snippet="s", retrieved_at=datetime.now(UTC)
+            )
+        ]
+
+
+class _CapturingSummarizer:
+    def __init__(self):
+        self.received_queries: list[str] = []
+
+    def summarize(self, query, results, citations):
+        self.received_queries.append(query)
+        return ResearchSummary(
+            query=query, summary_text="a summary", citations=citations,
+            generated_at=datetime.now(UTC),
+        )
+
+
+def test_internet_agent_egress_boundary_never_leaks_memory_or_entity_content(
+    pipeline, collaborators
+):
+    """Sprint 6.21 — Privacy Verification. DecisionTrace carries real
+    retrieved-memory content and mentioned entities on the SAME object
+    _handle_internet_agent_turn() receives (trace.retrieved_memories,
+    trace.context_analysis.mentioned_entities) — proving the
+    search/summarize boundary receives ONLY the turn's own topic text
+    requires a real, non-mocked SearchProvider/Summarizer pair
+    capturing what actually arrives, per this sprint's own Implementation
+    Tasks, not just trusting each method's own narrow signature."""
+    secret_memory_content = "SECRET-MEMORY-CONTENT-marker"
+    secret_entity_name = "SECRET-ENTITY-NAME-marker"
+    real_topic = "the weather in Paris"
+
+    memory_record = MemoryRecord(memory_type=MemoryType.SHARED, content=secret_memory_content)
+    retrieved_memory = RetrievedMemory(
+        record=memory_record,
+        similarity_score=0.9,
+        confidence_score=80.0,
+        combined_rank_score=0.85,
+        retrieval_reason="test",
+    )
+    collaborators["decision_trace"].selected_engine = EngineSelection.INTERNET_AGENT
+    collaborators["decision_trace"].intent = collaborators["intent"]
+    collaborators["decision_trace"].retrieved_memories = [retrieved_memory]
+    collaborators["intent"].raw_transcript = real_topic
+    collaborators["context_analysis"].primary_topic = real_topic
+    collaborators["context_analysis"].mentioned_entities = [secret_entity_name]
+
+    capturing_provider = _CapturingSearchProvider()
+    capturing_summarizer = _CapturingSummarizer()
+    collaborators["research_engine"] = ResearchEngine(capturing_provider, InternetConfig())
+    collaborators["summarizer"] = capturing_summarizer
+    pipeline = _build_pipeline(collaborators)
+
+    pipeline._handle_turn_complete(real_topic, "session-1")
+
+    assert capturing_provider.received_queries == [real_topic]
+    assert capturing_summarizer.received_queries == [real_topic]
+    assert secret_memory_content not in capturing_provider.received_queries[0]
+    assert secret_entity_name not in capturing_provider.received_queries[0]
 
 
 # --- Proactive reminder announcement (Sprint 4.18) ----------------------------
@@ -2321,3 +2518,155 @@ def test_check_and_announce_priority_item_sweep_every_call_site_raises_by_design
 
     with pytest.raises(RuntimeError, match="simulated collaborator failure"):
         pipeline._check_and_announce_priority_item()
+
+
+# --- Sprint 6.17 (Async Background Task Audit): TaskScheduler job isolation -------------
+#
+# The pipeline fixture's own task_scheduler collaborator is a MagicMock (used
+# only to assert real registration calls, above) — these tests instead drive
+# the REAL bound job methods through a separate, genuine TaskScheduler, built
+# on this file's own already-established faulty-collaborator technique (the
+# sweep test immediately above) to prove TaskScheduler's own explicit
+# max_instances=1 isolation holds for each of the 4 CommunicationPipeline-
+# owned jobs that, like _check_and_announce_priority_item, have no try/except
+# of their own by design.
+
+
+@pytest.mark.parametrize(
+    ("job_attr", "job_id", "faulty_collaborator", "faulty_method"),
+    [
+        (
+            "_check_and_announce_priority_item",
+            "proactive_priority_item_announcement",
+            "priority_queue_manager",
+            "peek_next",
+        ),
+        (
+            "_maybe_enqueue_wellness_prompt",
+            "wellness_prompt_enqueue",
+            "wellness_tracker",
+            "evaluate_triggers",
+        ),
+        (
+            "_generate_and_enqueue_recommendations",
+            "recommendation_generation",
+            "recommendation_engine",
+            "generate_recommendations",
+        ),
+        (
+            "_run_runtime_housekeeping",
+            "runtime_housekeeping",
+            "runtime_manager",
+            "sweep_idle_services",
+        ),
+    ],
+    ids=[
+        "check_and_announce_priority_item",
+        "maybe_enqueue_wellness_prompt",
+        "generate_and_enqueue_recommendations",
+        "run_runtime_housekeeping",
+    ],
+)
+def test_a_raising_pipeline_owned_job_does_not_stop_future_recurrence(
+    pipeline, collaborators, job_attr, job_id, faulty_collaborator, faulty_method
+):
+    getattr(collaborators[faulty_collaborator], faulty_method).side_effect = RuntimeError(
+        "simulated collaborator failure"
+    )
+    job_func = getattr(pipeline, job_attr)
+
+    real_task_scheduler = TaskScheduler()
+    real_task_scheduler.start()
+    tick_count = 0
+
+    def _counting():
+        nonlocal tick_count
+        tick_count += 1
+        job_func()
+
+    real_task_scheduler.add_job(_counting, interval_seconds=0.05, job_id=job_id)
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert real_task_scheduler.health_check() is True
+    finally:
+        real_task_scheduler.stop()
+
+
+def test_a_raising_pattern_detection_pass_does_not_stop_future_recurrence(pipeline, collaborators):
+    """The 5th CommunicationPipeline-registered job from this section —
+    registered directly as pattern_recognizer's own bound method (not a
+    CommunicationPipeline method, see test_start_registers_maintenance_
+    jobs_with_the_real_bound_methods above), so it needs its own
+    non-parametrized test rather than fitting the shape immediately
+    above. side_effect on the MagicMock itself already counts calls
+    (call_count), so no separate counting wrapper is needed here."""
+    _ = pipeline  # ensures start() has already registered against the mocked scheduler
+    collaborators["pattern_recognizer"].run_detection_pass.side_effect = RuntimeError(
+        "simulated collaborator failure"
+    )
+
+    real_task_scheduler = TaskScheduler()
+    real_task_scheduler.start()
+    try:
+        real_task_scheduler.add_job(
+            collaborators["pattern_recognizer"].run_detection_pass,
+            interval_seconds=0.05,
+            job_id="pattern_detection_pass",
+        )
+        assert _wait_until(
+            lambda: collaborators["pattern_recognizer"].run_detection_pass.call_count >= 3
+        )
+        assert real_task_scheduler.health_check() is True
+    finally:
+        real_task_scheduler.stop()
+
+
+# --- Sprint 6.19 (Resource Protection & Fail-Gracefully Verification):
+# _update_workspace_profile() bookkeeping (backlog item 39) -----------------------------
+
+
+def test_update_workspace_profile_switches_and_resets_bookkeeping(pipeline, collaborators):
+    """Baseline/happy-path: no prior direct test of this method existed.
+    A genuine switch decision applies the new profile via JarvisRenderer
+    and resets pending-candidate bookkeeping."""
+    collaborators["adaptive_workspace_controller"].select_profile.return_value = (
+        WorkspaceProfile.CODING
+    )
+    collaborators["adaptive_workspace_controller"].should_switch.return_value = True
+
+    pipeline._update_workspace_profile(context_analysis=None)
+
+    collaborators["jarvis_renderer"].apply_workspace_profile.assert_called_once_with(
+        WorkspaceProfile.CODING
+    )
+    assert pipeline._current_workspace_profile == WorkspaceProfile.CODING
+    assert pipeline._pending_workspace_candidate is None
+    assert pipeline._workspace_consecutive_match_count == 0
+
+
+def test_update_workspace_profile_bookkeeping_stays_consistent_even_if_apply_raises(
+    pipeline, collaborators
+):
+    """Backlog item 39's own regression test: bookkeeping now resets
+    BEFORE JarvisRenderer.apply_workspace_profile() is called, not after
+    — found via Sprint 6.19's own adversarial re-read, the old ordering
+    left _pending_workspace_candidate/_workspace_consecutive_match_count
+    stale (still pointing at the just-failed candidate) and
+    _current_workspace_profile never advanced whenever the renderer call
+    raised synchronously. The raise itself is expected to propagate out
+    of this method (it has no try/except of its own — the real call
+    chain's own containment lives one level up, in
+    _run_presentation_pipeline()'s caller) — what matters is that the
+    bookkeeping is already correct by the time it does."""
+    collaborators["adaptive_workspace_controller"].select_profile.return_value = (
+        WorkspaceProfile.CODING
+    )
+    collaborators["adaptive_workspace_controller"].should_switch.return_value = True
+    collaborators["jarvis_renderer"].apply_workspace_profile.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        pipeline._update_workspace_profile(context_analysis=None)
+
+    assert pipeline._current_workspace_profile == WorkspaceProfile.CODING
+    assert pipeline._pending_workspace_candidate is None
+    assert pipeline._workspace_consecutive_match_count == 0

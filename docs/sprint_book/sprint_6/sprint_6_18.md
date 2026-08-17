@@ -77,17 +77,17 @@ This sprint adds no new production resilience mechanism of its own — Sprint 6.
 
 ## Testing Checklist
 
-- [ ] Sustained-load stress scenario.
-- [ ] Recovery scenario (a): Ollama unreachable → reachable.
-- [ ] Recovery scenario (b): SQLite locked → unlocked.
-- [ ] Recovery scenario (c): resource CRITICAL → normal.
-- [ ] Full project suite re-run.
+- [x] Sustained-load stress scenario — real, disclosed gap found (item 53); test left honestly red, deliberately not weakened.
+- [x] Recovery scenario (a): Ollama unreachable → reachable.
+- [x] Recovery scenario (b): SQLite locked → unlocked.
+- [x] Recovery scenario (c): resource CRITICAL → normal.
+- [x] Full project suite re-run (per-tier — see Sprint Completion Report).
 
 ## Documentation Checklist
 
-- [ ] `docs/STATUS.md` — narrative describing the stress/recovery scenarios and their outcomes.
-- [ ] `docs/sprint_book/INDEX.md` — 6.18 row → `Complete` (once implemented).
-- [ ] `docs/backlog/technical_debt.md` — any finding sized beyond this sprint's own scope.
+- [x] `docs/STATUS.md` — narrative describing the stress/recovery scenarios and their outcomes.
+- [x] `docs/sprint_book/INDEX.md` — 6.18 row → `Complete`.
+- [x] `docs/backlog/technical_debt.md` — items 53 (found, deliberately deferred to 6.19) and 54–56 (found and fixed same sprint).
 
 ## Definition of Done
 
@@ -112,3 +112,17 @@ See Potential Risks above.
 ## Future Considerations
 
 - A genuine multi-hour (or longer) endurance run is real future-shaped work this sprint's own accelerated-interval scenario deliberately substitutes for — would need a CI/scheduled-runner environment this project doesn't have (Sprint 6.23's own Future Considerations names the same gap).
+
+## Sprint Completion Report (2026-08-16)
+
+Implemented as specified. New `tests/system/test_level6_part_b_stress.py` (4 tests) and a new `stress_app_harness` fixture (`tests/system/conftest.py`, all 13 of Sprint 6.17's own audited jobs accelerated to 1.0s at once) deliver this sprint's own Objectives directly: a sustained-load scenario driving real conversation turns for 120s against the whole real `CoreManager` graph, and three recovery scenarios (Ollama unreachable, SQLite locked, `ResourceMonitor` CRITICAL), each inducing a real failure and confirming a real, restart-free recovery.
+
+**Three real, previously-undisclosed production bugs found and fixed, all same-file per this sprint's own Implementation Task 4 judgment call** (`backlog/technical_debt.md` items 54–56):
+
+1. `scheduler/task_scheduler.py`'s `TaskScheduler.stop()` called `shutdown(wait=False)` — an in-flight job could keep running after `stop()` returned, racing `CoreManager.shutdown()`'s reverse-order closing of that job's own store's `SqliteClient`. Fixed with a bounded `wait=True` on a helper thread (`_SHUTDOWN_JOIN_TIMEOUT_SECONDS = 5.0`), mirroring `voice/session_manager.py`'s own identical bounded-join precedent (Sprint 6.17).
+2. `voice/session_manager.py`'s `_capture_one_utterance()` treated a pure-silence safety-cap timeout as real activity, making `_watchdog_loop()`'s own inactivity threshold structurally unreachable — a genuine livelock, found via a dedicated background investigation after two recovery tests independently timed out waiting for `DORMANT`. Fixed: returns `None` on that specific case; `_session_loop()` now treats it as "keep listening," not "stop."
+3. `voice/pipeline.py`'s `_handle_turn_complete()` wrapped `short_term_memory.promote_from_turn()` (a deliberately-raising write) inside the same broad `try` that composes and speaks the reply, so a transient memory-store failure discarded an already-composed reply and ended the session — found via the SQLite-lock recovery scenario. Fixed: caught locally, degrades to `promoted_record_id = None`, matching this codebase's wider storage-failure discipline (and this exact function's own one-line-earlier precedent for `conversation_store.record_turn()`).
+
+A fourth, real, cross-file gap was found and deliberately **not** fixed, per this sprint's own explicit "Sprint 6.19 closes what this sprint's scenarios surface" scope boundary (item 53): `memory/lifecycle_manager.py`'s `MemoryLifecycleManager` bypasses `LazyMemoryStore`'s proxy on Runtime Phase 6's own now-stale "safe by startup ordering" reasoning — Runtime Phase 9's later resource-pressure eviction can stop `memory_store` mid-run regardless. `test_sustained_load_all_jobs_active_no_hang_no_crash_bounded_rss` is left honestly red rather than weakened to dodge this, matching this project's own established precedent for the pre-existing `test_context_analyzer_extracts_a_nonempty_topic_for_real_input` flake. A related severity note was also disclosed on item 53: its failure mode measurably destabilizes the three (otherwise solid) recovery tests if run in the same file/process immediately after it — confirmed via direct A/B testing (231.15s, 3/3 passing in isolation, versus unpredictable flaking run together) — the same cross-test-contamination shape item 50 already named for thread accumulation, here via cascading `SqliteClient` errors and real elevated host RAM.
+
+All three recovery scenarios pass reliably, both standalone and together (excluding the stress test): 231.15s, 3/3 passing. Full regression check, per-tier per Sprint 6.17's own established isolation precedent: `tests/unit/` 2248 passed + 1 skipped (unchanged baseline); `tests/integration/` 74 passed + 1 (the known `wait_for_dormant`-class host-timing flake, confirmed via isolated re-run); `tests/system/` (excluding this sprint's own new file) 25 passed + 4 skipped + 2 more of that same flake class (both confirmed via isolated re-run), plus the pre-existing, unchanged `test_context_analyzer_extracts_a_nonempty_topic_for_real_input` flake. `ruff check .` clean repo-wide. No git commit made.

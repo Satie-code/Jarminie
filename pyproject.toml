@@ -15,4 +15,5 @@ select = ["E", "F", "W", "I", "N", "UP", "B"]
 testpaths = ["tests"]
 markers = [
     "real_search_api: opt-in test against the real Brave Search API, skipped unless JARMINEI_INTERNET_SEARCH_API_KEY is set (Sprint 4.16 — Search & Research).",
+    "real_model: opt-in test against a real, reachable Ollama instance, self-skipped when unreachable or the configured model isn't pulled (Sprint 6.23 — Full Test Suite Pass, formalizing the ad hoc reachability skip test_level3_real_model_verification.py established at Sprint 3.14).",
 ]

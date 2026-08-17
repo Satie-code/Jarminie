@@ -31,6 +31,13 @@ everywhere), so it belongs in, and is already covered by, the always-run
 tests/system/test_level4_part_b_acceptance.py instead; this file's own
 job is exclusively the two dependencies nothing else in the fast suite
 ever exercises for real.
+
+Every test in this file carries BOTH the `real_model` and `real_search_api`
+markers (registered in pyproject.toml — Sprint 6.23), since this file's own
+skip fixture below requires both dependencies at once — a full-suite run
+excluding either marker (`pytest -m "not real_model and not
+real_search_api"`) deselects this file, matching test_level3_real_model_
+verification.py's own identical `real_model`-only migration.
 """
 
 import os
@@ -44,6 +51,8 @@ from internet.research_engine import ResearchEngine
 from internet.search_provider_registry import create_search_provider
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+
+pytestmark = [pytest.mark.real_model, pytest.mark.real_search_api]
 
 
 def _model_config() -> ModelConfig:

@@ -385,6 +385,36 @@ def test_stop_removes_the_job_and_no_further_ticks_occur(task_scheduler, monkeyp
     assert tracker._continuous_active_seconds == accumulated_after_stop
 
 
+def test_a_raising_tick_does_not_stop_future_recurrence(task_scheduler, monkeypatch):
+    """Sprint 6.17 (Async Background Task Audit) — one of the 12 jobs
+    not yet individually verified against TaskScheduler's own explicit
+    max_instances=1, mirroring Sprint 6.14's own established shape
+    (proactive/test_proactive_assistant.py's test_a_raising_tick_does_
+    not_stop_future_recurrence). _on_tick() has no try/except of its
+    own around _sample_idle_seconds() (that method's own narrower
+    pywintypes.error degrade is a different, already-covered scenario —
+    see this file's own docstring), so forcing it to raise unconditionally
+    produces a real, genuinely propagating exception."""
+    config = WellnessConfig(idle_check_interval_seconds=0.05)
+    tracker = WellnessTracker(task_scheduler, config)
+    tick_count = 0
+
+    def _raising_sample_idle_seconds():
+        nonlocal tick_count
+        tick_count += 1
+        raise RuntimeError("_sample_idle_seconds() exploded")
+
+    monkeypatch.setattr(tracker, "_sample_idle_seconds", _raising_sample_idle_seconds)
+
+    tracker.start()
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+        assert tracker.health_check() is True
+    finally:
+        tracker.stop()
+
+
 # --- escalation_manager wiring (Sprint 5.19) ------------------------------------------------
 
 

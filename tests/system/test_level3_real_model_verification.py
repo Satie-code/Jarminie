@@ -39,6 +39,15 @@ Model name is read from JARMINEI_TEST_OLLAMA_MODEL, defaulting to
 ModelConfig's own shipped default ("llama3" as of Sprint 3.14 — see
 technical_debt.md item 16) so a machine with a different model pulled
 can still run this file without editing it, just by setting the env var.
+
+Every test in this file also carries the `real_model` marker (registered
+in pyproject.toml — Sprint 6.23), formalizing this file's own already-
+established ad hoc reachability skip so a full-suite run can deselect it
+explicitly (`pytest -m "not real_model"`) the same way `real_search_api`
+already lets test_brave_search_provider.py's own opt-in test be excluded
+— the marker is additive documentation/deselection, not a replacement for
+the real, live reachability check below (a marker alone cannot know
+whether Ollama is actually reachable).
 """
 
 import os
@@ -56,6 +65,8 @@ from memory.chroma_client import ChromaMemoryClient
 from memory.memory_store import MemoryStore
 from memory.models import MemoryRecord, MemoryType
 from voice.context_manager import ConversationContext
+
+pytestmark = pytest.mark.real_model
 
 
 def _model_config() -> ModelConfig:

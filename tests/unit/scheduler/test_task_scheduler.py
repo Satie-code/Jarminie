@@ -10,6 +10,7 @@ never a blind time.sleep()-and-hope.
 
 import threading
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -165,4 +166,106 @@ def test_stop_leaves_no_running_background_thread():
     time.sleep(0.2)
     assert not any(
         t.name.startswith("APScheduler") and t.is_alive() for t in threading.enumerate()
+    )
+
+
+# --- Sprint 6.19 (Resource Protection & Fail-Gracefully Verification):
+# resource_sensitive skip-on-CRITICAL --------------------------------------------------
+
+
+def _resource_monitor(critical: bool) -> MagicMock:
+    monitor = MagicMock()
+    monitor.sample.return_value = "snapshot"
+    monitor.critical_alerts.return_value = ["cpu"] if critical else []
+    return monitor
+
+
+def test_resource_sensitive_job_skips_ticks_while_resource_monitor_reports_critical():
+    resource_monitor = _resource_monitor(critical=True)
+    ts = TaskScheduler(resource_monitor=resource_monitor)
+    ts.start()
+    calls = []
+    try:
+        ts.add_job(
+            lambda: calls.append(1),
+            interval_seconds=0.05,
+            job_id="sensitive",
+            resource_sensitive=True,
+        )
+        time.sleep(0.3)
+    finally:
+        ts.stop()
+
+    assert calls == []
+    assert resource_monitor.sample.call_count >= 1
+
+
+def test_resource_sensitive_job_runs_once_resource_monitor_reports_no_critical_alerts():
+    resource_monitor = _resource_monitor(critical=False)
+    ts = TaskScheduler(resource_monitor=resource_monitor)
+    ts.start()
+    event = threading.Event()
+    try:
+        ts.add_job(
+            event.set, interval_seconds=0.05, job_id="sensitive", resource_sensitive=True
+        )
+        assert event.wait(timeout=_WAIT_TIMEOUT)
+    finally:
+        ts.stop()
+
+
+def test_non_resource_sensitive_job_keeps_running_during_a_critical_reading():
+    """The other real half of Sprint 6.19's own Acceptance Criteria: a
+    job NOT marked resource_sensitive must be completely unaffected by
+    real CRITICAL pressure — matching Part 2's own "reduced," never
+    "stopped," and this sprint's own explicit choice not to gate
+    ReminderEngine's poll/_check_and_announce_priority_item this way."""
+    resource_monitor = _resource_monitor(critical=True)
+    ts = TaskScheduler(resource_monitor=resource_monitor)
+    ts.start()
+    event = threading.Event()
+    try:
+        ts.add_job(event.set, interval_seconds=0.05, job_id="not-sensitive")
+        assert event.wait(timeout=_WAIT_TIMEOUT)
+    finally:
+        ts.stop()
+
+
+def test_resource_sensitive_job_runs_normally_when_no_resource_monitor_supplied():
+    """The default (resource_monitor=None, every existing add_job()
+    call site/test in this file) must keep working completely
+    unchanged — resource_sensitive is purely opt-in per job AND
+    requires a resource_monitor to actually do anything."""
+    ts = TaskScheduler()
+    ts.start()
+    event = threading.Event()
+    try:
+        ts.add_job(event.set, interval_seconds=0.05, job_id="sensitive", resource_sensitive=True)
+        assert event.wait(timeout=_WAIT_TIMEOUT)
+    finally:
+        ts.stop()
+
+
+def test_resource_sensitive_job_logs_once_per_skipped_tick(caplog):
+    resource_monitor = _resource_monitor(critical=True)
+    ts = TaskScheduler(resource_monitor=resource_monitor)
+    ts.start()
+    try:
+        with caplog.at_level("WARNING"):
+            ts.add_job(
+                lambda: None,
+                interval_seconds=0.05,
+                job_id="sensitive",
+                resource_sensitive=True,
+            )
+            deadline = time.monotonic() + _WAIT_TIMEOUT
+            while time.monotonic() < deadline and not any(
+                "sensitive" in record.message for record in caplog.records
+            ):
+                time.sleep(0.01)
+    finally:
+        ts.stop()
+
+    assert any(
+        "Skipping resource-sensitive job" in record.message for record in caplog.records
     )

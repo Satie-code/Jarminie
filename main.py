@@ -52,6 +52,7 @@ from analytics.usage_tracker import UsageTracker
 from config import ConfigLoader
 from config.schema import (
     AppConfig,
+    InternetConfig,
     LearningConfig,
     MemoryConfig,
     RuntimeConfig,
@@ -462,7 +463,7 @@ def main() -> int:
     level4_modules = _construct_level4_modules(
         config, resource_monitor, level3_modules, level2_modules
     )
-    level4b_modules = _construct_level4_part_b_modules(config, level3_modules)
+    level4b_modules = _construct_level4_part_b_modules(config, resource_monitor, level3_modules)
     # Sprint 5.15, scenario (e): a genuine Level 5 Part A construction
     # failure (e.g. an invalid PresentationConfig, though AppConfig.
     # validate() already ran and should have caught most such cases
@@ -550,7 +551,8 @@ def main() -> int:
     pipeline = _construct_pipeline(
         level2_modules, level3_modules, level4_modules, level4b_modules, level5_modules,
         level5b_modules, level6a_modules, config.scheduler, config.memory, config.learning,
-        config.wellness, core_manager.runtime_manager(), resource_monitor, config.runtime,
+        config.wellness, config.internet, core_manager.runtime_manager(), resource_monitor,
+        config.runtime,
     )
     # Sprint 6.13's own identical circular-construction resolution,
     # immediately above's persona_switch_relay precedent: ExplainabilityLayer
@@ -686,9 +688,22 @@ def _construct_level3_modules(
     — Level 5's EmotionalMemory and Level 5B's PreferenceLearner) is wired
     with a LazyMemoryStore proxy instead of the real MemoryStore.
     memory_lifecycle_manager is the one deliberate exception, wired with
-    real_memory_store directly — see LazyMemoryStore's own docstring
-    (memory/memory_store.py) for why threading the proxy through it too
-    would be pure duplication, not a correctness need."""
+    real_memory_store directly (health_check() below needs the real,
+    non-Protocol .health_check() method LazyMemoryStore doesn't expose)
+    — but ALSO receives runtime_manager directly (Sprint 6.19 — Resource
+    Protection & Fail-Gracefully Verification; backlog/technical_debt.md
+    item 53), which its own run_cleanup_pass()/run_monthly_review()/
+    apply_user_override() each call ensure_started() through before
+    touching memory_store. This corrects this docstring's own prior
+    claim (Runtime Phase 6-era) that skipping the proxy here was "not a
+    correctness need" — true only for the one-time start()-time call
+    Runtime Phase 6 itself covered; Runtime Phase 9's later resource-
+    pressure eviction (added after this reasoning was first written)
+    could stop memory_store mid-run regardless, which every one of this
+    class's own LATER calls (two real recurring TaskScheduler jobs, one
+    live per-turn call) needed a real fix for, not just a proxy — see
+    memory/lifecycle_manager.py's own MemoryLifecycleManager docstring
+    for the full account."""
     database_config = config.database
     memory_config = config.memory
     model_config = config.models
@@ -704,7 +719,7 @@ def _construct_level3_modules(
     short_term_memory = ShortTermMemory(memory_store, memory_config)
     confidence_scorer = ConfidenceScorer(memory_config)
     memory_lifecycle_manager = MemoryLifecycleManager(
-        real_memory_store, confidence_scorer, memory_config
+        real_memory_store, confidence_scorer, memory_config, runtime_manager=runtime_manager
     )
     memory_retrieval_engine = MemoryRetrievalEngine(
         persona_scoped_memory, event_memory, short_term_memory, confidence_scorer, memory_config
@@ -827,13 +842,21 @@ def _construct_level4_modules(
 
 
 def _construct_level4_part_b_modules(
-    config: AppConfig, level3_modules: _Level3Modules
+    config: AppConfig, resource_monitor: ResourceMonitor, level3_modules: _Level3Modules
 ) -> _Level4PartBModules:
     """Construct every Level 4 Part B (Scheduler & Internet Agent)
     subsystem via DI — construction only, no CoreManager registration
     (see _register_level4_part_b_early() below). Needs level3_modules
     (ReminderEngine depends on priority_queue_manager) already
     constructed.
+
+    resource_monitor (Sprint 6.19 — Resource Protection & Fail-
+    Gracefully Verification) is threaded straight into TaskScheduler's
+    own construction below, the one real place this function's own
+    task_scheduler local becomes resource-aware — every one of its
+    Sprint 6.17-inventoried jobs marked resource_sensitive=True degrades
+    for real from here on, not merely at the (already-optional,
+    degrades-to-off) TaskScheduler.__init__() signature level.
 
     Summarizer gets its OWN, separately-constructed OllamaClient rather
     than reusing Level 3's — internet_config.summarization_model exists
@@ -849,7 +872,7 @@ def _construct_level4_part_b_modules(
     model_config = config.models
     database_config = config.database
 
-    task_scheduler = TaskScheduler()
+    task_scheduler = TaskScheduler(resource_monitor=resource_monitor)
 
     calendar_sqlite_client = SqliteClient(database_config.sqlite_path)
     calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
@@ -1328,6 +1351,7 @@ def _construct_pipeline(
     memory_config: MemoryConfig,
     learning_config: LearningConfig,
     wellness_config: WellnessConfig,
+    internet_config: InternetConfig,
     runtime_manager: RuntimeManager,
     resource_monitor: ResourceMonitor,
     runtime_config: RuntimeConfig,
@@ -1335,11 +1359,11 @@ def _construct_pipeline(
     """Built last, once every level's prerequisite objects exist —
     CommunicationPipeline is the one object that needs Level 2, 3, 4, 4B,
     5, 5B, AND 6 Part A collaborators at once. scheduler_config/
-    memory_config/learning_config/wellness_config are passed separately
-    (rather than threaded through a *Modules bundle) since they're plain
-    config slices, not constructed objects, matching how every other
-    *_config value already reaches this function's own callers directly
-    from AppConfig.
+    memory_config/learning_config/wellness_config/internet_config are
+    passed separately (rather than threaded through a *Modules bundle)
+    since they're plain config slices, not constructed objects, matching
+    how every other *_config value already reaches this function's own
+    callers directly from AppConfig.
 
     Runtime Phase 9 (Runtime Refactor Sprint): runtime_manager is the
     SAME instance core_manager.runtime_manager() already exposes (the
@@ -1376,6 +1400,7 @@ def _construct_pipeline(
         research_engine=level4b_modules.research_engine,
         source_validator=level4b_modules.source_validator,
         summarizer=level4b_modules.summarizer,
+        internet_config=internet_config,
         action_audit_log=level4_modules.action_audit_log,
         scheduler_config=scheduler_config,
         memory_config=memory_config,
@@ -1395,6 +1420,7 @@ def _construct_pipeline(
         adaptive_wellness_adjuster=level5b_modules.adaptive_wellness_adjuster,
         dashboard_service=level5b_modules.dashboard_service,
         usage_tracker=level5b_modules.usage_tracker,
+        usage_store=level5b_modules.usage_store,
         pattern_recognizer=level5b_modules.pattern_recognizer,
         recommendation_engine=level5b_modules.recommendation_engine,
         learning_config=learning_config,
@@ -1403,6 +1429,7 @@ def _construct_pipeline(
         resource_monitor=resource_monitor,
         runtime_config=runtime_config,
         task_graph_store=level6a_modules.task_graph_store,
+        knowledge_graph_store=level6a_modules.knowledge_graph_store,
         planning_engine=level6a_modules.planning_engine,
         context_engine=level6a_modules.context_engine,
         explainability_layer=level6a_modules.explainability_layer,

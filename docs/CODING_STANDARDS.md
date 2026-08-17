@@ -45,6 +45,8 @@ A module is only "Complete" when all of the following hold:
 
 ## Git workflow
 
+**Real practice diverges from the below — see [03_Engineering_Standards.md](03_Engineering_Standards.md)'s own Git Workflow section and `backlog/technical_debt.md` item 62 for the full disclosure.** In practice: every sprint is committed directly to `main` (no feature branches have ever existed in this repository); `05_Claude_Development_Guide.md`'s own Step 9 self-review substitutes for branch-based code review; commit prefixes below are followed inconsistently (many real commits use a plain, descriptive message instead).
+
 - One branch per feature.
 - Merge only after review + tests + docs.
 - Commit prefixes: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:` — e.g. `feat(memory): implement dynamic confidence scoring`.

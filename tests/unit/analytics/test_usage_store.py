@@ -187,3 +187,62 @@ def test_health_check_false_before_start(tmp_path):
 
 def test_health_check_true_after_start(store):
     assert store.health_check() is True
+
+
+# --- purge_older_than() (Sprint 6.21 — Privacy Verification) ----------------------------------
+
+
+def test_purge_older_than_removes_old_samples_and_keeps_recent_ones(store):
+    now = datetime.now(UTC)
+    store.record_sample(make_sample("old", sampled_at=now - timedelta(days=10)))
+    store.record_sample(make_sample("new", sampled_at=now - timedelta(hours=1)))
+
+    removed = store.purge_older_than(days=5)
+
+    assert removed == 1
+    remaining = store.list_samples_since(now - timedelta(days=365))
+    assert [s.sample_id for s in remaining] == ["new"]
+
+
+def test_purge_older_than_defaults_to_the_configured_retention_days(tmp_path):
+    config = AnalyticsConfig(sample_retention_days=1)
+    usage_store = UsageStore(SqliteClient(str(tmp_path / "purge.db")), config)
+    usage_store.start()
+    try:
+        usage_store.record_sample(make_sample(sampled_at=datetime(2020, 1, 1, tzinfo=UTC)))
+
+        removed = usage_store.purge_older_than()  # no explicit days
+
+        assert removed == 1
+    finally:
+        usage_store.stop()
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern (tests/unit/scheduler/test_calendar_store.py et al.)
+    — a real SqliteClient whose query() can be switched to fail on
+    demand, after start() has already succeeded."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_purge_older_than_degrades_to_zero_on_a_sqlite_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    usage_store = UsageStore(client, AnalyticsConfig())
+    usage_store.start()
+    try:
+        usage_store.record_sample(make_sample())
+        client.raise_on_query = True
+
+        assert usage_store.purge_older_than(days=1) == 0
+    finally:
+        client.raise_on_query = False
+        usage_store.stop()

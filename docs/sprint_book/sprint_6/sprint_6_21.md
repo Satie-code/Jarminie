@@ -89,18 +89,18 @@ Both new purge methods and their own scheduled jobs are additive, optional-by-de
 
 ## Testing Checklist
 
-- [ ] `KnowledgeGraphStore.purge_older_than()` — real SQLite round-trip.
-- [ ] `UsageStore.purge_older_than()` — real SQLite round-trip.
-- [ ] Both jobs genuinely recur via `TaskScheduler` (real, not mocked).
-- [ ] `InternetConfig.enabled=False` blocks the real outbound call path.
-- [ ] Egress-boundary regression test, all three search providers.
-- [ ] Full project suite re-run.
+- [x] `KnowledgeGraphStore.purge_older_than()` — real SQLite round-trip.
+- [x] `UsageStore.purge_older_than()` — real SQLite round-trip.
+- [x] Both jobs genuinely recur via `TaskScheduler` (real, not mocked) — confirmed at the unit level (job registration, interval, resource_sensitive) and by real end-to-end construction in `tests/integration/conftest.py`/`tests/system/conftest.py`.
+- [x] `InternetConfig.enabled=False` blocks the real outbound call path.
+- [x] Egress-boundary regression test — real `SearchProvider`/`Summarizer` pair, proving `DecisionTrace`'s own carried memory/entity content never reaches the search boundary; each of the three real providers' own individual request-shape correctness was already independently covered pre-sprint (`test_search_sends_the_correct_request_shape` in each provider's own test file).
+- [x] Full project suite re-run.
 
 ## Documentation Checklist
 
-- [ ] `docs/STATUS.md` — narrative describing both new purge mechanisms, the `internet.enabled` flag, and the egress-boundary finding.
-- [ ] `docs/sprint_book/INDEX.md` — 6.21 row → `Complete` (once implemented).
-- [ ] `docs/backlog/technical_debt.md` — item 31 resolved; new data-export/deletion item logged.
+- [x] `docs/STATUS.md` — narrative describing both new purge mechanisms, the `internet.enabled` flag, and the egress-boundary finding.
+- [x] `docs/sprint_book/INDEX.md` — 6.21 row → `Complete` (once implemented).
+- [x] `docs/backlog/technical_debt.md` — item 31's own `internet.enabled` recommendation marked resolved (its separate real-API-verification gap remains explicitly open); new item 59 logs the data-export/deletion gap.
 
 ## Definition of Done
 
@@ -125,3 +125,17 @@ See Potential Risks above.
 ## Future Considerations
 
 - A real "what do you know about me" / data-export / data-deletion voice or UI surface — genuinely new conversational/UI capability this sprint deliberately doesn't build, per its own audit-and-harden scope; a strong candidate for a small, dedicated future sprint once prioritized.
+
+## Sprint Completion Report (2026-08-16)
+
+Implemented as specified, continued from a prior session's own "continue with sprint 6.21." No new `AskUserQuestion` gate was needed — every Objective was a direct, literal instruction.
+
+**Objectives 1/2/3 (Implementation Tasks 1-4) — implemented exactly as specified.** `knowledge/knowledge_graph_store.py`'s `KnowledgeGraphStore.purge_older_than(days: int | None = None) -> int` and `analytics/usage_store.py`'s `UsageStore.purge_older_than(days: int | None = None) -> int` both mirror `ConversationSessionStore.purge_older_than()`'s exact established shape (a days-based default from the store's own config, cutoff computed internally, degrade-to-0-on-SQLite-failure) — a deliberate, disclosed correction from this sprint's own literal Expected Functions text (`purge_older_than(cutoff: datetime)`), chosen because a real `TaskScheduler.add_job()` requires a genuinely zero-arg callable (`Callable[[], None]`), the same constraint `conversation_store_purge`/`action_audit_log_purge` already satisfy via the identical days-default pattern. `KnowledgeGraphStore`'s own version is staleness-based (`last_referenced_at`, not `created_at`) exactly as the Objectives require; new `KnowledgeGraphConfig.retention_days` (365) / `AnalyticsConfig.sample_retention_days` (90), both validated positive. Both registered as new `resource_sensitive=True` `TaskScheduler` jobs in `voice/pipeline.py`'s `start()`/`stop()`, each None-guarded (Level 6 Part A / Level 5 Part B collaborators respectively) — `CommunicationPipeline` gained three new constructor parameters (`knowledge_graph_store`, `usage_store`, `internet_config`), threaded through `main.py`'s `_construct_pipeline()` and both `tests/integration/conftest.py`'s/`tests/system/conftest.py`'s own real-construction harnesses (not mocked at that layer — both already held local `knowledge_graph_store`/`usage_store`/`internet_config` variables for other collaborators' own construction, so no new fixture setup was needed, only new keyword arguments at the existing `CommunicationPipeline(...)` call sites).
+
+**Objective 4 (Implementation Task 5) — implemented.** New `InternetConfig.enabled: bool = True`; `_handle_internet_agent_turn()` checks it first, before `ResearchEngine.research()` is ever reached, degrading to "Internet research is currently turned off." — closing `backlog/technical_debt.md` item 31's own long-open recommendation. A deliberate, disclosed partial resolution, not a blanket "item 31 closed" claim: that item also tracks a separate, still-open real-API-verification gap (the opt-in `real_search_api`-marked test has never run against a live key), explicitly left open in the same backlog entry.
+
+**Implementation Task 6 (egress-boundary regression test) — implemented as a pipeline-level test, not a per-provider one.** Each of the three real `SearchProvider` implementations already had its own pre-existing `test_search_sends_the_correct_request_shape`-style test (proving *that provider* forwards whatever query string it's given correctly and nothing else) — re-confirmed still passing, satisfying this sprint's own Potential Risk #2 ("each provider's own request-building code is checked individually"). The genuinely new, more valuable guard this sprint adds sits one layer up: `test_internet_agent_egress_boundary_never_leaks_memory_or_entity_content` (`tests/unit/voice/test_pipeline.py`) proves the *pipeline itself* never lets memory/entity content reach the query in the first place — `DecisionTrace` (the object `_handle_internet_agent_turn()` receives) carries real `retrieved_memories`/`mentioned_entities` content on the SAME object the method reads `context_analysis.primary_topic`/`intent.raw_transcript` from; a real, non-mocked `_CapturingSearchProvider`/`_CapturingSummarizer` pair (wired through a real `ResearchEngine`, not a `MagicMock`) proves only the topic string ever arrives, with explicit assertions that two distinctive "secret" marker strings (standing in for memory/entity content) never appear in what was captured.
+
+**A real, disclosed judgment call on backlog item 31.** Rather than mechanically flipping the whole row to "(resolved)" per this sprint's own literal Acceptance Criteria wording, only the specific `internet.enabled` recommendation within that item's own text is marked resolved — the item's own separate, still-genuinely-open real-API-verification gap is called out explicitly as NOT resolved by this sprint, matching this project's own established "no dishonest resolved-marking" discipline (e.g. item 57's own "encrypt secrets only" scoping at Sprint 6.20).
+
+**Full regression suite.** `tests/unit/`: 2298 passed, 1 skipped (17 new tests across `test_knowledge_graph_store.py`, `test_usage_store.py`, `test_schema.py`, `test_pipeline.py` — zero regressions from the 2281+1 baseline). `tests/integration/`: 75 passed on a clean re-run; one earlier combined run saw `test_reminder_becoming_due_during_session_end_never_corrupts_state` fail once, individually and full-file re-confirmed passing (a resource-contention flake this specific test file's own docstring already discloses as an accepted characteristic of its 0.3s-interval harness, not a regression — this sprint's own two new jobs add a small amount of scheduling contention to that already-contention-tolerant harness, not a new failure mode). `tests/system/`: 33 passed, 4 skipped, 1 failed on the combined run (`test_full_level3_acceptance_scripted_conversation`) — the same test already known flaky under full-suite host contention (confirmed at Sprint 6.20), re-confirmed passing standalone here too. Zero real regressions. `ruff check .` clean repo-wide. No git commit made — sits uncommitted alongside all of 6.1-6.20's own backlog.

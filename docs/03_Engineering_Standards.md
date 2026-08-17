@@ -156,15 +156,15 @@ Long-term knowledge.
 
 ## Cache Layer
 
-JSON
+Not JSON-file-based caching, as originally planned here — evaluated and deliberately not built this way (Sprint 6.16's own dedicated investigation found no genuine duplicate-recompute pattern anywhere in the real call paths; see `backlog/technical_debt.md` item 61).
 
-Purpose:
+What actually serves this purpose:
 
-Fast local caching.
+`core/runtime_manager.py`'s `RuntimeManager` — lazy-loaded, tiered service construction and eviction, not a persistence-based cache.
 
-Temporary configuration.
+A deliberate "recompute fresh, never cache" discipline for working-context data instead (`context/context_model.py`, `voice/context_manager.py`, each module's own docstring).
 
-Session state.
+`config/` (Sprint 1.2) already covers configuration persistence; no separate JSON cache file was ever needed for it.
 
 ---
 
@@ -184,7 +184,7 @@ Periodic maintenance.
 
 ## Automation
 
-PyAutoGUI
+`pywin32`, not PyAutoGUI — corrected per Level 4's own real implementation (`device_control/application_manager.py`, `device_control/window_manager.py`). `pyautogui` remains declared in `requirements.txt` but was never installed and has zero imports anywhere in the codebase; see `backlog/technical_debt.md` item 61.
 
 Purpose:
 
@@ -244,8 +244,6 @@ memory/
 
 decision/
 
-authority/
-
 scheduler/
 
 workflow/
@@ -277,6 +275,20 @@ docs/
 assets/
 
 scripts/
+
+context/
+
+emotion/
+
+knowledge/
+
+planning/
+
+presentation/
+
+proactive/
+
+reasoning/
 
 Each directory should own one subsystem.
 
@@ -530,15 +542,7 @@ Documentation should evolve alongside implementation.
 
 # Git Workflow
 
-Every feature should have its own branch.
-
-Merge only after:
-
-Code review.
-
-Testing.
-
-Documentation.
+**Real practice diverges from this section's original plan — corrected here, not merely flagged, per Sprint 6.22's own "Update" instruction; see `backlog/technical_debt.md` item 62.** All ~130 sprints across Levels 1–6 Part A have been committed directly to `main`; no feature branches have ever existed in this repository. `05_Claude_Development_Guide.md`'s own Step 9 (self-review before a sprint is considered done) substitutes for a branch-based code-review step. Testing and Documentation remain required before a sprint is considered done regardless (see Definition of Done, above).
 
 Suggested Commit Style:
 
@@ -553,6 +557,8 @@ docs:
 test:
 
 chore:
+
+Applied inconsistently in practice — many real commits use a plain, descriptive message instead (e.g. "Add unit tests for X," "Implement Y"); both forms genuinely coexist in this repository's own history, confirmed via `git log`.
 
 Example:
 

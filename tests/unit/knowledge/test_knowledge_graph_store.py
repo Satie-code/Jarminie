@@ -1,6 +1,6 @@
 """Unit tests for knowledge.knowledge_graph_store."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -403,4 +403,83 @@ def test_related_entities_degrades_to_empty_list_on_a_sqlite_read_failure(tmp_pa
         assert knowledge_graph_store.related_entities("a") == []
     finally:
         client.raise_on_query = False
+
+
+# --- purge_older_than() (Sprint 6.21 — Privacy Verification) ----------------------------------
+
+
+def test_purge_older_than_removes_stale_entities_and_keeps_recent_ones(tmp_path):
+    client = SqliteClient(str(tmp_path / "purge.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        now = datetime.now(UTC)
+        stale = make_entity("stale", last_referenced_at=now - timedelta(days=10))
+        recent = make_entity("recent", last_referenced_at=now - timedelta(hours=1))
+        knowledge_graph_store.save_entity(stale)
+        knowledge_graph_store.save_entity(recent)
+
+        removed = knowledge_graph_store.purge_older_than(days=5)
+
+        assert removed == 1
+        assert knowledge_graph_store.get_entity("stale") is None
+        assert knowledge_graph_store.get_entity("recent") is not None
+    finally:
+        knowledge_graph_store.stop()
+
+
+def test_purge_older_than_is_staleness_based_not_creation_age_based(tmp_path):
+    """A real, disclosed design difference from ConversationSessionStore's
+    own creation-age-based purge (this module's own docstring): an
+    entity created long ago but referenced recently must survive."""
+    client = SqliteClient(str(tmp_path / "purge.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        now = datetime.now(UTC)
+        old_but_recently_referenced = make_entity(
+            "old-project",
+            created_at=now - timedelta(days=200),
+            last_referenced_at=now - timedelta(hours=1),
+        )
+        knowledge_graph_store.save_entity(old_but_recently_referenced)
+
+        removed = knowledge_graph_store.purge_older_than(days=5)
+
+        assert removed == 0
+        assert knowledge_graph_store.get_entity("old-project") is not None
+    finally:
+        knowledge_graph_store.stop()
+
+
+def test_purge_older_than_defaults_to_the_configured_retention_days(tmp_path):
+    client = SqliteClient(str(tmp_path / "purge.db"))
+    config = KnowledgeGraphConfig(retention_days=1)
+    knowledge_graph_store = KnowledgeGraphStore(client, config)
+    knowledge_graph_store.start()
+    try:
+        very_stale = make_entity(
+            "very-stale", last_referenced_at=datetime(2020, 1, 1, tzinfo=UTC)
+        )
+        knowledge_graph_store.save_entity(very_stale)
+
+        removed = knowledge_graph_store.purge_older_than()  # no explicit days
+
+        assert removed == 1
+    finally:
+        knowledge_graph_store.stop()
+
+
+def test_purge_older_than_degrades_to_zero_on_a_sqlite_failure(tmp_path):
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    knowledge_graph_store = KnowledgeGraphStore(client, KnowledgeGraphConfig())
+    knowledge_graph_store.start()
+    try:
+        knowledge_graph_store.save_entity(make_entity("a", last_referenced_at=_NOW))
+        client.raise_on_query = True
+
+        assert knowledge_graph_store.purge_older_than(days=1) == 0
+    finally:
+        client.raise_on_query = False
+        knowledge_graph_store.stop()
         knowledge_graph_store.stop()

@@ -119,8 +119,19 @@ class WellnessTracker:
         self._win32_failure_active = False
 
     def start(self) -> None:
+        # resource_sensitive=True (Sprint 6.19 — Resource Protection &
+        # Fail-Gracefully Verification): this tick only updates internal
+        # accumulator/counter state (see _on_tick()'s own body) — the
+        # separate, real user-facing wellness_prompt_enqueue job
+        # (voice/pipeline.py's _maybe_enqueue_wellness_prompt) is
+        # deliberately NOT resource_sensitive. Skipping one idle-check
+        # tick just delays this class's own internal bookkeeping by one
+        # cycle, caught up on the next non-skipped tick — no real cost.
         self._task_scheduler.add_job(
-            self._on_tick, self._config.idle_check_interval_seconds, _JOB_ID
+            self._on_tick,
+            self._config.idle_check_interval_seconds,
+            _JOB_ID,
+            resource_sensitive=True,
         )
         self._started = True
         logger.info(

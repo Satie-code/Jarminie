@@ -260,8 +260,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from analytics.dashboard_data import AnalyticsDashboardService
+from analytics.usage_store import UsageStore
 from analytics.usage_tracker import UsageTracker
 from config.schema import (
+    InternetConfig,
     LearningConfig,
     MemoryConfig,
     RuntimeConfig,
@@ -293,10 +295,12 @@ from emotion.state_manager import EmotionalStateManager
 from internet.research_engine import ResearchEngine
 from internet.source_validator import SourceValidator
 from internet.summarizer import Summarizer
+from knowledge.knowledge_graph_store import KnowledgeGraphStore
 from learning.pattern_recognizer import PatternRecognizer
 from learning.recommendation import RecommendationEngine
 from memory.confidence_scorer import ConfidenceScorer
 from memory.emotional_memory import EmotionalMemory, _score_significance
+from memory.errors import MemoryStoreError
 from memory.lifecycle_manager import MemoryLifecycleManager
 from memory.models import MemoryType
 from memory.retrieval_engine import MemoryRetrievalEngine
@@ -413,6 +417,17 @@ _RUNTIME_HOUSEKEEPING_JOB_ID = "runtime_housekeeping"
 caller of RuntimeManager.sweep_idle_services()/evict_least_recently_used(),
 unconditional (unlike the Level 5 Part B jobs above, none of this job's
 own collaborators are ever None)."""
+_KNOWLEDGE_GRAPH_PURGE_JOB_ID = "knowledge_graph_purge"
+_USAGE_STORE_PURGE_JOB_ID = "usage_store_purge"
+"""Sprint 6.21 (Privacy Verification) — the fourth and fifth real
+instance of backlog/technical_debt.md items 11/15/24's own established
+"add the caller, register the job" resolution pattern, closing the same
+gap for KnowledgeGraphStore/UsageStore that ConversationSessionStore/
+ActionAuditLog/MemoryStore already had closed. Both None-guarded in
+start() (Level 6 Part A/Level 5 Part B collaborators, either can be
+None) and resource_sensitive=True (neither has real user-facing
+lateness cost, the same classification Sprint 6.19 already gave the
+maintenance passes/pattern detection/recommendation generation jobs)."""
 
 
 def _is_acceptance_phrase(transcript: str) -> bool:
@@ -565,6 +580,7 @@ class CommunicationPipeline:
         research_engine: ResearchEngine,
         source_validator: SourceValidator,
         summarizer: Summarizer,
+        internet_config: InternetConfig,
         action_audit_log: ActionAuditLog,
         scheduler_config: SchedulerConfig,
         memory_config: MemoryConfig,
@@ -584,6 +600,7 @@ class CommunicationPipeline:
         adaptive_wellness_adjuster: AdaptiveWellnessAdjuster | None,
         dashboard_service: AnalyticsDashboardService | None,
         usage_tracker: UsageTracker | None,
+        usage_store: UsageStore | None,
         pattern_recognizer: PatternRecognizer | None,
         recommendation_engine: RecommendationEngine | None,
         learning_config: LearningConfig,
@@ -592,6 +609,7 @@ class CommunicationPipeline:
         resource_monitor: ResourceMonitor,
         runtime_config: RuntimeConfig,
         task_graph_store: TaskGraphStore | None,
+        knowledge_graph_store: KnowledgeGraphStore | None,
         planning_engine: PlanningEngine | None,
         context_engine: ContextEngine | None,
         explainability_layer: ExplainabilityLayer | None,
@@ -625,6 +643,7 @@ class CommunicationPipeline:
         self._research_engine = research_engine
         self._source_validator = source_validator
         self._summarizer = summarizer
+        self._internet_config = internet_config
         self._action_audit_log = action_audit_log
         self._scheduler_config = scheduler_config
         self._turn_complete_relay = turn_complete_relay
@@ -653,12 +672,18 @@ class CommunicationPipeline:
         # wraps usage_store directly) — accepted and stored anyway per
         # this sprint's own explicit constructor-DI-growth list, the same
         # "kept for symmetry/future use" precedent action_recovery_manager
-        # already established (_Level4Modules' own docstring).
+        # already established (_Level4Modules' own docstring). usage_store
+        # itself, unlike usage_tracker, DOES gain a real, direct call site
+        # as of Sprint 6.21 (Privacy Verification) — its own new
+        # purge_older_than() TaskScheduler job, registered in start()
+        # below, the identical treatment action_audit_log/conversation_store
+        # already receive.
         self._wellness_tracker = wellness_tracker
         self._wellness_escalation_manager = wellness_escalation_manager
         self._adaptive_wellness_adjuster = adaptive_wellness_adjuster
         self._dashboard_service = dashboard_service
         self._usage_tracker = usage_tracker
+        self._usage_store = usage_store
         self._pattern_recognizer = pattern_recognizer
         self._recommendation_engine = recommendation_engine
         self._learning_config = learning_config
@@ -673,14 +698,20 @@ class CommunicationPipeline:
         self._resource_monitor = resource_monitor
         self._runtime_config = runtime_config
         # Sprint 6.13 — Level 6 Part A (Autonomous Intelligence)
-        # Integration. All eight are optional, matching main.py's own
+        # Integration. All are optional, matching main.py's own
         # _null_level6_part_a_modules() fallback — a genuine Level 6
         # Part A construction failure passes literal None for each, the
         # same simpler-than-Part-A-presentation fallback shape Level 5
         # Part B's own six collaborators already established (Sprint
-        # 5.24), since none of these eight are called unconditionally on
-        # every single turn either.
+        # 5.24), since none of these are called unconditionally on every
+        # single turn either. knowledge_graph_store joins the other eight
+        # here as of Sprint 6.21 (Privacy Verification), for its own new
+        # purge_older_than() TaskScheduler job below — Sprint 6.13 itself
+        # never threaded it into this constructor since this class had no
+        # direct call site for it until now (SessionResumption/
+        # ProactiveAssistant hold their own separate references).
         self._task_graph_store = task_graph_store
+        self._knowledge_graph_store = knowledge_graph_store
         self._planning_engine = planning_engine
         self._context_engine = context_engine
         self._explainability_layer = explainability_layer
@@ -791,15 +822,30 @@ class CommunicationPipeline:
         self._wired = True
 
         self._reminder_engine.register()
+        # resource_sensitive=True below (Sprint 6.19 — Resource
+        # Protection & Fail-Gracefully Verification) is deliberately
+        # NOT applied to every job in this method — only the genuinely
+        # deferrable ones this sprint's own Objectives name explicitly
+        # (memory lifecycle passes, pattern detection, recommendation
+        # generation; usage sampling and the wellness idle-check are
+        # marked at their own owning class instead). Never applied to
+        # conversation_store_purge/action_audit_log_purge (not named),
+        # _check_and_announce_priority_item or wellness_prompt_enqueue
+        # (real user-facing announcement lateness cost), or
+        # runtime_housekeeping (below — it IS the resource-pressure
+        # relief mechanism; gating it on the same pressure it exists to
+        # relieve would be self-defeating).
         self._task_scheduler.add_job(
             self._memory_lifecycle_manager.run_cleanup_pass,
             self._scheduler_config.maintenance_interval_seconds,
             job_id=_MAINTENANCE_JOB_IDS[0],
+            resource_sensitive=True,
         )
         self._task_scheduler.add_job(
             self._memory_lifecycle_manager.run_monthly_review,
             self._scheduler_config.maintenance_interval_seconds,
             job_id=_MAINTENANCE_JOB_IDS[1],
+            resource_sensitive=True,
         )
         self._task_scheduler.add_job(
             self._conversation_store.purge_older_than,
@@ -827,18 +873,38 @@ class CommunicationPipeline:
                 self._pattern_recognizer.run_detection_pass,
                 self._learning_config.pattern_detection_interval_seconds,
                 job_id=_PATTERN_DETECTION_JOB_ID,
+                resource_sensitive=True,
             )
         if self._recommendation_engine is not None:
             self._task_scheduler.add_job(
                 self._generate_and_enqueue_recommendations,
                 self._learning_config.recommendation_generation_interval_seconds,
                 job_id=_RECOMMENDATION_GENERATION_JOB_ID,
+                resource_sensitive=True,
             )
         self._task_scheduler.add_job(
             self._run_runtime_housekeeping,
             self._runtime_config.housekeeping_interval_seconds,
             job_id=_RUNTIME_HOUSEKEEPING_JOB_ID,
         )
+        # Sprint 6.21 — Privacy Verification. Zero-arg-callable via each
+        # store's own configured-retention default, the identical shape
+        # conversation_store_purge/action_audit_log_purge already
+        # established above.
+        if self._knowledge_graph_store is not None:
+            self._task_scheduler.add_job(
+                self._knowledge_graph_store.purge_older_than,
+                self._scheduler_config.maintenance_interval_seconds,
+                job_id=_KNOWLEDGE_GRAPH_PURGE_JOB_ID,
+                resource_sensitive=True,
+            )
+        if self._usage_store is not None:
+            self._task_scheduler.add_job(
+                self._usage_store.purge_older_than,
+                self._scheduler_config.maintenance_interval_seconds,
+                job_id=_USAGE_STORE_PURGE_JOB_ID,
+                resource_sensitive=True,
+            )
         logger.info("Communication Pipeline wiring connected.")
 
     def stop(self) -> None:
@@ -858,6 +924,8 @@ class CommunicationPipeline:
         self._task_scheduler.remove_job(_PATTERN_DETECTION_JOB_ID)
         self._task_scheduler.remove_job(_RECOMMENDATION_GENERATION_JOB_ID)
         self._task_scheduler.remove_job(_RUNTIME_HOUSEKEEPING_JOB_ID)
+        self._task_scheduler.remove_job(_KNOWLEDGE_GRAPH_PURGE_JOB_ID)
+        self._task_scheduler.remove_job(_USAGE_STORE_PURGE_JOB_ID)
         for job_id in _MAINTENANCE_JOB_IDS:
             self._task_scheduler.remove_job(job_id)
         self._reminder_engine.unregister()
@@ -1054,7 +1122,29 @@ class CommunicationPipeline:
             )
             self._conversation_store.record_turn(turn)
 
-            promoted_record_id = self._short_term_memory.promote_from_turn(turn)
+            # Sprint 6.18 (Stress & Recovery Testing) hardening: caught
+            # locally, not left to the broad except below, matching
+            # self._conversation_store.record_turn()'s own established
+            # "a best-effort side write must never break the user's
+            # already-composed reply" degrade immediately above.
+            # MemoryStore.store() deliberately raises MemoryStoreError
+            # rather than swallowing it (memory/memory_store.py's own
+            # docstring) so a caller with a real opinion can decide how
+            # to degrade — unlike _accept_pending_goal()'s own
+            # MemoryStoreError-shaped handling (where the write IS the
+            # user's actual request, so an honest spoken failure is
+            # correct), this memory promotion is invisible background
+            # bookkeeping the user never asked for; found directly via
+            # tests/system/test_level6_part_b_stress.py's own recovery
+            # scenario (b), where a real, external SQLite lock on
+            # promote_from_turn()'s own write was silently escalating
+            # into ending the whole session and discarding an already-
+            # composed reply that had nothing to do with memory storage.
+            try:
+                promoted_record_id = self._short_term_memory.promote_from_turn(turn)
+            except MemoryStoreError:
+                logger.exception("Failed to promote turn to short-term memory; continuing.")
+                promoted_record_id = None
             if promoted_record_id is not None and self._confidence_scorer.detect_override_phrase(
                 transcript
             ):
@@ -1169,10 +1259,22 @@ class CommunicationPipeline:
         if self._adaptive_workspace_controller.should_switch(
             self._current_workspace_profile, candidate, self._workspace_consecutive_match_count
         ):
-            self._jarvis_renderer.apply_workspace_profile(candidate)
+            # Sprint 6.19 hardening (backlog item 39): bookkeeping reset
+            # BEFORE apply_workspace_profile(), not after — a synchronous
+            # raise from the renderer call is already caught one level up
+            # by _run_presentation_pipeline()'s own caller (never aborts
+            # the turn), but the old ordering left this reset unreached on
+            # that path, so _pending_workspace_candidate/_workspace_
+            # consecutive_match_count stayed stale (pointing at the
+            # candidate that just failed) and _current_workspace_profile
+            # never advanced to reflect the attempted switch — a future
+            # turn's own `candidate == self._current_workspace_profile`
+            # check above would then keep comparing against a profile this
+            # class itself no longer believes is accurate.
             self._current_workspace_profile = candidate
             self._pending_workspace_candidate = None
             self._workspace_consecutive_match_count = 0
+            self._jarvis_renderer.apply_workspace_profile(candidate)
 
     def _maybe_prepare_companion_moment(
         self, context: ConversationContext, session_id: str
@@ -1414,7 +1516,16 @@ class CommunicationPipeline:
         method short-circuits on that empty result rather than still
         calling Summarizer — asking an LLM to "summarize" zero real
         search results risks a worse, entirely ungrounded hallucination
-        than the honest "couldn't find anything" this returns instead."""
+        than the honest "couldn't find anything" this returns instead.
+
+        Sprint 6.21 (Privacy Verification): checked first, before
+        ResearchEngine.research() is ever reached — InternetConfig.enabled
+        = False (a real, user-facing opt-out, closing backlog/
+        technical_debt.md item 31's own long-open recommendation) means no
+        outbound network call happens at all for this turn, not merely
+        that the reply changes while a request still goes out."""
+        if not self._internet_config.enabled:
+            return "Internet research is currently turned off."
         query = trace.context_analysis.primary_topic.strip() or trace.intent.raw_transcript.strip()
         results = self._research_engine.research(query)
         if not results:

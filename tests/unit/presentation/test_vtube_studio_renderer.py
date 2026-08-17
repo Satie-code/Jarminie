@@ -27,6 +27,7 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -34,6 +35,33 @@ import pytest
 from config.schema import PresentationConfig
 from presentation.presentation_state import PresentationState
 from presentation.vtube_studio_renderer import VTubeStudioAvatarRenderer
+
+
+class _FakeSecretStore:
+    """In-memory stand-in for security.secret_store.SecretStore — this
+    file's own established "patch the boundary" precedent (see the
+    `connect` patching throughout below), applied to Sprint 6.20's
+    SecretStore collaborator so no test here ever touches the real OS
+    credential store."""
+
+    def __init__(self) -> None:
+        self._values: dict[str, str] = {}
+
+    def get_secret(self, name: str, env_fallback: str | None = None) -> str | None:
+        return self._values.get(name)
+
+    def set_secret(self, name: str, value: str) -> None:
+        self._values[name] = value
+
+
+@pytest.fixture(autouse=True)
+def _stub_secret_store(monkeypatch):
+    """Every renderer constructed below without an explicit secret_store
+    argument gets a fresh, isolated _FakeSecretStore instead of a real
+    SecretStore() — otherwise every test in this file would round-trip
+    through this machine's real Windows Credential Manager entry under
+    service "jarminei", leaking a persisted token across test runs."""
+    monkeypatch.setattr("presentation.vtube_studio_renderer.SecretStore", _FakeSecretStore)
 
 _WAIT_TIMEOUT = 2.0
 
@@ -151,22 +179,22 @@ def config(tmp_path) -> PresentationConfig:
 
 def test_mount_requests_and_persists_a_fresh_token_when_none_exists(config):
     conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
+    secret_store = _FakeSecretStore()
     with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
-        renderer = VTubeStudioAvatarRenderer(config)
+        renderer = VTubeStudioAvatarRenderer(config, secret_store)
         renderer.mount()
 
     assert renderer._connected is True
-    saved = json.loads(open(config.vtube_studio_auth_token_path).read())
-    assert saved["authenticationToken"] == "fresh-token-123"
+    assert secret_store.get_secret("vtube_studio_auth_token") == "fresh-token-123"
 
 
 def test_mount_reuses_a_persisted_token_without_requesting_a_new_one(config):
-    with open(config.vtube_studio_auth_token_path, "w") as handle:
-        json.dump({"authenticationToken": "already-have-this"}, handle)
+    secret_store = _FakeSecretStore()
+    secret_store.set_secret("vtube_studio_auth_token", "already-have-this")
     conn = _fake_connection([_AUTH_SUCCESS_RESPONSE])
 
     with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
-        renderer = VTubeStudioAvatarRenderer(config)
+        renderer = VTubeStudioAvatarRenderer(config, secret_store)
         renderer.mount()
 
     assert renderer._connected is True
@@ -174,17 +202,33 @@ def test_mount_reuses_a_persisted_token_without_requesting_a_new_one(config):
 
 
 def test_mount_requests_a_new_token_when_the_persisted_one_is_rejected(config):
-    with open(config.vtube_studio_auth_token_path, "w") as handle:
-        json.dump({"authenticationToken": "stale-token"}, handle)
+    secret_store = _FakeSecretStore()
+    secret_store.set_secret("vtube_studio_auth_token", "stale-token")
     conn = _fake_connection([_AUTH_FAILURE_RESPONSE, _AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
 
+    with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
+        renderer = VTubeStudioAvatarRenderer(config, secret_store)
+        renderer.mount()
+
+    assert renderer._connected is True
+    assert secret_store.get_secret("vtube_studio_auth_token") == "fresh-token-123"
+
+
+def test_mount_never_writes_a_plaintext_token_file(config, tmp_path):
+    """Sprint 6.20 — Permission & Encryption Audit regression test: the
+    auth token now round-trips only through SecretStore — nothing is
+    ever written under tmp_path, including at
+    config.vtube_studio_auth_token_path itself (still config-driven, but
+    no longer written to by fresh code — see this module's own Sprint
+    6.20 Objectives)."""
+    conn = _fake_connection([_AUTH_TOKEN_RESPONSE, _AUTH_SUCCESS_RESPONSE])
     with patch("presentation.vtube_studio_renderer.connect", return_value=conn):
         renderer = VTubeStudioAvatarRenderer(config)
         renderer.mount()
 
     assert renderer._connected is True
-    saved = json.loads(open(config.vtube_studio_auth_token_path).read())
-    assert saved["authenticationToken"] == "fresh-token-123"
+    assert not Path(config.vtube_studio_auth_token_path).exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_mount_is_idempotent_when_already_connected(config):

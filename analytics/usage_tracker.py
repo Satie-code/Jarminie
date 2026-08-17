@@ -54,7 +54,17 @@ class UsageTracker:
         self._started = False
 
     def start(self) -> None:
-        self._task_scheduler.add_job(self._on_tick, self._config.sample_interval_seconds, _JOB_ID)
+        # resource_sensitive=True (Sprint 6.19 — Resource Protection &
+        # Fail-Gracefully Verification): usage sampling is genuinely
+        # deferrable background bookkeeping, one of this sprint's own
+        # explicitly named classifications — no real user-facing cost
+        # to skipping one sample under real CRITICAL resource pressure.
+        self._task_scheduler.add_job(
+            self._on_tick,
+            self._config.sample_interval_seconds,
+            _JOB_ID,
+            resource_sensitive=True,
+        )
         self._started = True
         logger.info(
             "Usage tracker started (sample_interval_seconds=%s).",

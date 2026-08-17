@@ -5,11 +5,13 @@ gitignored, machine-specific) -> JARMINEI_<SECTION>_<FIELD> environment
 variables. See docs/sprint_book/sprint_1_2.md for the design rationale.
 """
 
+from __future__ import annotations
+
 import os
 import typing
 from dataclasses import asdict
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import yaml
 
@@ -41,6 +43,22 @@ from config.schema import (
     WellnessConfig,
     WorkflowConfig,
 )
+
+if TYPE_CHECKING:
+    # security.secret_store is imported lazily inside ConfigLoader.__init__
+    # instead, never at this module's own top level: config/__init__.py
+    # eagerly imports config.loader, and security.secret_store itself
+    # imports core.logging_setup, which imports config.schema — which,
+    # the first time anything touches the config package, re-enters
+    # config/__init__.py's own still-running import of config.loader
+    # before SecretStore's class body has finished executing. A
+    # module-level `from security.secret_store import SecretStore` here
+    # hits that cycle head-on whenever security.secret_store (or a module
+    # that imports it, e.g. presentation/vtube_studio_renderer.py) is
+    # the first thing a process imports. Same function-local-import idiom
+    # security/policy_engine.py's own docstring already documents for
+    # this exact class of problem.
+    from security.secret_store import SecretStore
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "defaults.yaml"
 LOCAL_CONFIG_PATH = Path(__file__).parent / "local.yaml"
@@ -127,19 +145,49 @@ class ConfigLoader:
         defaults_path: Path = DEFAULT_CONFIG_PATH,
         local_path: Path = LOCAL_CONFIG_PATH,
         env: dict[str, str] | None = None,
+        secret_store: SecretStore | None = None,
     ) -> None:
         self._local_path = local_path
         self._defaults_source = YamlFileConfigSource(defaults_path, required=True)
         self._local_source = YamlFileConfigSource(local_path, required=False)
         self._env = env if env is not None else os.environ
+        if secret_store is not None:
+            self._secret_store = secret_store
+        else:
+            from security.secret_store import SecretStore as _SecretStore
+
+            self._secret_store = _SecretStore()
 
     def load(self) -> AppConfig:
         raw = self._defaults_source.read()
         raw = _deep_merge(raw, self._local_source.read())
         raw = self._apply_env_overrides(raw)
         config = _dict_to_config(raw)
+        self._resolve_secrets(config)
         config.validate()
         return config
+
+    def _resolve_secrets(self, config: AppConfig) -> None:
+        """Sprint 6.20 — Permission & Encryption Audit. A keyring-stored
+        value (via self._secret_store) takes priority over whatever
+        _apply_env_overrides() already resolved above. The environment
+        fallback here reads self._env — this loader's own injected env
+        source — rather than SecretStore's own env_fallback (which reads
+        the real process environment directly), so that
+        ConfigLoader(env=...) keeps fully isolating tests from the real
+        machine's environment, exactly as it already does for every
+        other field.
+        """
+        config.internet.search_api_key = (
+            self._secret_store.get_secret("search_api_key")
+            or self._env.get("JARMINEI_INTERNET_SEARCH_API_KEY")
+            or config.internet.search_api_key
+        )
+        config.internet.tavily_api_key = (
+            self._secret_store.get_secret("tavily_api_key")
+            or self._env.get("JARMINEI_INTERNET_TAVILY_API_KEY")
+            or config.internet.tavily_api_key
+        )
 
     def save(self, config: AppConfig, path: Path | None = None) -> None:
         """Persist config to this instance's local overlay (default) or an
@@ -154,10 +202,20 @@ class ConfigLoader:
 
         Never writes to defaults.yaml — that file is shipped/checked-in;
         edits always go to the gitignored local overlay instead.
+
+        Sprint 6.20 — Permission & Encryption Audit: internet.search_api_key/
+        tavily_api_key are real secrets resolved via SecretStore
+        (keyring-first) and must never round-trip to this plaintext file —
+        forced to null here regardless of what the in-memory AppConfig
+        object holds, closing the "env-only discipline is convention, not
+        enforced by code" gap.
         """
         target = path or self._local_path
+        data = asdict(config)
+        data["internet"]["search_api_key"] = None
+        data["internet"]["tavily_api_key"] = None
         with target.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(asdict(config), handle, default_flow_style=False, sort_keys=False)
+            yaml.safe_dump(data, handle, default_flow_style=False, sort_keys=False)
 
     def _apply_env_overrides(self, raw: dict) -> dict:
         raw = {key: dict(value) if isinstance(value, dict) else value for key, value in raw.items()}

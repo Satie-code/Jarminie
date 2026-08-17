@@ -38,6 +38,7 @@ from config.schema import (
     LearningConfig,
     MemoryConfig,
     ProactiveConfig,
+    RuntimeConfig,
     SchedulerConfig,
     SecurityConfig,
     VoiceConfig,
@@ -362,6 +363,8 @@ def _app_harness_impl(
     learning_config: LearningConfig | None = None,
     analytics_config: AnalyticsConfig | None = None,
     proactive_config: ProactiveConfig | None = None,
+    runtime_config: RuntimeConfig | None = None,
+    resource_aware_scheduler: bool = False,
 ):
     """Builds the real Level 2 + Level 3 module graph exactly as main.py's
     _register_level2_modules()/_register_level3_modules() do, registers
@@ -392,6 +395,32 @@ def _app_harness_impl(
     app_harness fixture below, the same "fast interval only where a test
     specifically needs real recurrence" discipline scheduler_config
     itself already established at Sprint 4.20.
+
+    runtime_config (Sprint 6.18, additive, optional) mirrors this exact
+    same caller-supplied-or-default shape one further time, for
+    CommunicationPipeline._run_runtime_housekeeping()'s own cadence
+    (RuntimeConfig.housekeeping_interval_seconds) — the 13th and last of
+    Sprint 6.17's own audited TaskScheduler jobs to gain an overridable
+    interval here, needed only by stress_app_harness below.
+
+    resource_aware_scheduler (Sprint 6.19, additive, defaults to False)
+    controls whether TaskScheduler is constructed with resource_monitor
+    wired in (matching main.py's own real, unconditional production
+    wiring) or without it (matching every existing harness's own prior,
+    unmodified behavior). Found directly, not assumed: an earlier version
+    of this fix wired resource_monitor into TaskScheduler unconditionally
+    here, matching production exactly — but real, transient host CPU/RAM
+    pressure during an unrelated test run then legitimately caused real
+    resource_sensitive=True jobs (memory lifecycle passes, usage
+    sampling, pattern detection, recommendation generation — Sprint
+    6.19's own classification) to skip ticks inside tests that assert
+    unconditional recurrence and have nothing to do with resource
+    protection (test_level4_part_b_acceptance.py's maintenance-job
+    count, test_level5_part_b_acceptance.py's own four-job recurrence
+    test), a new, real source of host-load flakiness this change would
+    otherwise have introduced across the whole suite. Only
+    fast_resource_protection_app_harness (below) — the one harness that
+    exists specifically to exercise this mechanism — opts in.
 
     fast_scheduler_app_harness relies on core_manager.shutdown()'s own
     plain reverse-registration-order stop, unmodified — task_scheduler/
@@ -536,7 +565,15 @@ def _app_harness_impl(
     # this function's own docstring.
     internet_config = InternetConfig()
 
-    task_scheduler = TaskScheduler()
+    # Sprint 6.19 (Resource Protection & Fail-Gracefully Verification):
+    # resource_monitor threaded into TaskScheduler only when
+    # resource_aware_scheduler is True — see this function's own
+    # docstring for why every OTHER existing harness deliberately keeps
+    # the prior, unwired behavior instead of matching main.py's own
+    # unconditional production wiring exactly.
+    task_scheduler = TaskScheduler(
+        resource_monitor=resource_monitor if resource_aware_scheduler else None
+    )
     calendar_sqlite_client = SqliteClient(config.database.sqlite_path)
     calendar_store = CalendarStore(calendar_sqlite_client, scheduler_config)
     reminder_engine = ReminderEngine(
@@ -620,6 +657,14 @@ def _app_harness_impl(
     resolved_proactive_config = (
         proactive_config if proactive_config is not None else ProactiveConfig()
     )
+    # Sprint 6.18 (Stress & Recovery Testing) — mirrors resolved_proactive_
+    # config's own identical caller-supplied-or-default shape, so
+    # stress_app_harness below can accelerate housekeeping_interval_
+    # seconds (CommunicationPipeline._run_runtime_housekeeping()'s own
+    # cadence) alongside every other job's own already-overridable
+    # interval, without disturbing any existing caller that never passes
+    # runtime_config at all.
+    resolved_runtime_config = runtime_config if runtime_config is not None else RuntimeConfig()
     task_graph_sqlite_client = SqliteClient(config.database.sqlite_path)
     task_graph_store = TaskGraphStore(task_graph_sqlite_client, config.planning)
     knowledge_graph_sqlite_client = SqliteClient(config.database.sqlite_path)
@@ -695,6 +740,7 @@ def _app_harness_impl(
         research_engine=research_engine,
         source_validator=source_validator,
         summarizer=summarizer,
+        internet_config=internet_config,
         action_audit_log=audit_log,
         scheduler_config=scheduler_config,
         memory_config=config.memory,
@@ -714,14 +760,16 @@ def _app_harness_impl(
         adaptive_wellness_adjuster=adaptive_wellness_adjuster,
         dashboard_service=dashboard_service,
         usage_tracker=usage_tracker,
+        usage_store=usage_store,
         pattern_recognizer=pattern_recognizer,
         recommendation_engine=recommendation_engine,
         learning_config=config.learning,
         wellness_config=config.wellness,
         runtime_manager=core_manager.runtime_manager(),
         resource_monitor=resource_monitor,
-        runtime_config=config.runtime,
+        runtime_config=resolved_runtime_config,
         task_graph_store=task_graph_store,
+        knowledge_graph_store=knowledge_graph_store,
         planning_engine=planning_engine,
         context_engine=context_engine,
         explainability_layer=explainability_layer,
@@ -890,6 +938,7 @@ def _app_harness_impl(
         self_evaluator=self_evaluator,
         proactive_assistant=proactive_assistant,
         proactive_config=resolved_proactive_config,
+        runtime_config=resolved_runtime_config,
     )
     try:
         yield harness
@@ -988,6 +1037,86 @@ def fast_level6_part_a_app_harness(tmp_path, voice_config, qapp):
         voice_config,
         fast_scheduler_config,
         proactive_config=fast_proactive_config,
+    )
+
+
+@pytest.fixture
+def fast_resource_protection_app_harness(tmp_path, voice_config, qapp):
+    """Identical object graph to app_harness, but with short
+    scheduler_config.poll_interval_seconds (ReminderEngine's own poll —
+    this fixture's own control job, deliberately NOT resource_sensitive)
+    PLUS short analytics_config.sample_interval_seconds (UsageTracker's
+    own tick — one of Sprint 6.19's own resource_sensitive=True jobs) —
+    for tests/system/test_level6_part_b_resource_protection.py's own
+    dedicated system-level resource-awareness test only, matching
+    fast_level5_part_b_app_harness's/fast_level6_part_a_app_harness's own
+    identical "not shared with any other test file" precedent. Not
+    stress_app_harness (tests/system/test_level6_part_b_stress.py) —
+    deliberately avoids that fixture's own real sustained concurrent
+    load and backlog/technical_debt.md item 53's own disclosed cross-
+    test contamination risk; this test only needs two jobs accelerated
+    and a monkeypatched ResourceMonitor.sample(), not real resource
+    pressure."""
+    fast_scheduler_config = SchedulerConfig(poll_interval_seconds=0.3)
+    fast_analytics_config = AnalyticsConfig(sample_interval_seconds=0.3)
+    yield from _app_harness_impl(
+        tmp_path,
+        voice_config,
+        fast_scheduler_config,
+        analytics_config=fast_analytics_config,
+        resource_aware_scheduler=True,
+    )
+
+
+@pytest.fixture
+def stress_app_harness(tmp_path, voice_config, qapp):
+    """Identical object graph to app_harness, but every one of Sprint
+    6.17's own audited 13 TaskScheduler jobs is accelerated at once — for
+    tests/system/test_level6_part_b_stress.py's own sustained-load
+    scenario only, which needs genuine, repeated recurrence across the
+    WHOLE inventory simultaneously rather than any one Part's own subset
+    the way fast_scheduler_app_harness/fast_level5_part_b_app_harness/
+    fast_level6_part_a_app_harness each already do. Not shared with any
+    other test file, matching those three fixtures' own identical
+    "dedicated, not reused" precedent.
+
+    1.0s, not those three fixtures' own 0.3s: found directly, not
+    guessed — every other fast_*_app_harness fixture accelerates at most
+    a handful of jobs together, but this one runs all 13 simultaneously,
+    each with its own real SqliteClient connection against the SAME
+    physical database file (database/sqlite_client.py sets no
+    busy_timeout anywhere). At 0.3s for all 13 at once, real concurrent
+    write contention among this app's OWN legitimate background jobs
+    produced genuine "database is locked" errors during this fixture's
+    own first version — a real property of unthrottled concurrent SQLite
+    writers, not a hang or a crash (Sprint 6.17's own job-isolation
+    guarantees already absorb it: the raising job's own scheduled
+    recurrence continues untouched), but not what this sprint's own
+    Architecture Notes intends to exercise either ("this sprint adds no
+    new production resilience mechanism of its own... Sprint 6.19 is
+    where a genuine resource-aware scheduling mechanism" would belong).
+    1.0s still delivers genuine, repeated, sustained recurrence across a
+    120s window (roughly 120 ticks per job) while substantially reducing
+    this specific contention artifact."""
+    fast_scheduler_config = SchedulerConfig(
+        poll_interval_seconds=1.0, maintenance_interval_seconds=1.0
+    )
+    fast_wellness_config = WellnessConfig(idle_check_interval_seconds=1.0)
+    fast_learning_config = LearningConfig(
+        pattern_detection_interval_seconds=1.0, recommendation_generation_interval_seconds=1.0
+    )
+    fast_analytics_config = AnalyticsConfig(sample_interval_seconds=1.0)
+    fast_proactive_config = ProactiveConfig(evaluation_interval_seconds=1.0)
+    fast_runtime_config = RuntimeConfig(housekeeping_interval_seconds=1.0)
+    yield from _app_harness_impl(
+        tmp_path,
+        voice_config,
+        fast_scheduler_config,
+        wellness_config=fast_wellness_config,
+        learning_config=fast_learning_config,
+        analytics_config=fast_analytics_config,
+        proactive_config=fast_proactive_config,
+        runtime_config=fast_runtime_config,
     )
 
 

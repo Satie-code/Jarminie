@@ -53,6 +53,14 @@ Send2Trash>=1.8
 # declaration for anything directly imported" convention.
 requests>=2.31
 
+# Sprint 6.20 — Permission & Encryption Audit. OS-level credential
+# storage (Windows Credential Manager on this project's target
+# platform) for security/secret_store.py's SecretStore — real API
+# keys and the VTube Studio auth token, resolved directly with the
+# user via AskUserQuestion ("encrypt secrets only") before this
+# sprint's own implementation began. See docs/backlog/technical_debt.md.
+keyring>=25.0
+
 # Sprint 5.8 — Minie Renderer & Avatar Renderer Interface. WebSocket
 # transport for presentation/vtube_studio_renderer.py's own hand-rolled
 # client against VTube Studio's documented local Plugin API — a plain

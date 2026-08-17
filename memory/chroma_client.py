@@ -10,14 +10,31 @@ from the *reasoning* runtime — see docs/sprint_book/sprint_3_1.md's
 Engineering Rationale for the full justification. If embedding quality
 ever proves inadequate, swapping the embedding function is contained to
 this file.
+
+Runtime Phase 6 (Runtime Refactor Sprint) already deferred the
+PersistentClient *connection* to connect() (MemoryStore is tier=WARM,
+lazy=True) — but chromadb itself (which bundles onnxruntime's embedding
+machinery) was still imported at module top level, so its own real cost
+was paid at every process start regardless of whether memory was ever
+used. Sprint 6.16 (Startup & Caching Optimization, Level 6 Part B) closed
+that gap: `import chromadb` moved inside connect(), the one place it's
+actually needed at runtime, via the same `from __future__ import
+annotations` + `TYPE_CHECKING` pattern workflow/workflow_executor.py
+already established for a DI-collaborator type that must stay resolvable
+for type-checkers without being imported eagerly.
 """
 
-import chromadb
-from chromadb.api.models.Collection import Collection
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from config.schema import DatabaseConfig, MemoryConfig
 from core.logging_setup import get_logger
 from memory.models import MemoryType
+
+if TYPE_CHECKING:
+    import chromadb
+    from chromadb.api.models.Collection import Collection
 
 logger = get_logger(__name__)
 
@@ -33,7 +50,13 @@ class ChromaMemoryClient:
         self._client: chromadb.ClientAPI | None = None
 
     def connect(self) -> None:
-        """Open the persistent client. Safe to call again after close()."""
+        """Open the persistent client. Safe to call again after close().
+
+        Deliberately lazy (Sprint 6.16): the chromadb import itself, not
+        just the connection, is deferred here — see this module's own
+        docstring."""
+        import chromadb
+
         self._client = chromadb.PersistentClient(path=self._database_config.chroma_path)
         logger.info("ChromaMemoryClient connected: %s", self._database_config.chroma_path)
 

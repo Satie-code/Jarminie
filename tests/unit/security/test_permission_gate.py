@@ -141,6 +141,15 @@ def test_confirmation_request_carries_a_real_prompt_text():
 # --- application_allowlist enforcement ---------------------------------------------
 
 
+def test_application_allowlist_ships_none_by_default():
+    """Sprint 6.20 (Permission & Encryption Audit) re-confirmation:
+    DeviceControlConfig.application_allowlist still ships as None (no
+    restriction) by design, mirroring
+    test_approved_commands_ships_empty_so_every_command_is_denied_by_default's
+    own precedent below for the deny-by-default allowlists."""
+    assert DeviceControlConfig().application_allowlist is None
+
+
 def test_unlisted_application_is_denied_before_confirmation_is_offered():
     gate, confirmation_service = make_gate(
         device_control_config=DeviceControlConfig(application_allowlist=["notepad.exe"])

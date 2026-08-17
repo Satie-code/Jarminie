@@ -622,6 +622,17 @@ class InternetConfig:
     which field(s) it actually needs — this dataclass makes no
     assumption about which provider needs what, unchanged from this
     class's own original design principle.
+
+    enabled (Sprint 6.21 — Privacy Verification) is a real, user-facing
+    opt-out for the Internet Agent as a whole — closing
+    backlog/technical_debt.md item 31's own long-open recommendation
+    ("consider whether... to add an explicit internet.enabled: bool
+    config flag to let a user disable outbound search entirely"). When
+    False, voice/pipeline.py's _handle_internet_agent_turn() never
+    reaches ResearchEngine.research() (never mind SearchProvider.search()
+    itself) — checked before any outbound call, not after. Defaults True
+    so this sprint introduces a real, working opt-out without silently
+    changing default behavior for any existing installation.
     """
 
     search_provider: str = "brave"
@@ -633,6 +644,7 @@ class InternetConfig:
     request_timeout_seconds: float = 10.0
     summarization_model: str | None = None
     min_sources_for_corroboration: int = 2
+    enabled: bool = True
 
 
 # Valid EmotionalState (emotion/state_manager.py) dimension names and
@@ -1178,6 +1190,17 @@ class AnalyticsConfig:
     habit_consistency_window_days (Sprint 5.20) is Part 2's own implicit
     weekly framing for "consistency" — also the shared default window for
     AnalyticsDashboardService.project_progress().
+
+    sample_retention_days (Sprint 6.21 — Privacy Verification) bounds
+    UsageStore.purge_older_than()'s own rolling retention window for raw
+    per-poll AppFocusSample rows — a real, persistent, potentially-
+    identifying record (which application had focus, and when) with no
+    retention mechanism at all until this sprint, unlike
+    ConversationSessionStore/ActionAuditLog/MemoryStore, all three of
+    which already had one since Sprint 4.18/4.8/3.6 respectively. 90
+    days, the same default as DeviceControlConfig.audit_log_retention_days
+    — a real, disclosed, unvalidated first-pass number, not a
+    product-reviewed retention policy.
     """
 
     sample_interval_seconds: float = 60.0
@@ -1187,6 +1210,7 @@ class AnalyticsConfig:
     habit_category_names: list[str] = field(default_factory=list)
     project_category_names: list[str] = field(default_factory=list)
     habit_consistency_window_days: int = 7
+    sample_retention_days: int = 90
 
 
 # PatternType's four values (learning/pattern_model.py), duplicated here
@@ -1657,10 +1681,26 @@ class KnowledgeGraphConfig:
     touch a single entity (as either endpoint) before
     KnowledgeGraphStore.add_relationship() raises TooManyRelationshipsError
     — see that method's own docstring for why both endpoints are checked.
+
+    retention_days (Sprint 6.21 — Privacy Verification) bounds
+    KnowledgeGraphStore.purge_older_than()'s own rolling retention
+    window — a real, persistent, potentially-identifying record
+    (project/person/topic entities) with no retention mechanism at all
+    until this sprint. Deliberately staleness-based (measured from each
+    entity's own last_referenced_at, not its created_at) and a much more
+    generous default than DatabaseConfig.conversation_retention_days
+    (30 days) or DeviceControlConfig.audit_log_retention_days (90 days)
+    — a PROJECT/PERSON entity is a durable fact a user may not mention
+    again for months without it having stopped being true, unlike an
+    ephemeral chat turn or an audit record; a short default would
+    silently discard genuinely still-relevant knowledge. A real,
+    disclosed, unvalidated first-pass number, not a product-reviewed
+    retention policy.
     """
 
     max_traversal_depth: int = 3
     max_relationships_per_entity: int = 50
+    retention_days: int = 365
 
 
 @dataclass
@@ -2428,6 +2468,11 @@ class AppConfig:
                 "analytics.habit_consistency_window_days must be positive, "
                 f"got {self.analytics.habit_consistency_window_days}"
             )
+        if self.analytics.sample_retention_days <= 0:
+            raise ConfigError(
+                "analytics.sample_retention_days must be positive, "
+                f"got {self.analytics.sample_retention_days}"
+            )
         for field_name in ("habit_category_names", "project_category_names"):
             for name in getattr(self.analytics, field_name):
                 if not name or not name.strip():
@@ -2695,6 +2740,10 @@ class AppConfig:
             raise ConfigError(
                 "knowledge_graph.max_relationships_per_entity must be positive, got "
                 f"{k.max_relationships_per_entity}"
+            )
+        if k.retention_days <= 0:
+            raise ConfigError(
+                f"knowledge_graph.retention_days must be positive, got {k.retention_days}"
             )
 
     def _validate_proactive(self) -> None:

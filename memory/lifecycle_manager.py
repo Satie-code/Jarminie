@@ -36,8 +36,11 @@ docs/backlog/technical_debt.md item 11 (see the new item this sprint adds
 alongside it).
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from config.schema import MemoryConfig
 from core.logging_setup import get_logger
@@ -45,7 +48,15 @@ from memory.confidence_scorer import ConfidenceBand, ConfidenceScorer
 from memory.memory_store import MemoryStore
 from memory.models import MemoryRecord, MemoryType
 
+if TYPE_CHECKING:
+    from core.runtime_manager import RuntimeManager
+
 logger = get_logger(__name__)
+
+_MEMORY_STORE_SERVICE_NAME = "memory_store"
+"""Must match main.py's own runtime_manager.register("memory_store", ...)
+call (memory/memory_store.py's LazyMemoryStore construction) exactly —
+RuntimeManager.ensure_started() looks services up by this string key."""
 
 # MemoryStore.recent() requires an explicit limit — large enough that no
 # realistic live record count per type would be truncated, the same
@@ -78,17 +89,50 @@ class MemoryLifecycleManager:
 
     A ManagedModule despite owning no resource of its own — start()/stop()
     log only; health_check() delegates to memory_store.health_check()
-    rather than duplicating a liveness check MemoryStore already owns."""
+    rather than duplicating a liveness check MemoryStore already owns.
+
+    memory_store is deliberately the REAL MemoryStore, not the
+    memory/memory_store.py LazyMemoryStore proxy every other consumer
+    (PersonaScopedMemory, EventMemory, ShortTermMemory, ...) receives —
+    health_check() above needs the real, non-Protocol .health_check()
+    method LazyMemoryStore doesn't expose.
+
+    runtime_manager (Sprint 6.19 — Resource Protection & Fail-Gracefully
+    Verification; backlog/technical_debt.md item 53) is the real fix for
+    the correctness gap that real-not-proxied dependency otherwise left
+    open: optional, keyword-only, defaults to None (the same
+    "optional, degrades to prior behavior when absent" pattern every
+    other cross-cutting collaborator in this codebase already uses).
+    When supplied, run_cleanup_pass()/run_monthly_review()/
+    apply_user_override() each call runtime_manager.ensure_started()
+    before touching memory_store — closing the real gap Runtime Phase
+    6's own original "safe by CoreManager startup-ordering" reasoning
+    stopped covering once Runtime Phase 9's later resource-pressure
+    eviction (RuntimeManager.evict_least_recently_used()) could stop
+    memory_store mid-run, well after that one-time startup ordering
+    guarantee had already been satisfied. start()'s own one-time call
+    (this class's own module docstring) was never actually the gap —
+    it already runs safely, by that same startup-ordering guarantee —
+    the gap was every LATER call: run_cleanup_pass()/run_monthly_review()
+    as real recurring TaskScheduler jobs (voice/pipeline.py), and
+    apply_user_override() as a real live per-turn call
+    (CommunicationPipeline._handle_turn_complete())."""
 
     def __init__(
         self,
         memory_store: MemoryStore,
         confidence_scorer: ConfidenceScorer,
         memory_config: MemoryConfig,
+        runtime_manager: RuntimeManager | None = None,
     ) -> None:
         self._memory_store = memory_store
         self._confidence_scorer = confidence_scorer
         self._memory_config = memory_config
+        self._runtime_manager = runtime_manager
+
+    def _ensure_memory_store_started(self) -> None:
+        if self._runtime_manager is not None:
+            self._runtime_manager.ensure_started(_MEMORY_STORE_SERVICE_NAME)
 
     def start(self) -> None:
         """Runs both lifecycle passes exactly once — see this module's
@@ -130,7 +174,14 @@ class MemoryLifecycleManager:
         rest_of_the_pass (using a real _ScoreRaisingConfidenceScorer local
         double) already covers this exactly, added during this class's
         own Sprint 3.6 implementation rather than deferred. No new test
-        or code change was needed for this scenario."""
+        or code change was needed for this scenario.
+
+        Sprint 6.19 hardening (backlog item 53): _ensure_memory_store_
+        started() is called first — see this class's own docstring for
+        why this is a real, not merely defensive, fix for a recurring-
+        job call path this method's own start()-time invocation never
+        covered."""
+        self._ensure_memory_store_started()
         report = CleanupReport()
         now = datetime.now(UTC)
         for memory_type in _ALL_MEMORY_TYPES:
@@ -170,7 +221,11 @@ class MemoryLifecycleManager:
         band that have sat there for at least monthly_review_min_band_days
         (MemoryRecord.band_entered_at). Performs zero writes — reads each
         record's already-persisted confidence_score/band_entered_at rather
-        than rescoring anything."""
+        than rescoring anything.
+
+        Sprint 6.19 hardening (backlog item 53): _ensure_memory_store_
+        started() first — see run_cleanup_pass()'s own identical note."""
+        self._ensure_memory_store_started()
         now = datetime.now(UTC)
         matching: list[MemoryRecord] = []
         for memory_type in _ALL_MEMORY_TYPES:
@@ -189,7 +244,14 @@ class MemoryLifecycleManager:
     def apply_user_override(self, record_id: str) -> bool:
         """The real, persisted counterpart to ConfidenceScorer's pure
         apply_user_override(). Returns False (logged) if the record
-        doesn't exist, rather than raising."""
+        doesn't exist, rather than raising.
+
+        Sprint 6.19 hardening (backlog item 53): _ensure_memory_store_
+        started() first — this is a real, live per-turn call path
+        (CommunicationPipeline._handle_turn_complete()), not just a
+        TaskScheduler job; see run_cleanup_pass()'s own identical note
+        and this class's own docstring for the full reasoning."""
+        self._ensure_memory_store_started()
         record = self._memory_store.get_by_id(record_id)
         if record is None:
             logger.warning("apply_user_override(): no such memory record %s.", record_id)

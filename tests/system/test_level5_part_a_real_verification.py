@@ -71,8 +71,9 @@ def connected_renderer():
             "verification skipped. If this is the first-ever connection, VTube Studio shows an "
             "Allow-plugin popup that needs a human click within "
             f"{config.vtube_studio_connection_timeout_seconds}s (see backlog/technical_debt.md "
-            "item 38 for the known first-run timing gap); re-run once a token is persisted at "
-            f"{config.vtube_studio_auth_token_path!r}, or after clicking Allow in time."
+            "item 38 for the known first-run timing gap); re-run once a token is persisted via "
+            "SecretStore (OS credential storage, service 'jarminei', key "
+            "'vtube_studio_auth_token' — Sprint 6.20), or after clicking Allow in time."
         )
     try:
         yield renderer

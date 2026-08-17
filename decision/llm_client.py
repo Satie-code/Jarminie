@@ -123,8 +123,16 @@ class OllamaClient:
             response = client.generate(
                 model=self._model, prompt=prompt, stream=False, options=options
             )
+            # Sprint 6.19 hardening (backlog item 33): .response access
+            # moved inside this same try block, not after it — the
+            # identical shape of gap item 32 already fixed for
+            # BraveSearchProvider.search() (internet/brave_search_
+            # provider.py). A malformed/unexpected response object's own
+            # missing .response attribute would otherwise raise a raw
+            # AttributeError this method's own docstring already
+            # promises never to leak.
+            return response.response
         except Exception as exc:
             raise LlmError(
                 f"Ollama generate() failed for model {self._model!r}: {exc}"
             ) from exc
-        return response.response

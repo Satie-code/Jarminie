@@ -8,6 +8,23 @@ from config.loader import ConfigLoader
 from config.schema import AppConfig, DeviceControlConfig
 
 
+class _FakeSecretStore:
+    """In-memory stand-in for security.secret_store.SecretStore —
+    Sprint 6.20's own "patch the boundary" precedent (see
+    tests/unit/presentation/test_vtube_studio_renderer.py's identically
+    named fake), used here so these tests never touch the real OS
+    credential store."""
+
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self._values = dict(values) if values else {}
+
+    def get_secret(self, name: str, env_fallback: str | None = None) -> str | None:
+        return self._values.get(name)
+
+    def set_secret(self, name: str, value: str) -> None:
+        self._values[name] = value
+
+
 @pytest.fixture
 def defaults_file(tmp_path):
     path = tmp_path / "defaults.yaml"
@@ -186,3 +203,105 @@ def test_real_shipped_defaults_yaml_loads_device_control_section():
     parses and validates, not just a synthetic minimal one."""
     config = ConfigLoader().load()
     assert isinstance(config.device_control, DeviceControlConfig)
+
+
+# --- Sprint 6.20 (Permission & Encryption Audit): SecretStore-backed --------
+# --- internet.search_api_key / tavily_api_key -------------------------------
+
+
+def test_keyring_value_is_used_for_search_api_key(defaults_file, tmp_path):
+    secret_store = _FakeSecretStore({"search_api_key": "from-keyring"})
+    loader = ConfigLoader(
+        defaults_path=defaults_file,
+        local_path=tmp_path / "missing.yaml",
+        env={},
+        secret_store=secret_store,
+    )
+
+    config = loader.load()
+
+    assert config.internet.search_api_key == "from-keyring"
+
+
+def test_keyring_value_takes_priority_over_env_for_tavily_api_key(defaults_file, tmp_path):
+    secret_store = _FakeSecretStore({"tavily_api_key": "from-keyring"})
+    loader = ConfigLoader(
+        defaults_path=defaults_file,
+        local_path=tmp_path / "missing.yaml",
+        env={"JARMINEI_INTERNET_TAVILY_API_KEY": "from-env"},
+        secret_store=secret_store,
+    )
+
+    config = loader.load()
+
+    assert config.internet.tavily_api_key == "from-keyring"
+
+
+def test_env_var_is_used_when_keyring_has_nothing_for_search_api_key(defaults_file, tmp_path):
+    loader = ConfigLoader(
+        defaults_path=defaults_file,
+        local_path=tmp_path / "missing.yaml",
+        env={"JARMINEI_INTERNET_SEARCH_API_KEY": "from-env"},
+        secret_store=_FakeSecretStore(),
+    )
+
+    config = loader.load()
+
+    assert config.internet.search_api_key == "from-env"
+
+
+def test_search_api_key_is_none_when_neither_keyring_nor_env_has_it(defaults_file, tmp_path):
+    loader = ConfigLoader(
+        defaults_path=defaults_file,
+        local_path=tmp_path / "missing.yaml",
+        env={},
+        secret_store=_FakeSecretStore(),
+    )
+
+    config = loader.load()
+
+    assert config.internet.search_api_key is None
+
+
+def test_secret_resolution_env_fallback_uses_this_loaders_own_injected_env_not_real_os_environ(
+    defaults_file, tmp_path, monkeypatch
+):
+    """Regression test: the env fallback for these two fields must go
+    through ConfigLoader's own injected `env` dict, not the real
+    process environment directly — otherwise ConfigLoader(env={}) would
+    stop actually isolating tests from the real machine for exactly
+    these two fields, defeating the whole reason that parameter
+    exists (see every other test in this file)."""
+    monkeypatch.setenv("JARMINEI_INTERNET_SEARCH_API_KEY", "leaked-from-real-os-environ")
+    loader = ConfigLoader(
+        defaults_path=defaults_file,
+        local_path=tmp_path / "missing.yaml",
+        env={},  # deliberately empty — must NOT see the real os.environ value above
+        secret_store=_FakeSecretStore(),
+    )
+
+    config = loader.load()
+
+    assert config.internet.search_api_key is None
+
+
+def test_search_api_key_is_never_serialized_even_when_populated_in_memory(defaults_file, tmp_path):
+    """Sprint 6.20 Acceptance Criteria: no API key is ever written to a
+    plaintext file by save(), even if a caller has populated it
+    on the in-memory AppConfig object directly."""
+    loader = ConfigLoader(
+        defaults_path=defaults_file, local_path=tmp_path / "missing.yaml", env={}
+    )
+    config = loader.load()
+    config.internet.search_api_key = "a-real-secret-value"
+    config.internet.tavily_api_key = "another-real-secret-value"
+
+    save_path = tmp_path / "saved.yaml"
+    loader.save(config, path=save_path)
+
+    saved_text = save_path.read_text(encoding="utf-8")
+    assert "a-real-secret-value" not in saved_text
+    assert "another-real-secret-value" not in saved_text
+    saved_raw = yaml.safe_load(saved_text)
+    assert saved_raw["internet"]["search_api_key"] is None
+    assert saved_raw["internet"]["tavily_api_key"] is None

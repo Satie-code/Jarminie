@@ -31,10 +31,21 @@ from device_control.action_log import (
 )
 from device_control.application_manager import ApplicationManager
 from device_control.file_operations import FileOperationsManager
+from scheduler.task_scheduler import TaskScheduler
 from security.permission_gate import PermissionDecision
 from security.policy_engine import RiskLevel
 
 _SLEEP_ARGS = ["-c", "import time; time.sleep(30)"]
+_WAIT_TIMEOUT = 2.0
+
+
+def _wait_until(predicate, timeout: float = _WAIT_TIMEOUT) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 def make_request(action_type: ActionType, **parameters) -> ActionRequest:
@@ -370,6 +381,61 @@ def test_start_calls_purge_older_than_for_real(tmp_path, device_control_config, 
 
     assert calls == [device_control_config.audit_log_retention_days]
     log.stop()
+
+
+class _RaisingSqliteClient(SqliteClient):
+    """Matches the project's established "_Raising*-style local test
+    double" pattern (see tests/unit/scheduler/test_reminder_engine.py's
+    own identical-shaped copy) — duplicated, not imported, per this
+    project's "tests/ has no __init__.py" convention."""
+
+    def __init__(self, db_path: str) -> None:
+        super().__init__(db_path)
+        self.raise_on_query = False
+
+    def query(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.raise_on_query:
+            raise RuntimeError("sqlite query exploded")
+        return super().query(sql, params)
+
+
+def test_a_persistently_failing_purge_keeps_recurring_via_real_task_scheduler(tmp_path):
+    """Sprint 6.17 (Async Background Task Audit) — one of the 12 jobs
+    not yet individually verified against TaskScheduler's own explicit
+    max_instances=1, mirroring Sprint 6.14's own established shape.
+    purge_older_than() already swallows its own sqlite failures
+    internally (its own try/except Exception, above) rather than
+    raising, so — unlike a job that genuinely propagates — the
+    meaningful property to prove here is that the real, registered
+    production callable keeps being invoked by a real TaskScheduler on
+    its own real schedule despite a persistently failing SqliteClient,
+    not merely that one direct call degrades gracefully."""
+    client = _RaisingSqliteClient(str(tmp_path / "raising_audit.db"))
+    config = DeviceControlConfig(allowed_file_roots=[str(tmp_path)])
+    log = ActionAuditLog(client, config)
+    log.start()
+    client.raise_on_query = True
+
+    task_scheduler = TaskScheduler()
+    task_scheduler.start()
+    tick_count = 0
+    real_purge = log.purge_older_than
+
+    def _counting_purge():
+        nonlocal tick_count
+        tick_count += 1
+        return real_purge()
+
+    task_scheduler.add_job(
+        _counting_purge, interval_seconds=0.05, job_id="action-audit-purge-isolation"
+    )
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+    finally:
+        task_scheduler.stop()
+        client.raise_on_query = False
+        log.stop()
 
 
 # --- ActionRecoveryManager: real recycle-bin restore --------------------------------------

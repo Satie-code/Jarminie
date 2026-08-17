@@ -292,6 +292,47 @@ class _RaisingSqliteClient(SqliteClient):
         return super().query(sql, params)
 
 
+def test_a_persistently_failing_poll_keeps_recurring_via_real_task_scheduler(
+    tmp_path, priority_queue_manager, task_scheduler
+):
+    """Sprint 6.17 (Async Background Task Audit) — one of the 12 jobs not
+    yet individually verified against TaskScheduler's own explicit
+    max_instances=1. _poll_due_items() never actually raises (see
+    test_poll_due_items_survives_a_real_calendar_store_failure
+    immediately below — CalendarStore.list_due_within() already
+    degrades internally), so unlike Sprint 6.14's ProactiveAssistant
+    precedent (a job that genuinely propagates), the meaningful property
+    to prove here is the real registered job continuing to fire on its
+    own real recurring schedule despite a persistently failing
+    underlying SqliteClient, not merely surviving one direct call."""
+    client = _RaisingSqliteClient(str(tmp_path / "raising.db"))
+    calendar_store = CalendarStore(client, SchedulerConfig())
+    calendar_store.start()
+    client.raise_on_query = True
+    fast_config = SchedulerConfig(poll_interval_seconds=0.05)
+    reminder_engine = ReminderEngine(
+        calendar_store, priority_queue_manager, task_scheduler, fast_config
+    )
+    tick_count = 0
+    real_poll = reminder_engine._poll_due_items
+
+    def _counting_poll():
+        nonlocal tick_count
+        tick_count += 1
+        real_poll()
+
+    reminder_engine._poll_due_items = _counting_poll
+
+    reminder_engine.register()
+    try:
+        assert _wait_until(lambda: tick_count >= 3)
+        assert task_scheduler.health_check() is True
+    finally:
+        reminder_engine.unregister()
+        client.raise_on_query = False
+        calendar_store.stop()
+
+
 def test_poll_due_items_survives_a_real_calendar_store_failure(
     tmp_path, priority_queue_manager, task_scheduler
 ):

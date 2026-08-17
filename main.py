@@ -130,6 +130,7 @@ from security.confirmation_service import VoiceConfirmationService
 from security.permission_gate import PermissionGate
 from security.policy_engine import PermissionPolicyEngine
 from security.qt_confirmation_service import QtConfirmationService, RequestedByConfirmationService
+from services.weather_service import NullWeatherService, create_weather_service
 from voice.context_manager import ContextManager
 from voice.conversation_store import ConversationSessionStore
 from voice.microphone import MicrophoneManager, SoundDeviceAudioBackend
@@ -572,6 +573,27 @@ def main() -> int:
     _register_level5_part_b_modules(core_manager, level5b_modules)
     _register_level6_part_a_modules(core_manager, level6a_modules)
 
+    # Minie Persona UI workstream: constructed here, standalone, rather
+    # than folded into _construct_level5_modules() — weather is not part
+    # of Level 5 Part A's own emotion/presentation domain, is not a
+    # ManagedModule, and needs no CoreManager registration (services/
+    # weather_service.py's own docstring). create_weather_service() only
+    # ever raises for a genuine config typo (an unregistered
+    # weather.provider name) — never I/O at construction time — but this
+    # UI-only feature still must never take the whole app down over one,
+    # so a construction failure degrades to NullWeatherService() rather
+    # than propagating, the same "never let a non-essential feature's
+    # construction crash the app" discipline _null_level5_modules() uses
+    # for create_avatar_renderer() above.
+    try:
+        weather_service = create_weather_service(config.weather, config.internet)
+    except Exception:
+        logger.exception(
+            "WeatherService construction failed; the Minie weather panel will show "
+            "'Weather unavailable'."
+        )
+        weather_service = NullWeatherService()
+
     # ui.app is deliberately imported here, locally, rather than at this
     # module's own top level, so that _prewarm_tts_before_pyside6() above
     # (now this function's own first real statement) still runs before
@@ -589,6 +611,9 @@ def main() -> int:
         level4_modules.action_registry,
         level2_modules.session_manager,
         pipeline,
+        level5_modules.avatar_renderer,
+        level5_modules.emotional_state_manager,
+        weather_service,
     )
 
 

@@ -1173,6 +1173,44 @@ class PresentationConfig:
 
 
 @dataclass
+class WeatherConfig:
+    """Weather settings (Minie Persona UI workstream). Powers
+    ui/minie/weather_panel.py's own weather card — no other subsystem in
+    this codebase reads current weather.
+
+    Deliberately narrow and off-by-default-in-practice: latitude/
+    longitude are None until a user configures them (no location is
+    guessed from IP/OS/network — a real, deliberate privacy choice, the
+    same "never guess a location" discipline this project already
+    applies to user_display_name never being read from OS account info).
+    A None coordinate degrades to an honest "Weather unavailable" state
+    in services/weather_service.py's create_weather_service() rather
+    than a fabricated reading.
+
+    provider selects the concrete WeatherService implementation the same
+    way PresentationConfig.avatar_backend selects an AvatarRenderer
+    (services/weather_service.py's own small registry) — "open_meteo" is
+    the only registered value (a free, keyless API, chosen specifically
+    so this feature never requires a paid API key or a committed
+    secret).
+
+    enabled is this feature's own on/off switch, independent of (but
+    additionally gated by) internet.enabled — the project-wide outbound-
+    request boundary Sprint 6.21's Privacy Verification pass established.
+    Both must be true for a real network call to ever happen; see
+    services/weather_service.py's own docstring.
+    """
+
+    enabled: bool = True
+    provider: str = "open_meteo"
+    latitude: float | None = None
+    longitude: float | None = None
+    location_name: str | None = None
+    cache_ttl_seconds: float = 1800.0
+    request_timeout_seconds: float = 5.0
+
+
+@dataclass
 class AnalyticsConfig:
     """Analytics Engine settings (Sprint 5.17 — Usage & Habit Tracking).
 
@@ -1801,6 +1839,7 @@ class AppConfig:
     internet: InternetConfig = field(default_factory=InternetConfig)
     emotion: EmotionConfig = field(default_factory=EmotionConfig)
     presentation: PresentationConfig = field(default_factory=PresentationConfig)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
     analytics: AnalyticsConfig = field(default_factory=AnalyticsConfig)
     wellness: WellnessConfig = field(default_factory=WellnessConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
@@ -1828,6 +1867,7 @@ class AppConfig:
         self._validate_internet()
         self._validate_emotion()
         self._validate_presentation()
+        self._validate_weather()
         self._validate_analytics()
         self._validate_wellness()
         self._validate_learning()
@@ -2473,6 +2513,23 @@ class AppConfig:
                     f"presentation.minie_expression_thresholds[{expression_id!r}] must be in "
                     f"[0.0, 1.0], got {threshold}"
                 )
+
+    def _validate_weather(self) -> None:
+        w = self.weather
+        if not w.provider.strip():
+            raise ConfigError("weather.provider must not be blank")
+        if w.latitude is not None and not (-90.0 <= w.latitude <= 90.0):
+            raise ConfigError(f"weather.latitude must be in [-90.0, 90.0], got {w.latitude}")
+        if w.longitude is not None and not (-180.0 <= w.longitude <= 180.0):
+            raise ConfigError(f"weather.longitude must be in [-180.0, 180.0], got {w.longitude}")
+        if w.cache_ttl_seconds <= 0:
+            raise ConfigError(
+                f"weather.cache_ttl_seconds must be positive, got {w.cache_ttl_seconds}"
+            )
+        if w.request_timeout_seconds <= 0:
+            raise ConfigError(
+                f"weather.request_timeout_seconds must be positive, got {w.request_timeout_seconds}"
+            )
 
     def _validate_analytics(self) -> None:
         if self.analytics.sample_interval_seconds <= 0:

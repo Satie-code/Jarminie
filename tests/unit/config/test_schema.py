@@ -25,6 +25,7 @@ from config.schema import (
     RuntimeConfig,
     UIConfig,
     VoiceConfig,
+    WeatherConfig,
     WorkflowConfig,
 )
 
@@ -932,4 +933,47 @@ def test_non_positive_default_idle_timeout_seconds_raises():
 def test_non_positive_housekeeping_interval_seconds_raises():
     config = AppConfig(runtime=RuntimeConfig(housekeeping_interval_seconds=0.0))
     with pytest.raises(ConfigError, match="housekeeping_interval_seconds"):
+        config.validate()
+
+
+# --- weather (Minie Persona UI workstream) ----------------------------------------------
+
+
+def test_default_weather_config_is_valid():
+    AppConfig(weather=WeatherConfig()).validate()
+
+
+def test_blank_weather_provider_raises():
+    config = AppConfig(weather=WeatherConfig(provider="  "))
+    with pytest.raises(ConfigError, match="weather.provider"):
+        config.validate()
+
+
+@pytest.mark.parametrize("latitude", [-90.5, 90.5])
+def test_weather_latitude_out_of_range_raises(latitude):
+    config = AppConfig(weather=WeatherConfig(latitude=latitude, longitude=0.0))
+    with pytest.raises(ConfigError, match="weather.latitude"):
+        config.validate()
+
+
+@pytest.mark.parametrize("longitude", [-180.5, 180.5])
+def test_weather_longitude_out_of_range_raises(longitude):
+    config = AppConfig(weather=WeatherConfig(latitude=0.0, longitude=longitude))
+    with pytest.raises(ConfigError, match="weather.longitude"):
+        config.validate()
+
+
+def test_weather_config_with_valid_coordinates_is_valid():
+    AppConfig(weather=WeatherConfig(latitude=28.4, longitude=77.0)).validate()
+
+
+def test_non_positive_weather_cache_ttl_seconds_raises():
+    config = AppConfig(weather=WeatherConfig(cache_ttl_seconds=0.0))
+    with pytest.raises(ConfigError, match="weather.cache_ttl_seconds"):
+        config.validate()
+
+
+def test_non_positive_weather_request_timeout_seconds_raises():
+    config = AppConfig(weather=WeatherConfig(request_timeout_seconds=0.0))
+    with pytest.raises(ConfigError, match="weather.request_timeout_seconds"):
         config.validate()

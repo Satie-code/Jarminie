@@ -67,14 +67,35 @@ own docstring).
 `PresentationHostWidget`) is now ALSO forwarded to `HudShell`, which
 wires it to a resource-aware `AnimationManager` — no new constructor
 parameter here, just one already-held object reaching one more place.
+
+**Minie Persona UI workstream**: the central widget is now a
+`QStackedWidget` holding `HudShell` (Jarvis) and `ui/minie/minie_shell.py`'s
+`MinieShell` (Minie) as sibling pages, switched by `_sync_persona_stack()`
+(a `QTimer` reading `PresentationController.mounted_persona_name` — no
+signal exists for "the mounted renderer changed," the identical gap
+`PresentationHostWidget`'s own docstring already documents and polls
+for, one level up here). Three new constructor collaborators —
+`avatar_renderer`/`emotional_state_manager`/`weather_service` — are the
+same instances `main.py` already constructs (the first two inside
+`_construct_level5_modules()`, before `avatar_renderer` is wrapped in
+`MinieRenderer`), threaded through here only because `MinieShell`'s own
+Qt-layer assembly needs them and cannot happen before this composition
+step, mirroring every earlier Level 5 handle's own reason for being
+threaded through this file. `MinieShell`'s own `minimize_requested`/
+`maximize_requested`/`close_requested` connect to real `QMainWindow`
+methods here — that widget owns no window reference of its own, by
+design (see its own docstring).
 """
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QAction, QCloseEvent
-from PySide6.QtWidgets import QMainWindow, QMenu
+from PySide6.QtWidgets import QMainWindow, QMenu, QStackedWidget
 
 from core.logging_setup import get_logger
 from core.manager import CoreManager
 from device_control.action_engine import ActionRegistry
+from emotion.state_manager import EmotionalStateManager
+from presentation.avatar_renderer import AvatarRenderer
 from presentation.jarvis_renderer import JarvisRenderer
 from presentation.minie_renderer import MinieRenderer
 from presentation.presentation_controller import PresentationController
@@ -82,8 +103,10 @@ from presentation.presentation_host_widget import PresentationHostWidget
 from presentation.qt_transition_overlay import QtTransitionOverlay
 from presentation.transition_engine import TransitionEngine
 from scheduler.calendar_store import CalendarStore
+from services.weather_service import WeatherService
 from ui.debug_console import DebugConsole
 from ui.jarvis.hud_shell import HudShell
+from ui.minie.minie_shell import MinieShell
 from ui.runtime_diagnostics_panel import RuntimeDiagnosticsPanel
 from ui.settings_window import SettingsWindow
 from voice.pipeline import CommunicationPipeline
@@ -117,9 +140,13 @@ class MainWindow(QMainWindow):
         action_registry: ActionRegistry,
         voice_session_manager: VoiceSessionManager,
         pipeline: CommunicationPipeline,
+        avatar_renderer: AvatarRenderer,
+        emotional_state_manager: EmotionalStateManager,
+        weather_service: WeatherService,
     ) -> None:
         super().__init__()
         self._core_manager = core_manager
+        self._presentation_controller = presentation_controller
         self._debug_console: DebugConsole | None = None
         self._runtime_diagnostics_panel: RuntimeDiagnosticsPanel | None = None
         self.setWindowTitle("JARMINEI")
@@ -144,7 +171,39 @@ class MainWindow(QMainWindow):
             pipeline,
             jarvis_renderer,
         )
-        self.setCentralWidget(self._hud_shell)
+
+        # Minie Persona UI workstream: MinieShell is Jarvis's HudShell's
+        # sibling, not a variant of it — the two personas "must feel like
+        # two completely different interfaces belonging to the same AI
+        # system," per this workstream's own brief. Both are built
+        # up-front (neither is deferred/lazily constructed) and held as
+        # sibling pages of one QStackedWidget, switched on persona change
+        # by _sync_persona_stack() below — HudShell's own embedded
+        # PresentationHostWidget/JarvisRenderer are unaffected either way.
+        # Building MinieShell is safe/cheap even when Jarvis is the
+        # active persona: see that class's own docstring — nothing in
+        # its own construction touches a heavy AI subsystem or connects
+        # to VTube Studio (that stays lazy, gated on Minie actually being
+        # mounted, exactly as it already was before this workstream).
+        self._minie_shell = MinieShell(
+            core_manager,
+            avatar_renderer,
+            presentation_controller,
+            emotional_state_manager,
+            voice_session_manager,
+            calendar_store,
+            pipeline,
+            weather_service,
+        )
+        self._minie_shell.minimize_requested.connect(self.showMinimized)
+        self._minie_shell.maximize_requested.connect(self._toggle_maximize_restore)
+        self._minie_shell.close_requested.connect(self.close)
+        self._minie_shell.settings_requested.connect(self._open_settings)
+
+        self._persona_stack = QStackedWidget()
+        self._persona_stack.addWidget(self._hud_shell)
+        self._persona_stack.addWidget(self._minie_shell)
+        self.setCentralWidget(self._persona_stack)
 
         self._transition_overlay = QtTransitionOverlay(self._presentation_host)
         transition_engine.set_overlay(self._transition_overlay)
@@ -153,6 +212,18 @@ class MainWindow(QMainWindow):
         self._hud_shell.navigation_rail.settings_requested.connect(self._open_settings)
         self._hud_shell.navigation_rail.system_requested.connect(self._open_runtime_diagnostics)
         self._hud_shell.system_stats_requested.connect(self._open_runtime_diagnostics)
+
+        # No signal exists anywhere for "the mounted renderer changed"
+        # (presentation/presentation_host_widget.py's own docstring
+        # confirms this — it already polls for the identical gap) — this
+        # timer is that same established pattern, one level up: which
+        # PAGE of _persona_stack is shown, not just which widget
+        # PresentationHostWidget itself embeds.
+        self._persona_sync_timer = QTimer(self)
+        self._persona_sync_timer.setInterval(core_manager.ui_config().status_refresh_interval_ms)
+        self._persona_sync_timer.timeout.connect(self._sync_persona_stack)
+        self._persona_sync_timer.start()
+        self._sync_persona_stack()
 
     def refresh_presentation_host(self) -> None:
         """Sprint 5.14: PresentationController.start() (which mounts the
@@ -187,6 +258,35 @@ class MainWindow(QMainWindow):
         self._open_runtime_diagnostics_action = QAction("Open Runtime Diagnostics", self)
         self._open_runtime_diagnostics_action.triggered.connect(self._open_runtime_diagnostics)
         self._debug_menu.addAction(self._open_runtime_diagnostics_action)
+
+    def _sync_persona_stack(self) -> None:
+        """Fail Gracefully: a transient PresentationController read
+        failure keeps whichever page is already showing rather than
+        crashing the recurring QTimer callback — the same shape every
+        other polling widget in this app already establishes. An
+        unrecognized/None mounted_persona_name (nothing mounted yet, or
+        a persona name with no page here) is a no-op, not an error —
+        matches PresentationController.mounted_persona_name's own
+        documented "None if nothing is mounted" contract."""
+        try:
+            mounted_persona_name = self._presentation_controller.mounted_persona_name
+        except Exception:
+            logger.exception(
+                "Main window failed to read the mounted persona; keeping the current page."
+            )
+            return
+
+        target_widget = {"jarvis": self._hud_shell, "minie": self._minie_shell}.get(
+            mounted_persona_name
+        )
+        if target_widget is not None and self._persona_stack.currentWidget() is not target_widget:
+            self._persona_stack.setCurrentWidget(target_widget)
+
+    def _toggle_maximize_restore(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
 
     def _open_settings(self) -> None:
         """Open the Settings dialog, seeded from Core Manager's current

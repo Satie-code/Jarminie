@@ -51,12 +51,15 @@ from core.logging_setup import get_logger
 from core.manager import CoreManager
 from core.runtime_manager import ServiceTier
 from device_control.action_engine import ActionRegistry
+from emotion.state_manager import EmotionalStateManager
 from presentation import theme
+from presentation.avatar_renderer import AvatarRenderer
 from presentation.jarvis_renderer import JarvisRenderer
 from presentation.minie_renderer import MinieRenderer
 from presentation.presentation_controller import PresentationController
 from presentation.transition_engine import TransitionEngine
 from scheduler.calendar_store import CalendarStore
+from services.weather_service import WeatherService
 from ui.main_window import MainWindow
 from voice.pipeline import CommunicationPipeline
 from voice.session_manager import VoiceSessionManager
@@ -74,11 +77,24 @@ def run_app(
     action_registry: ActionRegistry,
     voice_session_manager: VoiceSessionManager,
     pipeline: CommunicationPipeline,
+    avatar_renderer: AvatarRenderer,
+    emotional_state_manager: EmotionalStateManager,
+    weather_service: WeatherService,
 ) -> int:
     """Start Tier A, show the main window, warm up Tier B/C in the
     background, and run the Qt event loop.
 
     Returns the process exit code (from QApplication.exec()).
+
+    Minie Persona UI workstream: gains three new handles
+    (avatar_renderer/emotional_state_manager/weather_service), threaded
+    straight through to MainWindow for the same reason every earlier
+    Level 5 handle already is here — MainWindow's own Qt-layer assembly
+    (now including MinieShell) cannot happen before this function's own
+    QApplication exists. avatar_renderer/emotional_state_manager are the
+    exact same instances main.py already constructs inside
+    _construct_level5_modules() (before wrapping the former in
+    MinieRenderer) — not new objects, just newly threaded here.
     """
     # QApplication.instance() or ... rather than an unconditional
     # QApplication(sys.argv): PySide6 raises RuntimeError on a second
@@ -93,7 +109,10 @@ def run_app(
     # after QApplication exists and before any widget is constructed, so
     # every widget (including MainWindow's own children below) picks up
     # the theme from its very first paint rather than a visible flash of
-    # Qt's own default style.
+    # Qt's own default style. Minie's own theme (presentation/minie_theme.py)
+    # is deliberately NOT applied here — it is scoped to MinieShell's own
+    # subtree only; see that module's own docstring for why an app-wide
+    # call here would clobber this one.
     theme.apply_dark_theme(app)
     window = MainWindow(
         core_manager,
@@ -105,6 +124,9 @@ def run_app(
         action_registry,
         voice_session_manager,
         pipeline,
+        avatar_renderer,
+        emotional_state_manager,
+        weather_service,
     )
 
     startup_started_at = time.monotonic()

@@ -14,6 +14,7 @@ import pytest
 
 from config.schema import AppConfig, PresentationConfig, ResourceThresholds, UIConfig
 from core.resource_monitor import ResourceSnapshot
+from emotion.state_manager import EmotionalState
 
 
 @pytest.fixture
@@ -99,11 +100,32 @@ def mock_presentation_handles():
     current_session_state() return value dict.get() doesn't recognize
     (a bare MagicMock included, not just a real SessionState), and
     CommandBar never calls pipeline.submit_text() until a user actually
-    submits input, which no construction-only test does."""
+    submits input, which no construction-only test does.
+
+    Minie Persona UI workstream: three more constructor parameters
+    (avatar_renderer/emotional_state_manager/weather_service) — MainWindow
+    now also builds a real MinieShell. presentation_controller.
+    last_state_for() returns None (its own real, documented "nothing
+    computed yet" default — see PresentationController's own docstring),
+    emotional_state_manager.current_state() returns a real EmotionalState
+    (so MinieUiStateAdapter's derive_display_emotions() call does real
+    arithmetic against real floats rather than MagicMock attributes),
+    and avatar_renderer.is_connected() returns a real False — the same
+    "real value, not a bare MagicMock, wherever a widget does real work
+    with the result" discipline this fixture already applies to
+    calendar_store above."""
     calendar_store = MagicMock()
     calendar_store.list_due_within.return_value = []
+    presentation_controller = MagicMock()
+    presentation_controller.last_state_for.return_value = None
+    emotional_state_manager = MagicMock()
+    emotional_state_manager.current_state.return_value = EmotionalState()
+    avatar_renderer = MagicMock()
+    avatar_renderer.is_connected.return_value = False
+    weather_service = MagicMock()
+    weather_service.current.return_value = None
     return {
-        "presentation_controller": MagicMock(),
+        "presentation_controller": presentation_controller,
         "jarvis_renderer": MagicMock(),
         "minie_renderer": MagicMock(),
         "transition_engine": MagicMock(),
@@ -111,4 +133,7 @@ def mock_presentation_handles():
         "action_registry": MagicMock(),
         "voice_session_manager": MagicMock(),
         "pipeline": MagicMock(),
+        "avatar_renderer": avatar_renderer,
+        "emotional_state_manager": emotional_state_manager,
+        "weather_service": weather_service,
     }

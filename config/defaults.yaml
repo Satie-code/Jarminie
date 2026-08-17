@@ -543,6 +543,21 @@ presentation:
   greeting_idle_threshold_seconds: 3600.0
   celebration_significance_threshold: 0.75
 
+# Minie Persona UI workstream. Powers ui/minie/weather_panel.py only.
+# latitude/longitude/location_name are deliberately null (unconfigured)
+# by default — no location is ever guessed from IP/OS/network. Set all
+# three (e.g. via local.yaml) to enable real weather; the panel shows an
+# honest "Weather unavailable" state until then. Also gated by
+# internet.enabled (services/weather_service.py's own docstring).
+weather:
+  enabled: true
+  provider: "open_meteo"
+  latitude: null
+  longitude: null
+  location_name: null
+  cache_ttl_seconds: 1800.0
+  request_timeout_seconds: 5.0
+
 analytics:
   # Sprint 5.17 — Usage & Habit Tracking. analytics/usage_tracker.py's
   # UsageTracker samples the real foreground window/process this often.
